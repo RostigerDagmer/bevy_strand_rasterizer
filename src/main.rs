@@ -1,4 +1,7 @@
+use std::hash::Hash;
+
 use bevy::core_pipeline::core_3d::graph::Core3d;
+use bevy::ecs::label::DynHash;
 use bevy::ecs as bevy_ecs;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
@@ -10,6 +13,8 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::storage::GpuShaderStorageBuffer;
 use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::view::ViewUniform;
+use bevy::render::view::ViewUniforms;
 use bevy::render::{render_resource::*, Render, RenderApp};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
@@ -48,6 +53,21 @@ struct StrandComputePipeline {
 #[repr(C)]
 struct PushConstants {
     stub: u32, // stub in case we need push constants
+}
+
+#[derive(Component, Clone)]
+pub struct FroxelConfig {
+    screen_width: u32,
+    screen_height: u32,
+    froxel_size_x: u32,
+    froxel_size_y: u32,
+    depth_slices: u32,
+    aabb_min_x: u32,
+    aabb_min_y: u32,
+    aabb_min_z: f32,
+    aabb_max_x: u32,
+    aabb_max_y: u32,
+    aabb_max_z: f32,
 }
 
 pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
@@ -149,24 +169,20 @@ pub struct StrandAssetResources {
 #[derive(Debug, Clone, Default)]
 pub struct StrandRasterizerNode;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct StrandRasterizerLabel;
+
 impl RenderLabel for StrandRasterizerLabel {
-    #[doc = r" Clones this `"]
-    #[doc = stringify!(RenderLabel)]
-    #[doc = r"`."]
-    fn dyn_clone(&self) -> bevy_ecs::label::Box<dyn RenderLabel> {
-        todo!()
+    fn dyn_clone(&self) -> Box<dyn RenderLabel> {
+        Box::new(self.clone())
     }
 
-    #[doc = r" Casts this value to a form where it can be compared with other type-erased values."]
     fn as_dyn_eq(&self) -> &dyn bevy_ecs::label::DynEq {
-        todo!()
+        self
     }
 
-    #[doc = r" Feeds this value into the given [`Hasher`]."]
     fn dyn_hash(&self, state: &mut dyn ::core::hash::Hasher) {
-        todo!()
+        std::any::TypeId::of::<Self>().dyn_hash(state);
     }
 }
 
@@ -238,19 +254,151 @@ pub fn set_strand_geometry(
     mut commands: Commands
 ) {
     for (entity, strand_asset) in query.iter() {
-        let vertices = todo!();
+        let Some(asset) = assets.get(&strand_asset.handle) else {
+            continue;
+        };
+        
+        let Some(geometry_library) = &asset.dson_file.geometry_library else {
+            warn!("Geometry library not found for entity: {:?}", entity);
+            continue;
+        };
+        
+        if geometry_library.is_empty() {
+            warn!("Geometry library is empty for entity: {:?}", entity);
+            continue;
+        }
+        
+        let geometry = &geometry_library[0];
+        // Extract vertices
+        let vertices: Vec<[f32; 3]> = geometry.vertices.values.clone();
         let vertex_buffer = ShaderStorageBuffer::from(vertices);
-        info!("Weights buffer: {:?}", vertex_buffer);
+        info!("Vertex buffer: {:?}", vertex_buffer);
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
-        let indices = todo!();
-        let index_buffer = ShaderStorageBuffer::from(indices);
+        
+        // Extract indices from polyline_list
+        let Some(polyline_list) = &geometry.polyline_list else {
+            warn!("Polyline list not found for entity: {:?}", entity);
+            continue;
+        };
+        
+        // Flatten the polyline indices
+        // For each strand in values, skip first two elements (group_idx, mat_group_idx)
+        // and collect the vertex indices
+        let mut strand_indices = Vec::new();
+        
+        for strand in &polyline_list.values {
+            if strand.len() < 3 {  // Need at least one vertex index
+                continue;
+            }
+            
+            // Skip first two values (group_idx, mat_group_idx)
+            let vertex_indices = &strand[2..];
+            strand_indices.extend_from_slice(vertex_indices);
+            
+            // Add a separator (u32::MAX) to mark end of strand
+            strand_indices.push(u32::MAX);
+        }
+        
+        let index_buffer = ShaderStorageBuffer::from(strand_indices);
+        info!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
+        
         commands.entity(entity).insert(StrandGeometry {
             vertices: vertex_buffer_handle,
             indices: index_buffer_handle
         });
     }
 }
+
+// pub fn calculate_strand_aabb(
+//     query: Query<(Entity, &StrandGeometry, &GlobalTransform)>,
+//     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+//     view: Res<ViewUniforms>,
+//     mut strand_rasterizer_resources: ResMut<StrandRasterizerResources>,
+// ) {
+//     for (entity, geometry, transform) in query.iter() {
+//         let Some(vertex_buffer) = storage_buffers.get(&geometry.vertices) else {
+//             continue;
+//         };
+        
+//         // Read vertex data to calculate AABB
+//         // This is a simplified approach - in practice, we'd do this on the GPU
+//         let vertices: &[Vec3] = vertex_buffer.buffer.mapped_slice().unwrap();
+        
+//         // Initialize with extreme values
+//         let mut min_pos = Vec3::splat(f32::MAX);
+//         let mut max_pos = Vec3::splat(f32::MIN);
+        
+//         // Find world-space AABB
+//         for &vertex_pos in vertices {
+//             // Transform vertex to world space
+//             let world_pos = transform.transform_point(vertex_pos);
+            
+//             // Update min/max
+//             min_pos = min_pos.min(world_pos);
+//             max_pos = max_pos.max(world_pos);
+//         }
+        
+//         // Transform AABB corners to screen space
+//         let view_proj = view.uniforms.view_proj;
+//         let mut screen_min = Vec2::splat(f32::MAX);
+//         let mut screen_max = Vec2::splat(f32::MIN);
+//         let mut depth_min = 1.0;
+//         let mut depth_max = 0.0;
+        
+//         // Check all 8 corners of the AABB
+//         for i in 0..8 {
+//             let x = if i & 1 != 0 { max_pos.x } else { min_pos.x };
+//             let y = if i & 2 != 0 { max_pos.y } else { min_pos.y };
+//             let z = if i & 4 != 0 { max_pos.z } else { min_pos.z };
+            
+//             let world_pos = Vec3::new(x, y, z);
+//             let clip_pos = view_proj * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+            
+//             // Perspective divide
+//             let ndc = clip_pos.xyz() / clip_pos.w;
+            
+//             // Convert to screen space
+//             let screen_x = (ndc.x * 0.5 + 0.5) * view.viewport.z;
+//             let screen_y = (ndc.y * 0.5 + 0.5) * view.viewport.w;
+//             let depth = ndc.z * 0.5 + 0.5; // Convert to [0, 1] range
+            
+//             screen_min = screen_min.min(Vec2::new(screen_x, screen_y));
+//             screen_max = screen_max.max(Vec2::new(screen_x, screen_y));
+//             depth_min = depth_min.min(depth);
+//             depth_max = depth_max.max(depth);
+//         }
+        
+//         // Convert to froxel coordinates
+//         let froxel_size_x = 8; // Should match shader constants
+//         let froxel_size_y = 8;
+//         let depth_slices = 16;
+        
+//         let froxel_min_x = (screen_min.x / froxel_size_x as f32).floor() as u32;
+//         let froxel_min_y = (screen_min.y / froxel_size_y as f32).floor() as u32;
+//         let froxel_min_z = depth_min;
+        
+//         let froxel_max_x = (screen_max.x / froxel_size_x as f32).ceil() as u32;
+//         let froxel_max_y = (screen_max.y / froxel_size_y as f32).ceil() as u32;
+//         let froxel_max_z = depth_max;
+        
+//         // Store AABB for this entity
+//         // (Assuming we have a map from entity to froxel config in resources)
+//         strand_rasterizer_resources.entity_froxel_config.insert(entity, FroxelConfig {
+//             screen_width: view.viewport.z as u32,
+//             screen_height: view.viewport.w as u32,
+//             froxel_size_x,
+//             froxel_size_y,
+//             depth_slices,
+//             aabb_min_x: froxel_min_x,
+//             aabb_min_y: froxel_min_y,
+//             aabb_min_z: froxel_min_z,
+//             aabb_max_x: froxel_max_x,
+//             aabb_max_y: froxel_max_y,
+//             aabb_max_z: froxel_max_z,
+//         });
+//     }
+// }
 
 // render world buffer retrieval
 pub fn use_strand_geometry(
@@ -295,9 +443,10 @@ fn debug_print_geo(query: Query<&StrandAsset>, assets: Res<Assets<DsonAsset>>) {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(StrandRasterizerPlugin)
         .init_asset::<DsonAsset>()
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
-        .add_systems(Update, debug_print_geo)
+        // .add_systems(Update, debug_print_geo)
         .run();
 }
