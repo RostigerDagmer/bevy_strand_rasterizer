@@ -34,7 +34,7 @@ pub struct StrandRasterizerPlugin;
 
 impl Plugin for StrandRasterizerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((ExtractComponentPlugin::<Strands>::default(),));
+        app.add_plugins((ExtractComponentPlugin::<Strands>::default(), ExtractComponentPlugin::<FroxelConfig>::default()));
         app.init_resource::<StrandAssetResources>();
         app.add_systems(Update, set_strand_geometry)
             .add_systems(Render, render_strand_rasterizer);
@@ -45,8 +45,9 @@ impl Plugin for StrandRasterizerPlugin {
 #[derive(Resource)]
 struct StrandComputePipeline {
     // stub
-    layout: BindGroupLayout,
-    pipeline: CachedComputePipelineId,
+    bind_group_layout: BindGroupLayout,
+    binning_pipeline: CachedComputePipelineId,
+    rasterize_pipeline: CachedComputePipelineId,
 }
 
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
@@ -55,7 +56,8 @@ struct PushConstants {
     stub: u32, // stub in case we need push constants
 }
 
-#[derive(Component, Clone)]
+#[derive(Component, ExtractComponent, Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
 pub struct FroxelConfig {
     screen_width: u32,
     screen_height: u32,
@@ -68,11 +70,31 @@ pub struct FroxelConfig {
     aabb_max_x: u32,
     aabb_max_y: u32,
     aabb_max_z: f32,
+    _padding: [u32; 4],
+}
+impl Default for FroxelConfig {
+    fn default() -> Self {
+        Self {
+            screen_width: 1920,
+            screen_height: 1080,
+            froxel_size_x: 8,
+            froxel_size_y: 8,
+            depth_slices: 16,
+            aabb_min_x: 0,
+            aabb_min_y: 0,
+            aabb_min_z: 0.0,
+            aabb_max_x: 1920 / 8,
+            aabb_max_y: 1080 / 8,
+            aabb_max_z: 1.0,
+            _padding: [0; 4],
+        }
+    }
 }
 
+// Update the bind group layout to include froxel buffer and config
 pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
     device.create_bind_group_layout(
-        "bind_group_layout_label",
+        "strand_rasterizer_bind_group_layout",
         &[
             // Vertex buffer (read-only storage buffer)
             BindGroupLayoutEntry {
@@ -118,41 +140,225 @@ pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
                 },
                 count: None,
             },
+            // Froxel configuration (uniform buffer)
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // View-Projection matrix (uniform buffer)
+            BindGroupLayoutEntry {
+                binding: 5,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     )
+}
+
+// Create the bind group for the strand rasterizer
+pub fn create_strand_bind_group(
+    device: &RenderDevice,
+    layout: &BindGroupLayout,
+    vertex_buffer: &Buffer,
+    index_buffer: &Buffer,
+    froxel_buffer: &Buffer,
+    output_texture: &TextureView,
+    froxel_config_buffer: &Buffer,
+    view_buffer: &Buffer,
+) -> BindGroup {
+    device.create_bind_group(
+        Some("strand_rasterizer_bind_group"),
+        layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: index_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: froxel_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(output_texture),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: froxel_config_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: view_buffer.as_entire_binding(),
+            },
+        ],
+    )
+}
+
+// Create froxel buffer based on screen dimensions and froxel size
+pub fn create_froxel_buffer(
+    device: &RenderDevice,
+    config: &FroxelConfig,
+) -> (Buffer, (u32, u32, u32)) {
+    // Calculate froxel grid dimensions
+    let froxels_x = (config.screen_width + config.froxel_size_x - 1) / config.froxel_size_x;
+    let froxels_y = (config.screen_height + config.froxel_size_y - 1) / config.froxel_size_y;
+    let froxels_z = config.depth_slices;
+    
+    let froxel_count = froxels_x * froxels_y * froxels_z;
+    
+    // Define maximum strands per froxel
+    const MAX_STRANDS_PER_FROXEL: u32 = 256;
+    
+    // Calculate buffer size:
+    // - 4 bytes for the strand count (atomic<u32>)
+    // - 4 bytes per strand index * MAX_STRANDS_PER_FROXEL
+    let strand_indices_size = MAX_STRANDS_PER_FROXEL * 4;
+    let froxel_size = 4 + strand_indices_size;
+    let buffer_size = froxel_count * froxel_size;
+    
+    // Create the buffer
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("strand_froxel_buffer"),
+        size: buffer_size as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    
+    // Initialize buffer with zeros (important for atomic counters)
+    let mut mapped = buffer.slice(..).get_mapped_range_mut();
+    for byte in mapped.iter_mut() {
+        *byte = 0;
+    }
+    drop(mapped);
+    buffer.unmap();
+    
+    info!(
+        "Created froxel buffer with dimensions {}x{}x{} ({} froxels, {} bytes)",
+        froxels_x, froxels_y, froxels_z, froxel_count, buffer_size
+    );
+    
+    (buffer, (froxels_x, froxels_y, froxels_z))
+}
+
+
+// Create froxel configuration uniform buffer
+pub fn create_froxel_config_buffer(
+    device: &RenderDevice,
+    config: &FroxelConfig,
+) -> Buffer {
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("strand_froxel_config_buffer"),
+        size: std::mem::size_of::<FroxelConfig>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    
+    // Initialize with configuration
+    let mut mapped = buffer.slice(..).get_mapped_range_mut();
+    mapped.copy_from_slice(bytemuck::bytes_of(config));
+    drop(mapped);
+    buffer.unmap();
+    
+    buffer
+}
+
+// Create output texture for the rasterizer
+pub fn create_output_texture(
+    device: &RenderDevice,
+    config: &FroxelConfig,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_rasterizer_output"),
+        size: Extent3d {
+            width: config.screen_width,
+            height: config.screen_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    
+    (texture, view)
 }
 
 impl FromWorld for StrandComputePipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
-        let layout = create_bind_group_layout(device);
+        let bind_group_layout = create_bind_group_layout(device);
 
-        let shader = world.load_asset("shaders/strand_rasterizer.wgsl");
+        let shader_loader = world.resource::<AssetServer>();
+        let binning_shader = shader_loader.load("shaders/strand_binning.wgsl");
+        let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
 
-        let pipeline_cache = world.get_resource::<PipelineCache>().unwrap();
+        let pipeline_cache = world.resource::<PipelineCache>();
 
-        let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("morph_compute_pipeline".into()),
-            layout: vec![layout.clone()],
-            shader,
+        let binning_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_binning_pipeline".into()),
+            layout: vec![bind_group_layout.clone()],
+            shader: binning_shader,
             shader_defs: vec![],
             push_constant_ranges: vec![PushConstantRange {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
             }],
-            entry_point: "main".into(),
+            entry_point: "bin_strands".into(),
             zero_initialize_workgroup_memory: false,
         });
-        info!("Created compute pipeline {:?}", pipeline);
 
-        StrandComputePipeline { layout, pipeline }
+        let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_rasterize_pipeline".into()),
+            layout: vec![bind_group_layout.clone()],
+            shader: rasterize_shader,
+            shader_defs: vec![],
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: "rasterize_strands".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        info!("Created strand compute pipelines: binning={:?}, rasterize={:?}", 
+              binning_pipeline, rasterize_pipeline);
+
+        StrandComputePipeline {
+            bind_group_layout,
+            binning_pipeline,
+            rasterize_pipeline,
+        }
     }
 }
+
 
 #[derive(Resource)]
 pub struct StrandRasterizerResources {
     pub pipeline: ComputePipeline,
     pub bind_group: BindGroup,
+    pub froxel_buffer: Buffer,
+    pub froxel_config_buffer: Buffer,
+    pub output_texture: TextureView,
+    pub froxel_dimensions: (u32, u32, u32), // (width, height, depth)
 }
 
 #[derive(Clone, Debug)]
@@ -193,24 +399,49 @@ impl Node for StrandRasterizerNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        // Check if we have resources
+        if !world.contains_resource::<StrandRasterizerResources>() {
+            return Ok(());
+        }
+        
         let pipeline_cache = world.resource::<PipelineCache>();
-        let resources = world.resource::<StrandComputePipeline>();
-        let asset_instances = world.resource::<StrandAssetResources>();
-
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(resources.pipeline) else {
-            warn!("Pipeline not ready");
+        let strand_pipeline = world.resource::<StrandComputePipeline>();
+        let resources = world.resource::<StrandRasterizerResources>();
+        
+        // Get the binning pipeline
+        let Some(binning_pipeline) = pipeline_cache.get_compute_pipeline(strand_pipeline.binning_pipeline) else {
+            warn!("Strand binning pipeline not ready");
             return Ok(());
         };
-        for (_, instance) in asset_instances.instances.iter() {
+        
+        // Get the dimensions to calculate dispatch size
+        let (froxels_x, froxels_y, froxels_z) = resources.froxel_dimensions;
+        
+        // Execute the binning pass
+        {
             let mut pass = render_context
                 .command_encoder()
                 .begin_compute_pass(&ComputePassDescriptor::default());
-
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &instance.bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1); // TODO: Calculate proper workgroup sizes
+            
+            pass.set_pipeline(binning_pipeline);
+            pass.set_bind_group(0, &resources.bind_group, &[]);
+            
+            // TODO: Calculate the number of strands to process
+            // For now, use a fixed number for testing
+            let strand_count = 100;
+            
+            // Round up to workgroup size (64)
+            let workgroups_x = (strand_count + 63) / 64;
+            info!("Dispatching binning pipeline");
+            pass.dispatch_workgroups(workgroups_x, 1, 1);
         }
-
+        
+        // For now, we'll skip the rasterization pass
+        // In a future implementation, we would:
+        // 1. Wait for the binning pass to complete
+        // 2. Execute the rasterization pass
+        // 3. Integrate with the PBR pipeline
+        
         Ok(())
     }
 }
@@ -238,6 +469,11 @@ fn setup_render_graph(app: &mut App) {
             Core3d,
             // It also needs the label of the node
             StrandRasterizerLabel,
+        )
+        .add_render_graph_edge(
+            Core3d, 
+            StrandRasterizerLabel, 
+            bevy::core_pipeline::core_3d::graph::Node3d::MainOpaquePass,
         );
     // TODO: Add edges to connect to other nodes (e.g., before main pass)
 }
@@ -247,7 +483,7 @@ fn render_strand_rasterizer(world: &mut World) {
 }
 
 // main world buffer initialization
-pub fn set_strand_geometry(
+fn set_strand_geometry(
     query: Query<(Entity, &StrandAsset), Without<StrandGeometry>>, 
     assets: Res<Assets<DsonAsset>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
@@ -310,6 +546,22 @@ pub fn set_strand_geometry(
     }
 }
 
+
+fn set_froxel_buffer(
+    query: Query<(Entity, &FroxelConfig), Added<FroxelConfig>>,
+    device: Res<RenderDevice>,
+    mut raster_resources: ResMut<StrandRasterizerResources>
+) {
+    for (entity, config) in query.iter() {
+        let (froxel_buffer, size) = create_froxel_buffer(&device, config);
+        let config_buffer = create_froxel_config_buffer(&device, config);
+        // modify the resource
+        raster_resources.froxel_buffer = froxel_buffer;
+        raster_resources.froxel_config_buffer = config_buffer;
+        raster_resources.froxel_dimensions = size;
+        info!("Added froxel buffers to resource");
+    }
+}
 // pub fn calculate_strand_aabb(
 //     query: Query<(Entity, &StrandGeometry, &GlobalTransform)>,
 //     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
@@ -407,6 +659,9 @@ pub fn use_strand_geometry(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
+    pipeline: Res<StrandComputePipeline>,
+    raster_resources: Res<StrandRasterizerResources>,
+    // asset_resources: Res<StrandAssetResources>
 ) {
     // This is an example of how to retrieve the shader storage buffer created in the main world above
     // and use it in the render world.
@@ -415,6 +670,11 @@ pub fn use_strand_geometry(
             warn!("Index storage buffer not found for entity: {:?}", entity);
             continue;
         };
+        let Some(vertex_storage_buffer) = storage_buffers.get(&geometry.vertices) else {
+            warn!("Vertex storage buffer not found for entity: {:?}", entity);
+            continue;
+        };
+        create_strand_bind_group(&device, &pipeline.bind_group_layout, &vertex_storage_buffer.buffer, &index_storage_buffer.buffer, &raster_resources.froxel_buffer, &raster_resources.output_texture, &raster_resources.froxel_config_buffer, &raster_resources.);
     }
 }
 
@@ -426,6 +686,12 @@ struct StrandAsset {
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
     commands.spawn((StrandAsset { handle }));
+
+    commands.spawn((
+        Camera3d::default(),
+        FroxelConfig::default(),
+        Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
+    ));
 }
 
 fn debug_print_geo(query: Query<&StrandAsset>, assets: Res<Assets<DsonAsset>>) {
