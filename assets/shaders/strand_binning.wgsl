@@ -1,4 +1,5 @@
 // Constants
+#import bevy_render::view::View
 const MAX_STRANDS_PER_FROXEL: u32 = 256u;
 
 // Structures
@@ -19,9 +20,8 @@ struct FroxelConfig {
     aabb_max_x: u32,
     aabb_max_y: u32,
     aabb_max_z: f32,
-    
     // Padding
-    _padding: vec4<u32>,
+    // _padding: vec4<u32>,
 }
 
 // We need an explicit structure for the atomic counter
@@ -29,19 +29,27 @@ struct FroxelCounter {
     count: atomic<u32>,
 }
 
-// View uniform buffer structure
-struct View {
-    view_proj: mat4x4<f32>,
-    // Other view data that might be in the uniform buffer - we only need view_proj
+struct FroxelTile {
+    // Each froxel contains a counter followed by strand indices
+    data: array<atomic<u32>>,
+    // z_min: f32,
+    // z_max: f32,
+}
+
+struct PushConstants {
+    // Strand count
+    strand_count: u32,
 }
 
 // Bindings
 @group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> strand_indices: array<u32>;
-@group(0) @binding(2) var<storage, read_write> froxel_data: array<u32>;
+@group(0) @binding(2) var<storage, read_write> froxel_data: array<atomic<u32>>;
 @group(0) @binding(3) var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var<uniform> config: FroxelConfig;
 @group(0) @binding(5) var<uniform> view: View;
+
+var<push_constant> push_constants: PushConstants;
 
 // Helper function to calculate froxel index from 3D coordinates
 fn calculate_froxel_index(x: u32, y: u32, z: u32) -> u32 {
@@ -52,21 +60,19 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32) -> u32 {
 }
 
 // Helper function to get the counter for a froxel
-fn get_froxel_counter(froxel_idx: u32) -> ptr<storage, atomic<u32>, read_write> {
-    let counter_offset = froxel_idx * (1u + MAX_STRANDS_PER_FROXEL);
-    return &froxel_data[counter_offset];
+fn get_froxel_offset(froxel_idx: u32) -> u32 {
+    return froxel_idx * (1u + MAX_STRANDS_PER_FROXEL);
 }
 
 // Helper function to get the strand indices array for a froxel
-fn get_froxel_strands(froxel_idx: u32, idx: u32) -> ptr<storage, u32, read_write> {
-    let base_offset = froxel_idx * (1u + MAX_STRANDS_PER_FROXEL);
-    return &froxel_data[base_offset + 1u + idx];
+fn get_froxel_strand_offset(froxel_idx: u32) -> u32 {
+    return froxel_idx * (1u + MAX_STRANDS_PER_FROXEL);
 }
 
 // Helper function to transform vertex to screen space
 fn world_to_screen(position: vec3<f32>) -> vec3<f32> {
     // Apply view-projection matrix
-    let clip_pos = view.view_proj * vec4<f32>(position, 1.0);
+    let clip_pos = view.view_from_world * vec4<f32>(position, 1.0);
     
     // Convert to NDC space
     let ndc = clip_pos.xyz / clip_pos.w;
@@ -92,7 +98,9 @@ fn add_strand_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, strand_id: 
     }
     
     let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z);
-    let counter_ptr = get_froxel_counter(froxel_idx);
+    let counter_offset = get_froxel_offset(froxel_idx);
+    // let counter_ptr = &froxel_data[froxel_idx].data[counter_offset];
+    let counter_ptr = &froxel_data[counter_offset];
     
     // Atomically increment strand count and get previous value
     let prev_count = atomicAdd(counter_ptr, 1u);
@@ -100,8 +108,9 @@ fn add_strand_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, strand_id: 
     // Check if we have space
     if (prev_count < MAX_STRANDS_PER_FROXEL) {
         // Add strand index to froxel
-        let strand_ptr = get_froxel_strands(froxel_idx, prev_count);
-        *strand_ptr = strand_id;
+        let strand_offset = get_froxel_strand_offset(counter_offset);
+        // atomicStore(&froxel_data[froxel_idx].data[strand_offset + 1u + prev_count], strand_id);
+        atomicStore(&froxel_data[strand_offset + 1u + prev_count], strand_id);
         return true;
     }
     
@@ -176,21 +185,22 @@ fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, strand_id: u32) {
 // Main compute shader function
 @compute @workgroup_size(64, 1, 1)
 fn bin_strands(@builtin(global_invocation_id) id: vec3<u32>) {
-    let strand_id = id.x;
+    var strand_id = id.x;
     
-    // Skip if we're beyond the strand count
-    // This assumes we know the strand count and dispatch the right number of workgroups
-    // In practice, we'd need to pass the strand count as a uniform
+    if strand_id >= push_constants.strand_count {
+        return;
+    }
     
     // Process strand segments
     var index_pos = 0u;
     var in_strand = false;
     var prev_vertex_id: u32 = 0u;
     var prev_screen_pos: vec3<f32>;
-    
+    var safety: u32 = 0u;
     // Scan through index buffer to find strands
     // We're using u32::MAX as a separator between strands
-    while (index_pos < arrayLength(&strand_indices)) {
+    while (index_pos < arrayLength(&strand_indices) && safety < 100u) {
+        safety += 1u;
         let index = strand_indices[index_pos];
         
         if (index == 0xFFFFFFFFu) {
@@ -205,7 +215,8 @@ fn bin_strands(@builtin(global_invocation_id) id: vec3<u32>) {
             // Skip this strand if it's not our assigned ID
             if (strand_id > 0u) {
                 // Skip to next strand
-                while (index_pos < arrayLength(&strand_indices) && strand_indices[index_pos] != 0xFFFFFFFFu) {
+                while (index_pos < arrayLength(&strand_indices) && strand_indices[index_pos] != 0xFFFFFFFFu && safety < 100u) {
+                    safety += 1u;
                     index_pos += 1u;
                 }
                 strand_id -= 1u;
