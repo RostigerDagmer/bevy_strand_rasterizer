@@ -1,21 +1,25 @@
 use bevy::{
     prelude::*,
-    render::{render_resource::{
-        BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePipeline, ComputePipelineDescriptor, PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, StorageTextureAccess, TextureFormat, TextureView, TextureViewDimension
-    }, renderer::RenderDevice},
+    render::{
+        render_resource::{
+            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, ComputePipeline, ComputePipelineDescriptor, PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureView, TextureViewDimension
+        },
+        renderer::RenderDevice,
+        view::ViewUniform,
+    },
     utils::HashMap,
 };
 
 use crate::{components::FroxelConfig, shader_types::PushConstants};
 
 #[derive(Resource)]
-pub struct StrandComputePipeline {
+pub struct StrandRasterizerPipeline {
     // stub
     pub bind_group_layout: BindGroupLayout,
     pub rasterize_pipeline: CachedComputePipelineId,
 }
 
-impl StrandComputePipeline {
+impl StrandRasterizerPipeline {
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         device.create_bind_group_layout(
             "strand_rasterizer_bind_group_layout",
@@ -102,7 +106,7 @@ impl StrandComputePipeline {
     }
 }
 
-impl FromWorld for StrandComputePipeline {
+impl FromWorld for StrandRasterizerPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
@@ -126,30 +130,65 @@ impl FromWorld for StrandComputePipeline {
         });
 
         info!(
-            "Created strand raster compute pipelines: rasterize={:?}", rasterize_pipeline
+            "Created strand raster compute pipelines: rasterize={:?}",
+            rasterize_pipeline
         );
 
-        StrandComputePipeline {
+        StrandRasterizerPipeline {
             bind_group_layout,
             rasterize_pipeline,
         }
     }
 }
 
-
 // Assume you have resources for your binning pipelines and bind groups
 #[derive(Resource)]
 pub struct StrandBinningPipeline {
     pub count_pipeline: CachedComputePipelineId,
-    // Scan pipelines (can reuse handles if shader source is shared)
     pub scan_sums_pipeline: CachedComputePipelineId,
     pub scan_last_pipeline: CachedComputePipelineId,
     pub scan_prfx_pipeline: CachedComputePipelineId,
-    // Initialize placement indices pipeline (optional, could be simple)
     pub init_placement_idx_pipeline: CachedComputePipelineId,
     pub place_pipeline: CachedComputePipelineId,
 
-    pub bind_group_layout: BindGroupLayout,
+    // Separate layouts for each stage requiring distinct bindings
+    pub count_layout: BindGroupLayout,
+    pub scan_layout: BindGroupLayout,
+    pub init_place_layout: BindGroupLayout,
+    pub place_layout: BindGroupLayout,
+}
+
+impl StrandBinningPipeline {
+    // Helper to create common buffer binding entries
+    fn storage_buffer_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
+    fn uniform_buffer_entry(
+        binding: u32,
+        has_dynamic_offset: bool,
+        min_binding_size: Option<BufferSize>,
+    ) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset,
+                min_binding_size,
+            },
+            count: None,
+        }
+    }
 }
 
 impl StrandBinningPipeline {
@@ -231,106 +270,153 @@ impl StrandBinningPipeline {
 impl FromWorld for StrandBinningPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
-        let bind_group_layout = Self::create_bind_group_layout(device);
 
+        // --- Define Layouts ---
+
+        // Layout for STAGE_COUNT
+        let count_layout = device.create_bind_group_layout(
+            "strand_binning_count_layout",
+            &[
+                Self::storage_buffer_entry(0, true),  // vertices
+                Self::storage_buffer_entry(1, true),  // strand_meta
+                Self::storage_buffer_entry(2, false), // tile_counts_buffer (atomic write)
+                Self::uniform_buffer_entry(
+                    3,
+                    false,
+                    Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
+                ), // config
+                Self::uniform_buffer_entry(4, true, Some(ViewUniform::min_size())), // view
+            ],
+        );
+
+        // Layout for STAGE_SCAN_* (Matches reference scan bindings 0, 1)
+        let scan_layout = device.create_bind_group_layout(
+            "strand_binning_scan_layout",
+            &[
+                Self::storage_buffer_entry(0, true), // tile_counts_buffer (read)
+                Self::storage_buffer_entry(1, false), // tile_offsets_buffer (read/write)
+                                                     // Binding 4 (tnumber_seg in ref) is implicitly handled by writing to end of tile_offsets_buffer
+            ],
+        );
+
+        // Layout for STAGE_INIT_PLACE
+        let init_place_layout = device.create_bind_group_layout(
+            "strand_binning_init_place_layout",
+            &[
+                Self::storage_buffer_entry(0, true), // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(1, false), // current_tile_write_indices_buffer (atomic write)
+            ],
+        );
+
+        // Layout for STAGE_PLACE
+        let place_layout = device.create_bind_group_layout(
+            "strand_binning_place_layout",
+            &[
+                Self::storage_buffer_entry(0, true),  // vertices
+                Self::storage_buffer_entry(1, true),  // strand_meta
+                Self::storage_buffer_entry(2, true),  // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(3, false), // current_tile_write_indices_buffer (atomic read/write)
+                Self::storage_buffer_entry(4, false), // packed_segments_buffer (write)
+                Self::uniform_buffer_entry(
+                    5,
+                    false,
+                    Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
+                ), // config
+                Self::uniform_buffer_entry(6, true, Some(ViewUniform::min_size())), // view
+            ],
+        );
+
+        // --- Queue Pipelines ---
         let shader_loader = world.resource::<AssetServer>();
-        let binning_shader = shader_loader.load("shaders/binning_shad.wgsl");
+        let binning_shader = shader_loader.load("shaders/strand_binning.wgsl"); // Changed name
         let pipeline_cache = world.resource::<PipelineCache>();
+        // let subgroup_size = world.resource::<bevy_radix_sort::get_subgroup_size::SubgroupSize>(); // Get subgroup size if needed
+        let subgroup_size: (u32, u32) = (32, 32); // Defaults because SubgroupSize plugin doesn't work at this stage of app build.
 
+        // Shader defs for scan stages (match reference)
         let cdefs = vec![
             ShaderDefVal::UInt(
                 "NUMBER_OF_THREADS_PER_WORKGROUP".into(),
-                super::NUMBER_OF_THREADS_PER_WORKGROUP,
+                crate::NUMBER_OF_THREADS_PER_WORKGROUP, // Use crate:: constant
             ),
-            ShaderDefVal::UInt("NUMBER_OF_THREADS_PER_SUBGROUP".into(), 64), // TODO
             ShaderDefVal::UInt(
-                "NUMBER_OF_ROWS_PER_WORKGROUP".into(),
-                super::NUMBER_OF_ROWS_PER_WORKGROUP,
+                "NUMBER_OF_THREADS_PER_SUBGROUP".into(),
+                subgroup_size.0, // Use detected subgroup size
+            ),
+            ShaderDefVal::UInt(
+                "NUMBER_OF_ROWS_PER_WORKGROUP".into(), // This might not be relevant if scan logic is adapted
+                crate::NUMBER_OF_ROWS_PER_WORKGROUP,
             ),
         ];
 
+        // Push constant range covering the potentially larger struct
+        let push_constant_range = PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            range: 0..std::mem::size_of::<PushConstants>() as u32, // Make sure PushConstants is large enough
+        };
+
         let count_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_count_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![count_layout.clone()], // Use specific layout
             shader: binning_shader.clone(),
-            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            shader_defs: vec!["STAGE_COUNT".into()], // Only define STAGE_COUNT
+            push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "count_strands".into(),
             zero_initialize_workgroup_memory: false,
         });
 
         let scan_sums_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_scan_sums_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![scan_layout.clone()], // Use scan layout
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_SUMS".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "scan_sums".into(),
-            zero_initialize_workgroup_memory: false,
+            zero_initialize_workgroup_memory: true, // Scan often uses workgroup memory
         });
 
         let scan_last_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_scan_last_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![scan_layout.clone()], // Use scan layout
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_LAST".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "scan_last".into(),
-            zero_initialize_workgroup_memory: false,
+            zero_initialize_workgroup_memory: true,
         });
 
         let scan_prfx_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_scan_prfx_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![scan_layout.clone()], // Use scan layout
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_PRFX".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "scan_prfx".into(),
-            zero_initialize_workgroup_memory: false,
+            zero_initialize_workgroup_memory: true,
         });
 
-        let init_placement_idx_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("strand_binning_init_placement_idx_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
-            shader: binning_shader.clone(),
-            shader_defs: [cdefs.as_slice(), &["STAGE_INIT_PLACE".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
-            entry_point: "init_placement_idx".into(),
-            zero_initialize_workgroup_memory: false,
-        });
+        let init_placement_idx_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("strand_binning_init_placement_idx_pipeline".into()),
+                layout: vec![init_place_layout.clone()], // Use init_place layout
+                shader: binning_shader.clone(),
+                shader_defs: vec!["STAGE_INIT_PLACE".into()],
+                push_constant_ranges: vec![push_constant_range.clone()], // Might not need push constants?
+                entry_point: "init_placement_idx".into(),
+                zero_initialize_workgroup_memory: false,
+            });
 
         let place_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_place_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![place_layout.clone()], // Use place layout
             shader: binning_shader.clone(),
-            shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into()]].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            shader_defs: vec!["STAGE_PLACE".into()],
+            push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "place_strands".into(),
             zero_initialize_workgroup_memory: false,
         });
 
-        info!(
-            "Created strand binning pipelines: count={:?}, scan_sums={:?}, scan_last={:?}, scan_prfx={:?}, init_placement_idx={:?}, place={:?}",
-            count_pipeline, scan_sums_pipeline, scan_last_pipeline, scan_prfx_pipeline, init_placement_idx_pipeline, place_pipeline
-        );
+        info!("Created strand binning pipelines");
 
         StrandBinningPipeline {
             count_pipeline,
@@ -339,7 +425,10 @@ impl FromWorld for StrandBinningPipeline {
             scan_prfx_pipeline,
             init_placement_idx_pipeline,
             place_pipeline,
-            bind_group_layout
+            count_layout,
+            scan_layout,
+            init_place_layout,
+            place_layout,
         }
     }
 }
