@@ -1203,6 +1203,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_wgsl_utils"
+version = "0.15.1"
+source = "git+https://github.com/AllenPocketGamer/bevy_wgsl_utils.git?branch=master#c1e076948e17cc4217486dbd8014eee4fe2b1cd9"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_window"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3731,6 +3739,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "bevy_radix_sort",
+ "bevy_wgsl_utils",
  "bytemuck",
  "fluent-uri",
  "serde",
