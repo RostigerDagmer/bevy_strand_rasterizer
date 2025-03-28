@@ -24,16 +24,10 @@ struct FroxelConfig {
     // _padding: vec4<u32>,
 }
 
-// We need an explicit structure for the atomic counter
-struct FroxelCounter {
-    count: atomic<u32>,
-}
-
 struct FroxelTile {
     // Each froxel contains a counter followed by strand indices
-    data: array<atomic<u32>>,
-    // z_min: f32,
-    // z_max: f32,
+    strand_count: atomic<u32>,
+    strand_indices: array<u32, MAX_STRANDS_PER_FROXEL>,
 }
 
 struct PushConstants {
@@ -44,7 +38,7 @@ struct PushConstants {
 // Bindings
 @group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> strand_indices: array<u32>;
-@group(0) @binding(2) var<storage, read_write> froxel_data: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> froxel_data: array<FroxelTile>;
 @group(0) @binding(3) var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var<uniform> config: FroxelConfig;
 @group(0) @binding(5) var<uniform> view: View;
@@ -98,9 +92,9 @@ fn add_strand_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, strand_id: 
     }
     
     let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z);
-    let counter_offset = get_froxel_offset(froxel_idx);
+    // let counter_offset = get_froxel_offset(froxel_idx);
     // let counter_ptr = &froxel_data[froxel_idx].data[counter_offset];
-    let counter_ptr = &froxel_data[counter_offset];
+    let counter_ptr = &froxel_data[froxel_idx].strand_count;
     
     // Atomically increment strand count and get previous value
     let prev_count = atomicAdd(counter_ptr, 1u);

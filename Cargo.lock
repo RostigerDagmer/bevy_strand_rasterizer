@@ -894,6 +894,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89fe0b0b919146939481a3a7c38864face2c6d0fd2c73ab3d430dc693ecd9b11"
 
 [[package]]
+name = "bevy_radix_sort"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a54c8e6a4324743f32261fcc25bc0be08f169ef93e8ece438b71e1314c3c4ea"
+dependencies = [
+ "bevy",
+ "bytemuck",
+]
+
+[[package]]
 name = "bevy_reflect"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3720,6 +3730,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
+ "bevy_radix_sort",
  "bytemuck",
  "fluent-uri",
  "serde",

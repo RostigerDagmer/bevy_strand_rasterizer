@@ -18,8 +18,14 @@ use bevy::render::view::ViewUniforms;
 use bevy::render::{render_resource::*, Render, RenderApp, RenderSet};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
+use bevy_radix_sort::{self, GetSubgroupSizePlugin, RadixSortPlugin};
 mod dson;
 use dson::*;
+mod spatial_hashing;
+use spatial_hashing::*;
+mod sorting;
+use sorting::*;
+
 
 #[derive(Component, ExtractComponent, Debug, Clone)]
 pub struct StrandGeometry {
@@ -31,6 +37,8 @@ pub struct StrandGeometry {
 // #[derive(Component, Clone, ExtractComponent)]
 // pub struct Strands; // marker component for strand assets
 
+const MAX_NUMBER_OF_STRANDS: u32 = 1024 * 1024;
+
 pub struct StrandRasterizerPlugin;
 
 impl Plugin for StrandRasterizerPlugin {
@@ -40,6 +48,11 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
         ));
+        app.add_plugins(GetSubgroupSizePlugin)
+        .add_plugins(RadixSortPlugin {
+            settings: MAX_NUMBER_OF_STRANDS.into(),
+        })
+        .add_plugins(SpatialHashingPlugin);
         app.init_resource::<StrandAssetResources>();
         app.add_systems(Update, set_strand_geometry);
     }
@@ -412,22 +425,8 @@ pub struct StrandAssetResources {
 #[derive(Debug, Clone, Default)]
 pub struct StrandRasterizerNode;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
 pub struct StrandRasterizerLabel;
-
-impl RenderLabel for StrandRasterizerLabel {
-    fn dyn_clone(&self) -> Box<dyn RenderLabel> {
-        Box::new(self.clone())
-    }
-
-    fn as_dyn_eq(&self) -> &dyn bevy_ecs::label::DynEq {
-        self
-    }
-
-    fn dyn_hash(&self, state: &mut dyn ::core::hash::Hasher) {
-        std::any::TypeId::of::<Self>().dyn_hash(state);
-    }
-}
 
 impl Node for StrandRasterizerNode {
     fn run(
