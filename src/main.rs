@@ -100,7 +100,7 @@ pub fn create_strand_bind_group(
     device: &RenderDevice,
     layout: &BindGroupLayout,
     vertex_buffer: &Buffer,
-    index_buffer: &Buffer,
+    tile_counts_buffer: &Buffer,
     meta_buffer: &Buffer,
     froxel_buffer: &Buffer,
     output_texture: &TextureView,
@@ -115,13 +115,17 @@ pub fn create_strand_bind_group(
                 binding: 0,
                 resource: vertex_buffer.as_entire_binding(),
             },
+            // BindGroupEntry {
+            //     binding: 1,
+            //     resource: index_buffer.as_entire_binding(),
+            // },
             BindGroupEntry {
                 binding: 1,
-                resource: index_buffer.as_entire_binding(),
+                resource: meta_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
-                resource: meta_buffer.as_entire_binding(),
+                resource: tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 3,
@@ -298,49 +302,6 @@ pub fn create_strand_binning_bind_group(
     );
 }
 
-// Create froxel buffer based on screen dimensions and froxel size
-fn create_froxel_buffer(device: &RenderDevice, config: &FroxelConfig) -> (Buffer, (u32, u32, u32)) {
-    // Calculate froxel grid dimensions
-    let froxels_x = (config.screen_width + config.froxel_size_x - 1) / config.froxel_size_x;
-    let froxels_y = (config.screen_height + config.froxel_size_y - 1) / config.froxel_size_y;
-    let froxels_z = config.depth_slices;
-
-    let froxel_count = froxels_x * froxels_y * froxels_z;
-
-    // Define maximum strands per froxel
-    const MAX_STRANDS_PER_FROXEL: u32 = 256;
-
-    // Calculate buffer size:
-    // - 4 bytes for the strand count (atomic<u32>)
-    // - 4 bytes per strand index * MAX_STRANDS_PER_FROXEL
-    let strand_indices_size = MAX_STRANDS_PER_FROXEL * 4;
-    let froxel_size = 4 + strand_indices_size;
-    let buffer_size = froxel_count * froxel_size;
-
-    // Create the buffer
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("strand_froxel_buffer"),
-        size: buffer_size as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true,
-    });
-
-    // Initialize buffer with zeros (important for atomic counters)
-    let mut mapped = buffer.slice(..).get_mapped_range_mut();
-    for byte in mapped.iter_mut() {
-        *byte = 0;
-    }
-    drop(mapped);
-    buffer.unmap();
-
-    info!(
-        "Created froxel buffer with dimensions {}x{}x{} ({} froxels, {} bytes)",
-        froxels_x, froxels_y, froxels_z, froxel_count, buffer_size
-    );
-
-    (buffer, (froxels_x, froxels_y, froxels_z))
-}
-
 // Create froxel configuration uniform buffer
 pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
     let buffer = device.create_buffer(&BufferDescriptor {
@@ -428,9 +389,11 @@ fn run_binning_pass(
             label: Some("Strand Count"),
             ..default()
         });
-        let count_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.count_pipeline)
-            .unwrap();
+        let Some(count_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.count_pipeline)
+        else {
+            warn!("Count pipeline not found");
+            return;
+        };
         pass.set_pipeline(count_pipeline);
         pass.set_bind_group(0, bind_groups.count_bind_group.as_ref().unwrap(), &[]);
         // Set push constants if needed (e.g., num_strands_or_segments)
@@ -454,15 +417,24 @@ fn run_binning_pass(
         let number_of_elements_to_scan = num_tiles; // We are scanning the tile counts
 
         // Reuse scan pipeline handles from StrandBinningPipeline
-        let scan_sums_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.scan_sums_pipeline)
-            .unwrap();
-        let scan_last_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.scan_last_pipeline)
-            .unwrap();
-        let scan_prfx_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.scan_prfx_pipeline)
-            .unwrap();
+        let Some(scan_sums_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.scan_sums_pipeline)
+        else {
+            warn!("Scan sums pipeline not found");
+            return;
+        };
+        let Some(scan_last_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.scan_last_pipeline)
+        else {
+            warn!("Scan last pipeline not found");
+            return;
+        };
+        let Some(scan_prfx_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.scan_prfx_pipeline)
+        else {
+            warn!("Scan prefix pipeline not found");
+            return;
+        };
 
         // Calculate scan hierarchy (copy/adapt logic from reference `run` function)
         let mut load_base = 0u32;
@@ -526,11 +498,18 @@ fn run_binning_pass(
             label: Some("Init Placement Indices"),
             ..default()
         });
-        let init_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.init_placement_idx_pipeline)
-            .unwrap();
+        let Some(init_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.init_placement_idx_pipeline)
+        else {
+            warn!("Init placement indices pipeline not found");
+            return;
+        };
         pass.set_pipeline(init_pipeline);
-        pass.set_bind_group(0, bind_groups.init_placement_idx_bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(
+            0,
+            bind_groups.init_placement_idx_bind_group.as_ref().unwrap(),
+            &[],
+        );
         // Dispatch one thread per tile
         let workgroup_size = 256; // Example
         let num_workgroups = (num_tiles + workgroup_size - 1) / workgroup_size;
@@ -543,9 +522,11 @@ fn run_binning_pass(
             label: Some("Strand Place"),
             ..default()
         });
-        let place_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.place_pipeline)
-            .unwrap();
+        let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.place_pipeline)
+        else {
+            warn!("Place pipeline not found");
+            return;
+        };
         pass.set_pipeline(place_pipeline);
         pass.set_bind_group(0, bind_groups.place_bind_group.as_ref().unwrap(), &[]);
         // Set push constants if needed
@@ -642,31 +623,54 @@ fn prepare_binning_buffers(
         label: Some("strand_tile_counts_buffer"),
         size: num_tiles as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true, // zero initialization happens in ComputePipelineDescriptor
+        mapped_at_creation: true, 
     });
+
+    // initializes with zeros
+    let tile_counts = vec![0u32; num_tiles as usize];
+    let mut mapped = tile_counts_buffer.slice(..).get_mapped_range_mut();
+    mapped.copy_from_slice(bytemuck::cast_slice(&tile_counts));
+    drop(mapped);
+    tile_counts_buffer.unmap();
+
 
     // Create the tile offsets buffer
     let tile_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_tile_offsets_buffer"),
         size: (num_tiles + 1) as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true, // zero initialization happens in ComputePipelineDescriptor
+        mapped_at_creation: true,
     });
+
+    // initializes with zeros
+    let tile_offsets = vec![0u32; (num_tiles + 1) as usize];
+    let mut mapped = tile_offsets_buffer.slice(..).get_mapped_range_mut();
+    mapped.copy_from_slice(bytemuck::cast_slice(&tile_offsets));
+    drop(mapped);
+    tile_offsets_buffer.unmap();
+
 
     // Create the current tile write indices buffer
     let current_tile_write_indices_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_current_tile_write_indices_buffer"),
         size: num_tiles as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true, // zero initialization happens in ComputePipelineDescriptor
+        mapped_at_creation: true,
     });
+
+    // initializes with zeros
+    let current_tile_write_indices = vec![0u32; num_tiles as usize];
+    let mut mapped = current_tile_write_indices_buffer.slice(..).get_mapped_range_mut();
+    mapped.copy_from_slice(bytemuck::cast_slice(&current_tile_write_indices));
+    drop(mapped);
+    current_tile_write_indices_buffer.unmap();
 
     // Create the packed segments buffer
     let packed_segments_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_packed_segments_buffer"),
         size: 1024 * 1024 * 4, // Initial size, will be resized after scan
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true, // zero initialization happens in ComputePipelineDescriptor
+        mapped_at_creation: false,
     });
 
     (
@@ -762,7 +766,6 @@ fn use_froxel_buffer(
     mut binning_resources: ResMut<StrandBinningBindGroup>,
 ) {
     for (entity, config) in query.iter() {
-        let (froxel_buffer, size) = create_froxel_buffer(&device, config);
         let config_buffer = create_froxel_config_buffer(&device, config);
         let (
             tile_counts_buffer,
@@ -774,7 +777,7 @@ fn use_froxel_buffer(
         let (texture, view) = create_render_target_texture(&device, config);
         raster_resources.output_texture = Some(view);
         // modify the resource
-        raster_resources.froxel_buffer = Some(froxel_buffer);
+        raster_resources.froxel_buffer = Some(packed_segments_buffer.clone());
         raster_resources.froxel_config_buffer = Some(config_buffer);
         raster_resources.frustrum_config = Some(config.clone());
 
@@ -787,8 +790,6 @@ fn use_froxel_buffer(
         info!("Added froxel buffers to resource");
     }
 }
-
-
 
 // render world buffer retrieval
 fn use_strand_geometry(
@@ -841,12 +842,16 @@ fn use_strand_geometry(
             continue;
         };
 
+        let Some(tile_counts_buffer) = binning_resources.tile_counts_buffer.as_ref() else {
+            warn!("Tile counts buffer not found");
+            continue;
+        };
 
         raster_resources.bind_group = Some(create_strand_bind_group(
             &device,
             &raster_pipeline.bind_group_layout,
             &vertex_storage_buffer.buffer,
-            &index_storage_buffer.buffer,
+            &tile_counts_buffer, // for debug view
             &meta_storage_buffer.buffer,
             &froxel_buffer,
             &output_texture,

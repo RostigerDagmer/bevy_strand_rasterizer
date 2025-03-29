@@ -35,7 +35,7 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Index buffer (read-only storage buffer)
+                // Meta buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
@@ -46,7 +46,7 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Index buffer (read-only storage buffer)
+                // Tile counts buffer (for debug; read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 2,
                     visibility: ShaderStages::COMPUTE,
@@ -160,14 +160,14 @@ pub struct StrandBinningPipeline {
 
 impl StrandBinningPipeline {
     // Helper to create common buffer binding entries
-    fn storage_buffer_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+    fn storage_buffer_entry(binding: u32, read_only: bool, size: Option<BufferSize>) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {
             binding,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only },
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: size,
             },
             count: None,
         }
@@ -191,101 +191,25 @@ impl StrandBinningPipeline {
     }
 }
 
-impl StrandBinningPipeline {
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
-            "strand_binning_bind_group_layout",
-            &[
-                // Strand points buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Strand metadata buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Tile counts buffer (atomic<u32> array)
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Tile offsets buffer (u32 array)
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Packed segments buffer (SegmentRef array)
-                BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Current tile write indices buffer (atomic<u32> array)
-                BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        )
-    }
-}
-
 impl FromWorld for StrandBinningPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
 
         // --- Define Layouts ---
-
+        const DEFAULT_SIZE: BufferSize = BufferSize::new(1024u64).unwrap(); // Default size for storage buffers	
         // Layout for STAGE_COUNT
         let count_layout = device.create_bind_group_layout(
             "strand_binning_count_layout",
             &[
-                Self::storage_buffer_entry(0, true),  // vertices
-                Self::storage_buffer_entry(1, true),  // strand_meta
-                Self::storage_buffer_entry(2, false), // tile_counts_buffer (atomic write)
+                Self::storage_buffer_entry(0, true, None),  // vertices
+                Self::storage_buffer_entry(1, true, None),  // strand_meta
+                Self::storage_buffer_entry(2, false, None), // tile_counts_buffer (atomic write)
                 Self::uniform_buffer_entry(
                     3,
                     false,
                     Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
                 ), // config
-                Self::uniform_buffer_entry(4, true, Some(ViewUniform::min_size())), // view
+                Self::uniform_buffer_entry(4, false, Some(ViewUniform::min_size())), // view
             ],
         );
 
@@ -293,8 +217,8 @@ impl FromWorld for StrandBinningPipeline {
         let scan_layout = device.create_bind_group_layout(
             "strand_binning_scan_layout",
             &[
-                Self::storage_buffer_entry(0, true), // tile_counts_buffer (read)
-                Self::storage_buffer_entry(1, false), // tile_offsets_buffer (read/write)
+                Self::storage_buffer_entry(0, true, None), // tile_counts_buffer (read)
+                Self::storage_buffer_entry(1, false, None), // tile_offsets_buffer (read/write)
                                                      // Binding 4 (tnumber_seg in ref) is implicitly handled by writing to end of tile_offsets_buffer
             ],
         );
@@ -303,8 +227,8 @@ impl FromWorld for StrandBinningPipeline {
         let init_place_layout = device.create_bind_group_layout(
             "strand_binning_init_place_layout",
             &[
-                Self::storage_buffer_entry(0, true), // tile_offsets_buffer (read)
-                Self::storage_buffer_entry(1, false), // current_tile_write_indices_buffer (atomic write)
+                Self::storage_buffer_entry(0, true, None), // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(1, false, None), // current_tile_write_indices_buffer (atomic write)
             ],
         );
 
@@ -312,17 +236,17 @@ impl FromWorld for StrandBinningPipeline {
         let place_layout = device.create_bind_group_layout(
             "strand_binning_place_layout",
             &[
-                Self::storage_buffer_entry(0, true),  // vertices
-                Self::storage_buffer_entry(1, true),  // strand_meta
-                Self::storage_buffer_entry(2, true),  // tile_offsets_buffer (read)
-                Self::storage_buffer_entry(3, false), // current_tile_write_indices_buffer (atomic read/write)
-                Self::storage_buffer_entry(4, false), // packed_segments_buffer (write)
+                Self::storage_buffer_entry(0, true, None),  // vertices
+                Self::storage_buffer_entry(1, true, None),  // strand_meta
+                Self::storage_buffer_entry(2, true, None),  // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(3, false, None), // current_tile_write_indices_buffer (atomic read/write)
+                Self::storage_buffer_entry(4, false, None), // packed_segments_buffer (write)
                 Self::uniform_buffer_entry(
                     5,
                     false,
                     Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
                 ), // config
-                Self::uniform_buffer_entry(6, true, Some(ViewUniform::min_size())), // view
+                Self::uniform_buffer_entry(6, false, Some(ViewUniform::min_size())), // view
             ],
         );
 
@@ -331,7 +255,7 @@ impl FromWorld for StrandBinningPipeline {
         let binning_shader = shader_loader.load("shaders/strand_binning.wgsl"); // Changed name
         let pipeline_cache = world.resource::<PipelineCache>();
         // let subgroup_size = world.resource::<bevy_radix_sort::get_subgroup_size::SubgroupSize>(); // Get subgroup size if needed
-        let subgroup_size: (u32, u32) = (32, 32); // Defaults because SubgroupSize plugin doesn't work at this stage of app build.
+        let subgroup_size: (u32, u32) = (32, 32); // Defaults because SubgroupSize plugin doesn't work at this stage of app-build.
 
         // Shader defs for scan stages (match reference)
         let cdefs = vec![
@@ -359,7 +283,7 @@ impl FromWorld for StrandBinningPipeline {
             label: Some("strand_binning_count_pipeline".into()),
             layout: vec![count_layout.clone()], // Use specific layout
             shader: binning_shader.clone(),
-            shader_defs: vec!["STAGE_COUNT".into()], // Only define STAGE_COUNT
+            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into()]].concat(), // Only define STAGE_COUNT
             push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "count_strands".into(),
             zero_initialize_workgroup_memory: false,
@@ -400,7 +324,8 @@ impl FromWorld for StrandBinningPipeline {
                 label: Some("strand_binning_init_placement_idx_pipeline".into()),
                 layout: vec![init_place_layout.clone()], // Use init_place layout
                 shader: binning_shader.clone(),
-                shader_defs: vec!["STAGE_INIT_PLACE".into()],
+                // shader_defs: vec!["STAGE_INIT_PLACE".into()],
+                shader_defs: [cdefs.as_slice(), &["STAGE_INIT_PLACE".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()], // Might not need push constants?
                 entry_point: "init_placement_idx".into(),
                 zero_initialize_workgroup_memory: false,
@@ -410,7 +335,8 @@ impl FromWorld for StrandBinningPipeline {
             label: Some("strand_binning_place_pipeline".into()),
             layout: vec![place_layout.clone()], // Use place layout
             shader: binning_shader.clone(),
-            shader_defs: vec!["STAGE_PLACE".into()],
+            // shader_defs: vec!["STAGE_PLACE".into()],
+            shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "place_strands".into(),
             zero_initialize_workgroup_memory: false,

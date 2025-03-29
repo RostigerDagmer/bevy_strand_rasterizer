@@ -4,7 +4,11 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 #[repr(C)]
 pub struct PushConstants {
-    pub strand_count: u32, // stub in case we need push constants
+    // pub strand_count: u32, // stub in case we need push constants
+    pub workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
+    pub num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
+    pub scan_load_base: u32,
+    pub scan_save_base: u32,
 }
 
 #[derive(Debug, Clone, ShaderType)]

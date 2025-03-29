@@ -1,5 +1,7 @@
-#import bevy_pbr::forward_io::View // Use correct path if different
+#import bevy_render::view::View
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
+// #import NUMBER_OF_THREADS_PER_WORKGROUP
+// #import NUMBER_OF_THREADS_PER_SUBGROUP
 
 // --- Structures ---
 
@@ -46,6 +48,12 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
     let clamped_y = min(y, froxels_y - 1u);
     let clamped_z = min(z, config.depth_slices - 1u);
     return clamped_z * froxels_x * froxels_y + clamped_y * froxels_x + clamped_x;
+}
+
+fn get_num_tiles(config: FroxelConfig) -> u32 {
+    let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
+    let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
+    return froxels_x * froxels_y * config.depth_slices;
 }
 
 fn world_to_screen(position: vec3<f32>, view_proj: mat4x4<f32>, screen_width: f32, screen_height: f32) -> vec3<f32> {
@@ -133,12 +141,12 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Process segments for this strand
     var prev_vtx = vertices[start_vertex_offset];
-    var prev_screen_pos = world_to_screen(prev_vtx, view.view_proj, f32(config.screen_width), f32(config.screen_height));
+    var prev_screen_pos = world_to_screen(prev_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = start_vertex_offset + i;
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view.view_proj, f32(config.screen_width), f32(config.screen_height));
+        let current_screen_pos = world_to_screen(current_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
 
         // Trace this segment (prev_screen_pos, current_screen_pos)
         trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
@@ -311,7 +319,7 @@ fn scan_prfx(
 @compute @workgroup_size(256, 1, 1) // Example workgroup size
 fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
     let tile_idx = id.x;
-    let num_tiles = arrayLength(¤t_tile_write_indices_buffer); // Assumes buffer is exact size
+    let num_tiles = arrayLength(&current_tile_write_indices_buffer); // Assumes buffer is exact size
 
     if (tile_idx >= num_tiles) {
         return;
@@ -321,7 +329,7 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
     let offset_val = tile_offsets_buffer[tile_idx];
 
     // Atomically store this offset into the write counter buffer
-    atomicStore(¤t_tile_write_indices_buffer[tile_idx], offset_val);
+    atomicStore(&current_tile_write_indices_buffer[tile_idx], offset_val);
 }
 
 #endif // STAGE_INIT_PLACE
@@ -331,7 +339,7 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(2) var<storage, read> tile_offsets_buffer: array<u32>; // Read-only access needed? Maybe not directly
+// @group(0) @binding(2) var<storage, read> tile_offsets_buffer: array<u32>; // Read-only access needed? Maybe not directly
 @group(0) @binding(3) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
 @group(0) @binding(5) var<uniform> config: FroxelConfig;
@@ -342,11 +350,11 @@ fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, 
     // if (froxel_x < cfg.aabb_min_x || ...) { return false; }
 
     let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
-    let num_tiles = arrayLength(¤t_tile_write_indices_buffer);
+    let num_tiles = arrayLength(&current_tile_write_indices_buffer);
 
     if (froxel_idx < num_tiles) {
         // Get the write index for this tile atomically
-        let write_index = atomicAdd(¤t_tile_write_indices_buffer[froxel_idx], 1u);
+        let write_index = atomicAdd(&current_tile_write_indices_buffer[froxel_idx], 1u);
 
         // Write the segment reference to the packed buffer
         // Optional: Add bounds check using tile_offsets_buffer if over-allocation is possible
@@ -397,21 +405,21 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    let meta = strand_metadata[strand_idx];
-    let num_vertices_in_strand = meta.count;
-    let start_vertex_offset = meta.offset;
+    let strand_meta = strand_metadata[strand_idx];
+    let num_vertices_in_strand = strand_meta.count;
+    let start_vertex_offset = strand_meta.offset;
 
     if (num_vertices_in_strand < 2u) {
         return;
     }
 
     var prev_vtx = vertices[start_vertex_offset];
-    var prev_screen_pos = world_to_screen(prev_vtx, view.view_proj, f32(config.screen_width), f32(config.screen_height));
+    var prev_screen_pos = world_to_screen(prev_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = start_vertex_offset + i;
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view.view_proj, f32(config.screen_width), f32(config.screen_height));
+        let current_screen_pos = world_to_screen(current_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
 
         // Define SegmentRef - How is segment_start_idx used?
         // Option 1: Index into vertices buffer
