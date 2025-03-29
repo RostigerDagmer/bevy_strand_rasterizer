@@ -1,13 +1,11 @@
 use bevy::{
-    prelude::*,
-    render::{
+    core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state, prelude::*, render::{
         render_resource::{
-            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, ComputePipeline, ComputePipelineDescriptor, PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureView, TextureViewDimension
+            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureSampleType, TextureView, TextureViewDimension
         },
         renderer::RenderDevice,
         view::ViewUniform,
-    },
-    utils::HashMap,
+    }, utils::HashMap
 };
 
 use crate::{components::FroxelConfig, shader_types::PushConstants};
@@ -396,4 +394,94 @@ pub struct StrandAssetInstance {
 #[derive(Resource, Default)]
 pub struct StrandAssetResources {
     instances: HashMap<Entity, StrandAssetInstance>,
+}
+
+#[derive(Resource)]
+pub struct CompositionPipeline {
+    pub layout: BindGroupLayout,
+    pub pipeline: CachedRenderPipelineId, // Use RenderPipeline for fullscreen quad/triangle
+    pub sampler: Sampler,
+}
+
+impl FromWorld for CompositionPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
+        let layout = render_device.create_bind_group_layout(
+            "composition_layout",
+            &[
+                // Input Scene Texture
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true }, // Assuming HDR intermediate
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Sampler
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Strand Rasterizer Output Texture
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true }, // Or Uint/Sint if format is different, but sampling rgba8unorm as float is fine
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        );
+
+        let sampler = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("composition_sampler"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let shader = world
+            .resource::<AssetServer>()
+            .load("shaders/strand_composite.wgsl");
+
+        let pipeline_cache = world.resource_mut::<PipelineCache>();
+
+        let pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some("composition_pipeline".into()),
+            layout: vec![layout.clone()],
+            vertex: fullscreen_shader_vertex_state(),
+            fragment: Some(FragmentState {
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: "fragment".into(),
+                targets: vec![Some(ColorTargetState {
+                    // IMPORTANT: This format must match the ViewTarget format
+                    // Usually HDR first, then tonemapped. Let's assume HDR for now.
+                    format: TextureFormat::bevy_default(), // Use bevy's default HDR format
+                    blend: Some(BlendState::ALPHA_BLENDING), // Use alpha blending
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState::default(), // Triangle list covering screen
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: false,
+        });
+
+        CompositionPipeline {
+            layout,
+            pipeline,
+            sampler,
+        }
+    }
 }

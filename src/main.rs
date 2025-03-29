@@ -11,8 +11,8 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::storage::GpuShaderStorageBuffer;
 use bevy::render::storage::ShaderStorageBuffer;
-use bevy::render::view::ViewUniform;
 use bevy::render::view::ViewUniforms;
+use bevy::render::view::{ViewTarget, ViewUniform};
 use bevy::render::{Render, RenderApp, RenderSet, render_resource::*};
 use bevy::utils::HashMap;
 use bevy_radix_sort::{self, GetSubgroupSizePlugin, RadixSortPlugin, dispatch_workgroup_ext};
@@ -60,6 +60,7 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<StrandBinningPipeline>();
         render_app.init_resource::<StrandBinningBindGroup>();
+        render_app.init_resource::<CompositionPipeline>();
         render_app.add_systems(
             Render,
             ((use_froxel_buffer, use_strand_geometry)
@@ -80,6 +81,7 @@ impl Plugin for StrandRasterizerPlugin {
             // .add_render_graph_node::<SpatialHashingNode>(Core3d, SpatialHashingLabel)
             // .add_render_graph_node::<SimpleGpuSortNode>(Core3d, SimpleGpuSortNodeLabel)
             .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
+            .add_render_graph_node::<CompositionNode>(Core3d, CompositionLabel)
             // .add_render_graph_edge(
             //     Core3d,
             //     SpatialHashingLabel,
@@ -89,8 +91,18 @@ impl Plugin for StrandRasterizerPlugin {
             // .add_render_graph_edge(Core3d, StrandRasterizerLabel, SimpleGpuSortNodeLabel)
             .add_render_graph_edge(
                 Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
+                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
                 StrandRasterizerLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                StrandRasterizerLabel, // Run after strand rasterization
+                CompositionLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                CompositionLabel, // Run after composition
+                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing, // Before standard post-processing
             );
     }
 }
@@ -598,6 +610,101 @@ impl Node for StrandRasterizerNode {
     }
 }
 
+#[derive(Default)]
+pub struct CompositionNode;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct CompositionLabel;
+
+impl Node for CompositionNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let view_entity = graph.view_entity();
+        let Some(view_target) = world.get::<ViewTarget>(view_entity) else {
+            // This can happen if the view doesn't have a ViewTarget
+            // (e.g., shadow map views, reflection probes)
+            debug!("View entity {:?} does not have a ViewTarget", view_entity);
+            return Ok(());
+        };
+        let Some(composition_pipeline) = world.get_resource::<CompositionPipeline>() else {
+            warn!("CompositionPipeline not found");
+            return Ok(());
+        };
+        let Some(strand_raster_resources) = world.get_resource::<StrandRasterizerResources>()
+        else {
+            warn!("StrandRasterizerResources not found");
+            return Ok(());
+        };
+        let Some(strand_output_texture) = strand_raster_resources.output_texture.as_ref() else {
+            warn!("Strand output texture not ready");
+            return Ok(());
+        };
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_render_pipeline(composition_pipeline.pipeline)
+        else {
+            warn!("Composition render pipeline not ready");
+            return Ok(());
+        };
+
+        // Get the input texture (result of main pass)
+        // In 0.13+, use get_color_attachment() which handles intermediate textures
+        let input_texture = view_target.main_texture_view();
+
+        let bind_group = render_context.render_device().create_bind_group(
+            "composition_bind_group",
+            &composition_pipeline.layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(input_texture), // Main scene texture
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&composition_pipeline.sampler),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(strand_output_texture), // Strand texture
+                },
+            ],
+        );
+
+        // Use the ViewTarget's post_process_write to get the correct target
+        let post_process = view_target.post_process_write();
+        let destination_texture = post_process.destination; // TextureView to write to
+
+        let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("composition_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: destination_texture, // Write to the destination
+                resolve_target: None,
+                ops: Operations {
+                    // Load the existing contents (result of main pass, potentially clear if first post-proc)
+                    // If this is the *first* post-processing pass Bevy runs, it might
+                    // have cleared it already. If it runs *after* other passes, load.
+                    // Load is usually safer.
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_render_pipeline(pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.draw(0..3, 0..1); // Draw a fullscreen triangle
+
+        Ok(())
+    }
+}
+
 fn prepare_binning_buffers(
     render_device: &RenderDevice,
     froxel_config: &FroxelConfig,
@@ -623,7 +730,7 @@ fn prepare_binning_buffers(
         label: Some("strand_tile_counts_buffer"),
         size: num_tiles as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: true, 
+        mapped_at_creation: true,
     });
 
     // initializes with zeros
@@ -632,7 +739,6 @@ fn prepare_binning_buffers(
     mapped.copy_from_slice(bytemuck::cast_slice(&tile_counts));
     drop(mapped);
     tile_counts_buffer.unmap();
-
 
     // Create the tile offsets buffer
     let tile_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
@@ -649,7 +755,6 @@ fn prepare_binning_buffers(
     drop(mapped);
     tile_offsets_buffer.unmap();
 
-
     // Create the current tile write indices buffer
     let current_tile_write_indices_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_current_tile_write_indices_buffer"),
@@ -660,7 +765,9 @@ fn prepare_binning_buffers(
 
     // initializes with zeros
     let current_tile_write_indices = vec![0u32; num_tiles as usize];
-    let mut mapped = current_tile_write_indices_buffer.slice(..).get_mapped_range_mut();
+    let mut mapped = current_tile_write_indices_buffer
+        .slice(..)
+        .get_mapped_range_mut();
     mapped.copy_from_slice(bytemuck::cast_slice(&current_tile_write_indices));
     drop(mapped);
     current_tile_write_indices_buffer.unmap();
