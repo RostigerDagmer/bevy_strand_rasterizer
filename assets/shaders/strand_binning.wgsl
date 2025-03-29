@@ -368,7 +368,20 @@ fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, 
             return false;
         }
     }
-     return false;
+    return false;
+}
+
+fn get_froxel_max_extent(fx: u32, fy: u32, fz: u32, cfg: FroxelConfig) -> vec3<f32> {
+    let froxel_max_x = f32((fx + 1) * cfg.froxel_size_x) / f32(cfg.screen_width);
+    let froxel_max_y = f32((fy + 1) * cfg.froxel_size_y) / f32(cfg.screen_height);
+    let froxel_max_z = f32(fz + 1) / f32(cfg.depth_slices);
+    return vec3<f32>(froxel_max_x, froxel_max_y, froxel_max_z);
+
+fn get_froxel_min_extent(fx: u32, fy: u32, fz: u32, cfg: FroxelConfig) -> vec3<f32> {
+    let froxel_min_x = f32(fx * cfg.froxel_size_x) / f32(cfg.screen_width);
+    let froxel_min_y = f32(fy * cfg.froxel_size_y) / f32(cfg.screen_height);
+    let froxel_min_z = f32(fz) / f32(cfg.depth_slices);
+    return vec3<f32>(froxel_min_x, froxel_min_y, froxel_min_z), 
 }
 
 fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref: SegmentRef, cfg: FroxelConfig) {
@@ -384,15 +397,53 @@ fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref
     let fz1 = i32(floor(p1.z * f32(cfg.depth_slices)));
 
     // TODO: Implement Amanatides-Woo Voxel Traversal Algorithm
-    // Inside the loop of the traversal algorithm, when entering a new froxel (fx, fy, fz):
-    // add_segment_ref_to_froxel_place(u32(fx), u32(fy), u32(fz), segment_ref, cfg);
+    var fx = fx0;
+    var fy = fy0;
+    var fz = fz0;
 
-    // Simplified Placeholder (Incorrect - Replace with Amanatides-Woo):
-    if (fx0 >= 0 && fy0 >= 0 && fz0 >= 0) {
-         add_segment_ref_to_froxel_place(u32(fx0), u32(fy0), u32(fz0), segment_ref, cfg);
-    }
-    if ((fx0 != fx1 || fy0 != fy1 || fz0 != fz1) && fx1 >= 0 && fy1 >= 0 && fz1 >= 0) {
-         add_segment_ref_to_froxel_place(u32(fx1), u32(fy1), u32(fz1), segment_ref, cfg);
+    var p = p0;
+    var dir = p1 - p0;
+    var step = vec3<f32>(sign(dir.x), sign(dir.y), sign(dir.z));
+    var safety = 0u;
+    loop {
+        // find the current froxel
+        safety = safety + 1u;
+        if (safety > 100u) { break; } // Safety check
+        // Add segment to froxel (fx, fy, fz)
+        if (!add_segment_ref_to_froxel_place(u32(fx), u32(fy), u32(fz), segment_ref, cfg)) { break; }
+
+        // optimization opportunity: only calculate the extents in the sign directions
+        let min_extent = get_froxel_min_extent(u32(fx), u32(fy), u32(fz), cfg);
+        let max_extent = get_froxel_max_extent(u32(fx), u32(fy), u32(fz), cfg);
+
+        // compare the travel in x, y, z to the extents
+        let extent = vec3<f32>(
+            select(max_extent.x, min_extent.x, step.x > 0.0),
+            select(max_extent.y, min_extent.y, step.y > 0.0),
+            select(max_extent.z, min_extent.z, step.z > 0.0)
+        );
+        let tx = (extent.x - p.x) / dir.x;
+        let ty = (extent.y - p.y) / dir.y;
+        let tz = (extent.z - p.z) / dir.z;
+
+        // find the smallest travel distance
+        let min_val = min(tx, min(ty, tz));
+
+        let incr = vec3<i32>(
+            select(0, select(1, -1, step.x > 0.0), tx == min_val),
+            select(0, select(1, -1, step.y > 0.0), ty == min_val),
+            select(0, select(1, -1, step.z > 0.0), tz == min_val)
+        );
+
+        p = p + dir * min_val;
+        
+        // step fx, fy, fz
+        fx += incr.x;
+        fy += incr.y;
+        fz += incr.z;
+
+        // stop condition
+        if (fx == fx1 && fy == fy1 && fz == fz1) { break; }
     }
 }
 
