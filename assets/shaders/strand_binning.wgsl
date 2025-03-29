@@ -376,12 +376,13 @@ fn get_froxel_max_extent(fx: u32, fy: u32, fz: u32, cfg: FroxelConfig) -> vec3<f
     let froxel_max_y = f32((fy + 1) * cfg.froxel_size_y) / f32(cfg.screen_height);
     let froxel_max_z = f32(fz + 1) / f32(cfg.depth_slices);
     return vec3<f32>(froxel_max_x, froxel_max_y, froxel_max_z);
+}
 
 fn get_froxel_min_extent(fx: u32, fy: u32, fz: u32, cfg: FroxelConfig) -> vec3<f32> {
     let froxel_min_x = f32(fx * cfg.froxel_size_x) / f32(cfg.screen_width);
     let froxel_min_y = f32(fy * cfg.froxel_size_y) / f32(cfg.screen_height);
     let froxel_min_z = f32(fz) / f32(cfg.depth_slices);
-    return vec3<f32>(froxel_min_x, froxel_min_y, froxel_min_z), 
+    return vec3<f32>(froxel_min_x, froxel_min_y, froxel_min_z);
 }
 
 fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref: SegmentRef, cfg: FroxelConfig) {
@@ -396,7 +397,6 @@ fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref
     let fy1 = i32(floor(p1.y / f32(cfg.froxel_size_y)));
     let fz1 = i32(floor(p1.z * f32(cfg.depth_slices)));
 
-    // TODO: Implement Amanatides-Woo Voxel Traversal Algorithm
     var fx = fx0;
     var fy = fy0;
     var fz = fz0;
@@ -404,46 +404,71 @@ fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref
     var p = p0;
     var dir = p1 - p0;
     var step = vec3<f32>(sign(dir.x), sign(dir.y), sign(dir.z));
+    
+    // Calculate delta distances - how far along the ray we must move for a one-voxel change
+    var delta_dist = vec3<f32>(
+        abs(length(dir) / dir.x),
+        abs(length(dir) / dir.y),
+        abs(length(dir) / dir.z)
+    );
+    // Handle divisions by zero
+    if (dir.x == 0.0) { delta_dist.x = 1000000.0; }
+    if (dir.y == 0.0) { delta_dist.y = 1000000.0; }
+    if (dir.z == 0.0) { delta_dist.z = 1000000.0; }
+    
+    // Calculate initial distances to voxel boundaries
+    let min_extent = get_froxel_min_extent(u32(fx), u32(fy), u32(fz), cfg);
+    let max_extent = get_froxel_max_extent(u32(fx), u32(fy), u32(fz), cfg);
+    
+    var next_boundary = vec3<f32>(
+        select(min_extent.x, max_extent.x, step.x > 0.0),
+        select(min_extent.y, max_extent.y, step.y > 0.0),
+        select(min_extent.z, max_extent.z, step.z > 0.0)
+    );
+    
+    var t_max = vec3<f32>(
+        abs((next_boundary.x - p0.x) / dir.x),
+        abs((next_boundary.y - p0.y) / dir.y),
+        abs((next_boundary.z - p0.z) / dir.z)
+    );
+    // Handle divisions by zero
+    if (dir.x == 0.0) { t_max.x = 1000000.0; }
+    if (dir.y == 0.0) { t_max.y = 1000000.0; }
+    if (dir.z == 0.0) { t_max.z = 1000000.0; }
+
     var safety = 0u;
     loop {
-        // find the current froxel
         safety = safety + 1u;
         if (safety > 100u) { break; } // Safety check
-        // Add segment to froxel (fx, fy, fz)
+        
+        // Add segment to current froxel
         if (!add_segment_ref_to_froxel_place(u32(fx), u32(fy), u32(fz), segment_ref, cfg)) { break; }
 
-        // optimization opportunity: only calculate the extents in the sign directions
-        let min_extent = get_froxel_min_extent(u32(fx), u32(fy), u32(fz), cfg);
-        let max_extent = get_froxel_max_extent(u32(fx), u32(fy), u32(fz), cfg);
-
-        // compare the travel in x, y, z to the extents
-        let extent = vec3<f32>(
-            select(max_extent.x, min_extent.x, step.x > 0.0),
-            select(max_extent.y, min_extent.y, step.y > 0.0),
-            select(max_extent.z, min_extent.z, step.z > 0.0)
-        );
-        let tx = (extent.x - p.x) / dir.x;
-        let ty = (extent.y - p.y) / dir.y;
-        let tz = (extent.z - p.z) / dir.z;
-
-        // find the smallest travel distance
-        let min_val = min(tx, min(ty, tz));
-
-        let incr = vec3<i32>(
-            select(0, select(1, -1, step.x > 0.0), tx == min_val),
-            select(0, select(1, -1, step.y > 0.0), ty == min_val),
-            select(0, select(1, -1, step.z > 0.0), tz == min_val)
-        );
-
-        p = p + dir * min_val;
-        
-        // step fx, fy, fz
-        fx += incr.x;
-        fy += incr.y;
-        fz += incr.z;
-
-        // stop condition
+        // Check if we've reached the end froxel
         if (fx == fx1 && fy == fy1 && fz == fz1) { break; }
+        
+        // Find axis with minimum t_max value
+        if (t_max.x < t_max.y && t_max.x < t_max.z) {
+            // X axis traversal
+            fx += i32(step.x);
+            t_max.x += delta_dist.x;
+        } else if (t_max.y < t_max.z) {
+            // Y axis traversal
+            fy += i32(step.y);
+            t_max.y += delta_dist.y;
+        } else {
+            // Z axis traversal
+            fz += i32(step.z);
+            t_max.z += delta_dist.z;
+        }
+        
+        // Optional - check if we're outside bounds
+        if (fx < 0 || fy < 0 || fz < 0 || 
+            fx >= i32(cfg.screen_width / cfg.froxel_size_x) || 
+            fy >= i32(cfg.screen_height / cfg.froxel_size_y) || 
+            fz >= i32(cfg.depth_slices)) {
+            break;
+        }
     }
 }
 
