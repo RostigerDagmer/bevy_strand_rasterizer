@@ -1,11 +1,20 @@
 use bevy::{
-    core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state, prelude::*, render::{
+    core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state,
+    prelude::*,
+    render::{
         render_resource::{
-            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureSampleType, TextureView, TextureViewDimension
+            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
+            BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId,
+            ColorTargetState, ColorWrites, ComputePipeline, ComputePipelineDescriptor, FilterMode,
+            FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange,
+            RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal,
+            ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureSampleType,
+            TextureView, TextureViewDimension,
         },
         renderer::RenderDevice,
         view::ViewUniform,
-    }, utils::HashMap
+    },
+    utils::HashMap,
 };
 
 use crate::{components::FroxelConfig, shader_types::PushConstants};
@@ -33,7 +42,7 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Meta buffer (read-only storage buffer)
+                // Index Buffer
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
@@ -44,7 +53,7 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Tile counts buffer (for debug; read-only storage buffer)
+                // Meta buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 2,
                     visibility: ShaderStages::COMPUTE,
@@ -55,9 +64,20 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Froxel buffer (read-write storage buffer)
+                // Tile counts buffer (for debug; read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Froxel buffer (read-write storage buffer)
+                BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -68,7 +88,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 5,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
@@ -79,7 +99,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Froxel configuration (uniform buffer)
                 BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -90,7 +110,7 @@ impl StrandRasterizerPipeline {
                 },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: 6,
+                    binding: 7,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -158,7 +178,11 @@ pub struct StrandBinningPipeline {
 
 impl StrandBinningPipeline {
     // Helper to create common buffer binding entries
-    fn storage_buffer_entry(binding: u32, read_only: bool, size: Option<BufferSize>) -> BindGroupLayoutEntry {
+    fn storage_buffer_entry(
+        binding: u32,
+        read_only: bool,
+        size: Option<BufferSize>,
+    ) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {
             binding,
             visibility: ShaderStages::COMPUTE,
@@ -200,14 +224,15 @@ impl FromWorld for StrandBinningPipeline {
             "strand_binning_count_layout",
             &[
                 Self::storage_buffer_entry(0, true, None),  // vertices
-                Self::storage_buffer_entry(1, true, None),  // strand_meta
-                Self::storage_buffer_entry(2, false, None), // tile_counts_buffer (atomic write)
+                Self::storage_buffer_entry(1, true, None),  // indices
+                Self::storage_buffer_entry(2, true, None),  // strand_meta
+                Self::storage_buffer_entry(3, false, None), // tile_counts_buffer (atomic write)
                 Self::uniform_buffer_entry(
-                    3,
+                    4,
                     false,
                     Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
                 ), // config
-                Self::uniform_buffer_entry(4, false, Some(ViewUniform::min_size())), // view
+                Self::uniform_buffer_entry(5, false, Some(ViewUniform::min_size())), // view
             ],
         );
 
@@ -217,7 +242,7 @@ impl FromWorld for StrandBinningPipeline {
             &[
                 Self::storage_buffer_entry(0, true, None), // tile_counts_buffer (read)
                 Self::storage_buffer_entry(1, false, None), // tile_offsets_buffer (read/write)
-                                                     // Binding 4 (tnumber_seg in ref) is implicitly handled by writing to end of tile_offsets_buffer
+                                                           // Binding 4 (tnumber_seg in ref) is implicitly handled by writing to end of tile_offsets_buffer
             ],
         );
 
@@ -235,8 +260,8 @@ impl FromWorld for StrandBinningPipeline {
             "strand_binning_place_layout",
             &[
                 Self::storage_buffer_entry(0, true, None),  // vertices
-                Self::storage_buffer_entry(1, true, None),  // strand_meta
-                Self::storage_buffer_entry(2, true, None),  // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(1, true, None),  // indices
+                Self::storage_buffer_entry(2, true, None),  // strand_meta
                 Self::storage_buffer_entry(3, false, None), // current_tile_write_indices_buffer (atomic read/write)
                 Self::storage_buffer_entry(4, false, None), // packed_segments_buffer (write)
                 Self::uniform_buffer_entry(
@@ -372,13 +397,11 @@ pub struct StrandBinningBuffers {
     pub tile_offsets_buffer: Option<Buffer>,
     pub current_tile_write_indices_buffer: Option<Buffer>,
     pub packed_segments_buffer: Option<Buffer>,
-     // Add handles/references needed from StrandGeometry
-     pub vertex_buffer: Option<Buffer>, // Store the actual buffer ref
-     pub meta_buffer: Option<Buffer>, // Store the actual buffer ref
+    // Add handles/references needed from StrandGeometry
+    pub vertex_buffer: Option<Buffer>, // Store the actual buffer ref
+    pub index_buffer: Option<Buffer>,  // Store the actual buffer ref
+    pub meta_buffer: Option<Buffer>,   // Store the actual buffer ref
 }
-
-
-
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {

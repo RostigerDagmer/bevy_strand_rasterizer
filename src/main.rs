@@ -117,6 +117,7 @@ pub fn create_strand_bind_group(
     device: &RenderDevice,
     layout: &BindGroupLayout,
     vertex_buffer: &Buffer,
+    index_buffer: &Buffer,
     tile_counts_buffer: &Buffer,
     meta_buffer: &Buffer,
     packed_segments: &Buffer,
@@ -132,32 +133,32 @@ pub fn create_strand_bind_group(
                 binding: 0,
                 resource: vertex_buffer.as_entire_binding(),
             },
-            // BindGroupEntry {
-            //     binding: 1,
-            //     resource: index_buffer.as_entire_binding(),
-            // },
             BindGroupEntry {
                 binding: 1,
-                resource: meta_buffer.as_entire_binding(),
+                resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
-                resource: tile_counts_buffer.as_entire_binding(),
+                resource: meta_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 3,
-                resource: packed_segments.as_entire_binding(),
+                resource: tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 4,
-                resource: BindingResource::TextureView(output_texture),
+                resource: packed_segments.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 5,
-                resource: froxel_config_buffer.as_entire_binding(),
+                resource: BindingResource::TextureView(output_texture),
             },
             BindGroupEntry {
                 binding: 6,
+                resource: froxel_config_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
                 resource: view_buffer.clone(),
             },
         ],
@@ -168,6 +169,7 @@ pub fn create_strand_binning_bind_group(
     device: &RenderDevice,
     pipeline: &StrandBinningPipeline,
     strand_points_buffer: &Buffer,
+    index_buffer: &Buffer,
     strand_metadata_buffer: &Buffer,
     view_uniforms: BindingResource,
     raster_resources: &StrandRasterizerResources,
@@ -184,10 +186,14 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: 1,
-                resource: strand_metadata_buffer.as_entire_binding(),
+                resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
+                resource: strand_metadata_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
                 resource: binning_resources
                     .tile_counts_buffer
                     .as_ref()
@@ -195,7 +201,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 3,
+                binding: 4,
                 resource: raster_resources
                     .froxel_config_buffer
                     .as_ref()
@@ -203,7 +209,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 4,
+                binding: 5,
                 resource: view_uniforms.clone(),
             },
         ],
@@ -269,15 +275,11 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: 1,
-                resource: strand_metadata_buffer.as_entire_binding(),
+                resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
-                resource: binning_resources
-                    .tile_offsets_buffer
-                    .as_ref()
-                    .unwrap()
-                    .as_entire_binding(),
+                resource: strand_metadata_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 3,
@@ -654,6 +656,10 @@ impl Node for StrandRasterizerNode {
             warn!("Vertex buffer handle not found in resources.");
             return Ok(());
         };
+        let Some(index_buffer) = binning_buffers.index_buffer.as_ref() else {
+            warn!("Index buffer handle not found in resources.");
+            return Ok(());
+        };
         let Some(meta_buffer) = binning_buffers.meta_buffer.as_ref() else {
             warn!("Meta buffer handle not found in resources.");
             return Ok(());
@@ -704,6 +710,7 @@ impl Node for StrandRasterizerNode {
             render_device,
             binning_pipeline,
             vertex_buffer,
+            index_buffer,
             meta_buffer,
             view_binding.clone(),
             raster_resources,
@@ -725,6 +732,7 @@ impl Node for StrandRasterizerNode {
             render_device,
             &raster_pipeline.bind_group_layout,
             vertex_buffer,
+            index_buffer,
             tile_counts_buffer,
             meta_buffer,
             packed_segments_buffer,
@@ -956,7 +964,7 @@ fn set_strand_geometry(
 
         let geometry = &geometry_library[0];
         // Extract vertices
-        let vertices: Vec<[f32; 3]> = geometry
+        let vertices: Vec<[f32; 4]> = geometry
             .vertices
             .values
             .clone()
@@ -966,6 +974,7 @@ fn set_strand_geometry(
                     v[0] * 0.0254, // TODO: pass transform to shaders
                     v[1] * 0.0254, // TODO: pass transform to shaders
                     v[2] * 0.0254, // TODO: pass transform to shaders
+                    1.0,
                 ]
             })
             .collect();
@@ -1111,6 +1120,7 @@ fn use_strand_geometry(
 
         binning_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
         binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
+        binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
         raster_resources.strand_count = Some(geometry.strand_count);
 
         info!("Created bind group for strand rasterizer");

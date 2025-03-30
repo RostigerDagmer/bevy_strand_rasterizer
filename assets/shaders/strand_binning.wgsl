@@ -56,9 +56,9 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
     return froxels_x * froxels_y * config.depth_slices;
 }
 
-fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_height: f32) -> vec3<f32> {
+fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_height: f32) -> vec3<f32> {
     // Transform from world to clip space using the view-projection matrix
-    let clip_pos = view.unjittered_clip_from_world * vec4<f32>(position, 1.0);
+    let clip_pos = view.unjittered_clip_from_world * position;
 
     if clip_pos.w <= 0.0 {
         // Handle point behind camera
@@ -82,11 +82,12 @@ fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_he
 // --- STAGE_COUNT ---
 #ifdef STAGE_COUNT
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
-@group(0) @binding(2) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
-@group(0) @binding(3) var<uniform> config: FroxelConfig;
-@group(0) @binding(4) var<uniform> view: View; // Or ViewUniform
+@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> indices: array<u32>;
+@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
+@group(0) @binding(3) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> config: FroxelConfig;
+@group(0) @binding(5) var<uniform> view: View; // Or ViewUniform
 
 
 fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
@@ -249,11 +250,11 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Process segments for this strand
-    var prev_vtx = vertices[start_vertex_offset];
+    var prev_vtx = vertices[indices[start_vertex_offset]];
     var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
-        let current_vtx_idx = start_vertex_offset + i;
+        let current_vtx_idx = indices[start_vertex_offset + i];
         if current_vtx_idx >= arrayLength(&vertices) { break; } // Bounds check
 
         let current_vtx = vertices[current_vtx_idx];
@@ -458,9 +459,9 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 // --- STAGE_PLACE ---
 #ifdef STAGE_PLACE
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> strand_metadata: array<StrandMeta>;
-// @group(0) @binding(2) var<storage, read> tile_offsets_buffer: array<u32>; // Read-only access needed? Maybe not directly
+@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> indices: array<u32>;
+@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
 @group(0) @binding(3) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
 @group(0) @binding(5) var<uniform> config: FroxelConfig;
@@ -611,11 +612,11 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    var prev_vtx = vertices[start_vertex_offset];
+    var prev_vtx = vertices[indices[start_vertex_offset]];
     var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
-        let current_vtx_idx = start_vertex_offset + i;
+        let current_vtx_idx = indices[start_vertex_offset + i];
         let current_vtx = vertices[current_vtx_idx];
         let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height));
 

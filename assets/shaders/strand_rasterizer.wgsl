@@ -37,13 +37,14 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 var<push_constant> pc: PushConstants;
 
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(2) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
-@group(0) @binding(4) var render_target: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(5) var<uniform> config: FroxelConfig;
-@group(0) @binding(6) var<uniform> view: View;
+@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> indices: array<u32>;
+@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(3) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
+@group(0) @binding(5) var render_target: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(6) var<uniform> config: FroxelConfig;
+@group(0) @binding(7) var<uniform> view: View;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
