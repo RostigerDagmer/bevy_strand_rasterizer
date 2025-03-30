@@ -56,17 +56,26 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
     return froxels_x * froxels_y * config.depth_slices;
 }
 
-fn world_to_screen(position: vec3<f32>, view_proj: mat4x4<f32>, screen_width: f32, screen_height: f32) -> vec3<f32> {
-    let clip_pos = view_proj * vec4<f32>(position, 1.0);
+fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_height: f32) -> vec3<f32> {
+    // Transform from world to clip space using the view-projection matrix
+    let clip_pos = view.unjittered_clip_from_world * vec4<f32>(position, 1.0);
+    
     if (clip_pos.w <= 0.0) {
-        // Handle point behind camera - return invalid coords?
+        // Handle point behind camera
         return vec3<f32>(-1.0, -1.0, -1.0);
     }
+    
+    // Perform perspective division to get NDC coordinates
     let ndc = clip_pos.xyz / clip_pos.w;
-    // Check Y-direction based on Bevy/WGPU conventions
+    
+    // Convert NDC to screen coordinates
+    // NDC is [-1,1] for x,y and [0,1] for z in Vulkan/WebGPU convention
     let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
-    let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Common convention (0,0 top-left)
-    let screen_z = ndc.z; // Typically [0, 1] after projection in WGSL/WebGPU
+    let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
+    
+    // For your depth slices that run 0.0 to 1.0, the z value is already in the right range
+    let screen_z = ndc.z; // This is in [0,1] range in Vulkan/WebGPU
+    
     return vec3<f32>(screen_x, screen_y, screen_z);
 }
 
@@ -141,12 +150,12 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Process segments for this strand
     var prev_vtx = vertices[start_vertex_offset];
-    var prev_screen_pos = world_to_screen(prev_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
+    var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = start_vertex_offset + i;
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
+        let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
         // Trace this segment (prev_screen_pos, current_screen_pos)
         trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
@@ -500,12 +509,12 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     var prev_vtx = vertices[start_vertex_offset];
-    var prev_screen_pos = world_to_screen(prev_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
+    var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = start_vertex_offset + i;
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view.world_from_view, f32(config.screen_width), f32(config.screen_height));
+        let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
         // Define SegmentRef - How is segment_start_idx used?
         // Option 1: Index into vertices buffer
