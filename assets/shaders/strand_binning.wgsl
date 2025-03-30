@@ -59,8 +59,8 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
 fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_height: f32) -> vec3<f32> {
     // Transform from world to clip space using the view-projection matrix
     let clip_pos = view.unjittered_clip_from_world * vec4<f32>(position, 1.0);
-    
-    if (clip_pos.w <= 0.0) {
+
+    if clip_pos.w <= 0.0 {
         // Handle point behind camera
         return vec3<f32>(-1.0, -1.0, -1.0);
     }
@@ -75,7 +75,7 @@ fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_he
     
     // For your depth slices that run 0.0 to 1.0, the z value is already in the right range
     let screen_z = ndc.z; // This is in [0,1] range in Vulkan/WebGPU
-    
+
     return vec3<f32>(screen_x, screen_y, screen_z);
 }
 
@@ -88,13 +88,14 @@ fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_he
 @group(0) @binding(3) var<uniform> config: FroxelConfig;
 @group(0) @binding(4) var<uniform> view: View; // Or ViewUniform
 
+
 fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
     // Check AABB (example uses screen coords, adjust if AABB is in froxel coords)
     // if (froxel_x < cfg.aabb_min_x || ... ) { return false; }
 
     let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
     // Bounds check froxel_idx before atomic operation
-    if (froxel_idx < arrayLength(&tile_counts_buffer)) {
+    if froxel_idx < arrayLength(&tile_counts_buffer) {
         atomicAdd(&tile_counts_buffer[froxel_idx], 1u);
         return true;
     }
@@ -103,40 +104,139 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
 
 fn trace_segment_through_froxels_count(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
+    if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
 
-    // Calculate start/end froxel coords (handle potential negatives from world_to_screen fail)
-    if (p0.x < 0.0 || p1.x < 0.0) { return; } // Skip segments starting/ending off-screen
-
+    // Use i32 for stepping, but ensure non-negative before passing to add_segment_ref_to_froxel
     let fx0 = i32(floor(p0.x / f32(cfg.froxel_size_x)));
     let fy0 = i32(floor(p0.y / f32(cfg.froxel_size_y)));
-    let fz0 = i32(floor(p0.z * f32(cfg.depth_slices)));
+    // Clamp depth index calculation strictly between 0 and depth_slices-1
+    let fz0 = clamp(i32(floor(p0.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1);
 
     let fx1 = i32(floor(p1.x / f32(cfg.froxel_size_x)));
     let fy1 = i32(floor(p1.y / f32(cfg.froxel_size_y)));
-    let fz1 = i32(floor(p1.z * f32(cfg.depth_slices)));
+    let fz1 = clamp(i32(floor(p1.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1);
 
-    // TODO: Implement Amanatides-Woo Voxel Traversal Algorithm
-    // This algorithm steps along the line segment in screen-space,
-    // determining which froxel boundary (X, Y, or Z) is crossed next.
+    var fx = fx0;
+    var fy = fy0;
+    var fz = fz0;
 
-    // Simplified Placeholder (Incorrect - Replace with Amanatides-Woo):
-    // Add start froxel if valid
-    if (fx0 >= 0 && fy0 >= 0 && fz0 >= 0) {
-        add_segment_ref_to_froxel(u32(fx0), u32(fy0), u32(fz0), cfg);
+    var dir = p1 - p0;
+    // Need step in integer grid space, but derivation needs float dir
+    var step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z)); // Integer step
+
+    // Use screen space sizes for calculations
+    let froxel_dim_x = f32(cfg.froxel_size_x);
+    let froxel_dim_y = f32(cfg.froxel_size_y);
+    let froxel_dim_z = 1.0 / f32(cfg.depth_slices); // Size of a depth slice in [0,1] range
+
+    // Calculate delta distances - how far along the ray (in units of t) we must move
+    // for the coord to change by one froxel size.
+    // Avoid division by zero. Use a large number if dir component is zero.
+    let safe_dir_x = select(dir.x, 1e-6 * f32(step.x), abs(dir.x) < 1e-6);
+    let safe_dir_y = select(dir.y, 1e-6 * f32(step.y), abs(dir.y) < 1e-6);
+    let safe_dir_z = select(dir.z, 1e-6 * f32(step.z), abs(dir.z) < 1e-6);
+
+    var delta_dist = vec3<f32>(
+        abs(froxel_dim_x / safe_dir_x),
+        abs(froxel_dim_y / safe_dir_y),
+        abs(froxel_dim_z / safe_dir_z)
+    );
+
+    // Calculate initial distances (as t values) to the *next* voxel boundary
+    // along the ray's direction from p0.
+    let fract_p0_x = p0.x / froxel_dim_x; // How many froxels p0.x is
+    let fract_p0_y = p0.y / froxel_dim_y;
+    let fract_p0_z = p0.z / froxel_dim_z; // p0.z is already [0,1]
+
+    // Distance to next boundary = (boundary - current_pos) / direction
+    // If moving positive (step>0), next boundary is floor(pos)+1. Distance = ( (floor(pos)+1)*size - pos ) / dir
+    // If moving negative (step<0), next boundary is floor(pos).   Distance = ( floor(pos)*size - pos ) / dir
+    var t_max_x = select(
+        (floor(fract_p0_x) * froxel_dim_x - p0.x) / safe_dir_x,            // step < 0
+        ((floor(fract_p0_x) + 1.0) * froxel_dim_x - p0.x) / safe_dir_x,    // step > 0
+        step.x > 0
+    );
+    var t_max_y = select(
+        (floor(fract_p0_y) * froxel_dim_y - p0.y) / safe_dir_y,
+        ((floor(fract_p0_y) + 1.0) * froxel_dim_y - p0.y) / safe_dir_y,
+        step.y > 0
+    );
+    var t_max_z = select(
+        (floor(fract_p0_z) * froxel_dim_z - p0.z) / safe_dir_z,
+        ((floor(fract_p0_z) + 1.0) * froxel_dim_z - p0.z) / safe_dir_z,
+        step.z > 0
+    );
+
+    // Correct for zero direction components - they should never be the minimum t_max
+    if abs(dir.x) < 1e-6 { t_max_x = 1e38; }
+    if abs(dir.y) < 1e-6 { t_max_y = 1e38; }
+    if abs(dir.z) < 1e-6 { t_max_z = 1e38; }
+
+
+    // Pre-calculate screen/froxel bounds for loop check
+    let max_fx = i32((cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x);
+    let max_fy = i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y);
+    let max_fz = i32(cfg.depth_slices); // Exclusive bound
+
+    var safety = 0u;
+    let max_steps = u32(max_fx + max_fy + max_fz + 3); // Generous upper bound
+
+    loop {
+        safety = safety + 1u;
+        if safety > max_steps { break; } // Safety break
+
+        // Add segment count to current froxel IF it's within valid bounds
+        if fx >= 0 && fx < max_fx && fy >= 0 && fy < max_fy && fz >= 0 && fz < max_fz {
+            if !add_segment_ref_to_froxel(u32(fx), u32(fy), u32(fz), cfg) {
+                 // Optional: handle case where buffer is full, though unlikely for count
+                 break;
+            }
+        } else {
+             // Stop if we step out of bounds entirely
+             break;
+        }
+
+
+        // Check if we've reached the end froxel (Manhattan distance check can be faster)
+        if fx == fx1 && fy == fy1 && fz == fz1 { break; }
+
+        // Find axis with minimum t_max value to find the next froxel boundary crossed
+        if t_max_x < t_max_y && t_max_x < t_max_z {
+            // X axis traversal
+            fx += step.x;
+            t_max_x += delta_dist.x;
+        } else if t_max_y < t_max_z {
+            // Y axis traversal
+            fy += step.y;
+            t_max_y += delta_dist.y;
+        } else {
+            // Z axis traversal
+            fz += step.z;
+            t_max_z += delta_dist.z;
+        }
+
+         // Check if we have stepped past the target froxel along any axis where movement occurs
+         // This prevents infinite loops for axis-aligned lines ending exactly on a boundary
+        if (step.x > 0 && fx > fx1) || (step.x < 0 && fx < fx1) || (step.y > 0 && fy > fy1) || (step.y < 0 && fy < fy1) || (step.z > 0 && fz > fz1) || (step.z < 0 && fz < fz1) {
+             break;
+        }
     }
-    // Add end froxel if different and valid
-     if ((fx0 != fx1 || fy0 != fy1 || fz0 != fz1) && fx1 >= 0 && fy1 >= 0 && fz1 >= 0) {
-        add_segment_ref_to_froxel(u32(fx1), u32(fy1), u32(fz1), cfg);
-    }
-    // Need to add ALL intermediate froxels crossed by the line segment.
 }
+
+// Helper for integer sign needed in traversal
+fn sgn_i32(f: f32) -> i32 {
+    if f > 1e-6 { return 1; }
+    if f < -1e-6 { return -1; }
+    return 0;
+}
+
 
 @compute @workgroup_size(64, 1, 1) // Match Rust dispatch size if possible
 fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let strand_idx = id.x; // Assuming dispatching per strand
     let num_strands = arrayLength(&strand_metadata);
 
-    if (strand_idx >= num_strands) {
+    if strand_idx >= num_strands {
         return;
     }
 
@@ -144,7 +244,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let num_vertices_in_strand = strand_meta.count;
     let start_vertex_offset = strand_meta.offset; // Offset into vertices buffer
 
-    if (num_vertices_in_strand < 2u) {
+    if num_vertices_in_strand < 2u {
         return;
     }
 
@@ -154,10 +254,12 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = start_vertex_offset + i;
+        if current_vtx_idx >= arrayLength(&vertices) { break; } // Bounds check
+
         let current_vtx = vertices[current_vtx_idx];
         let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
-        // Trace this segment (prev_screen_pos, current_screen_pos)
+        // Trace this segment using the *correct* traversal logic
         trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
 
         prev_screen_pos = current_screen_pos;
@@ -202,7 +304,7 @@ fn zeroing_shared_scan(local_id_x: u32) {
 // Sum reduction within a workgroup
 fn sum_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
     var subgroup_sum = subgroupAdd(value);
-    if (subgroup_local_id == 0u) {
+    if subgroup_local_id == 0u {
         subgroup_scan_sums[subgroup_id] = subgroup_sum;
     }
     workgroupBarrier();
@@ -213,7 +315,7 @@ fn sum_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
 // Exclusive scan within a workgroup
 fn scan_exclusive_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
     let subgroup_prefix_sum = subgroupInclusiveAdd(value);
-    if (subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u) {
+    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
         subgroup_scan_sums[subgroup_id] = subgroup_prefix_sum;
     }
     workgroupBarrier();
@@ -246,8 +348,8 @@ fn scan_sums(
     var value = 0u;
     // TODO: Check bounds carefully based on number of elements being scanned this round
     // pc.scan_save_base might represent the *end* of the read range for this pass.
-    if (current_read_idx < pc.scan_save_base) { // Example bound check
-         value = input_counts[current_read_idx];
+    if current_read_idx < pc.scan_save_base { // Example bound check
+        value = input_counts[current_read_idx];
     }
 
     let wg_sum = sum_workgroup(value, subgroup_id, subgroup_local_id);
@@ -262,35 +364,35 @@ fn scan_sums(
 #ifdef STAGE_SCAN_LAST
 @compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
 fn scan_last(
-     @builtin(local_invocation_id) local_id: vec3u,
-     @builtin(subgroup_id) subgroup_id: u32,
-     @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(local_invocation_id) local_id: vec3u,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
 ) {
-     zeroing_shared_scan(local_id.x);
-     let num_to_scan = pc.scan_save_base - pc.scan_load_base;
-     let read_idx = pc.scan_load_base + local_id.x;
+    zeroing_shared_scan(local_id.x);
+    let num_to_scan = pc.scan_save_base - pc.scan_load_base;
+    let read_idx = pc.scan_load_base + local_id.x;
 
-     var value = 0u;
-     if local_id.x < num_to_scan {
+    var value = 0u;
+    if local_id.x < num_to_scan {
          // Read from *output_offsets* as it holds intermediate sums from previous stage
-         value = output_offsets[read_idx];
-     }
+        value = output_offsets[read_idx];
+    }
 
-     let prefix_sum = scan_exclusive_workgroup(value, subgroup_id, subgroup_local_id);
+    let prefix_sum = scan_exclusive_workgroup(value, subgroup_id, subgroup_local_id);
 
-     if local_id.x < num_to_scan {
+    if local_id.x < num_to_scan {
           // Write prefix sum back into output_offsets
-         output_offsets[read_idx] = prefix_sum;
-     }
+        output_offsets[read_idx] = prefix_sum;
+    }
 
      // Write total sum (last element's prefix_sum + last element's value)
      // Needs careful coordination - often done by last thread.
-     if local_id.x == SCAN_THREADS - 1u {
-         let total_sum = prefix_sum + value; // Sum for this workgroup (only 1 WG in scan_last)
+    if local_id.x == SCAN_THREADS - 1u {
+        let total_sum = prefix_sum + value; // Sum for this workgroup (only 1 WG in scan_last)
          // Write to the designated total count slot (num_tiles index)
-         let num_tiles = pc.num_elements; // Assuming num_elements holds num_tiles
-         output_offsets[num_tiles] = total_sum;
-     }
+        let num_tiles = pc.num_elements; // Assuming num_elements holds num_tiles
+        output_offsets[num_tiles] = total_sum;
+    }
 }
 #endif // STAGE_SCAN_LAST
 
@@ -310,9 +412,9 @@ fn scan_prfx(
 
     var value = 0u;
      // TODO: Check bounds carefully based on number of elements being scanned this round
-    if (current_read_idx < pc.scan_save_base) { // Example bound check
+    if current_read_idx < pc.scan_save_base { // Example bound check
          // Read intermediate values (which were sums before scan_last, prefix sums after)
-         value = output_offsets[current_read_idx];
+        value = output_offsets[current_read_idx];
     }
 
     // Perform exclusive scan on these values *within* the workgroup
@@ -322,7 +424,7 @@ fn scan_prfx(
     let block_sum = output_offsets[pc.scan_save_base + wg_idx];
 
     // Write final prefix sum: block_sum + local_prefix_sum
-    if (current_read_idx < pc.scan_save_base) {
+    if current_read_idx < pc.scan_save_base {
         output_offsets[current_read_idx] = block_sum + local_prefix_sum;
     }
 }
@@ -340,7 +442,7 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
     let tile_idx = id.x;
     let num_tiles = arrayLength(&current_tile_write_indices_buffer); // Assumes buffer is exact size
 
-    if (tile_idx >= num_tiles) {
+    if tile_idx >= num_tiles {
         return;
     }
 
@@ -371,7 +473,7 @@ fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, 
     let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
     let num_tiles = arrayLength(&current_tile_write_indices_buffer);
 
-    if (froxel_idx < num_tiles) {
+    if froxel_idx < num_tiles {
         // Get the write index for this tile atomically
         let write_index = atomicAdd(&current_tile_write_indices_buffer[froxel_idx], 1u);
 
@@ -491,12 +593,13 @@ fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref
     }
 }
 
+
 @compute @workgroup_size(64, 1, 1)
 fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let strand_idx = id.x;
     let num_strands = arrayLength(&strand_metadata);
 
-    if (strand_idx >= num_strands) {
+    if strand_idx >= num_strands {
         return;
     }
 
@@ -504,7 +607,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let num_vertices_in_strand = strand_meta.count;
     let start_vertex_offset = strand_meta.offset;
 
-    if (num_vertices_in_strand < 2u) {
+    if num_vertices_in_strand < 2u {
         return;
     }
 
