@@ -97,6 +97,16 @@ fn hash12(p: vec2<f32>) -> f32
     return fract((p3.x + p3.y) * p3.z);
 }
 
+fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
+    let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
+    let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
+    // Clamp coordinates to valid range before calculating index
+    let clamped_x = min(x, froxels_x - 1u);
+    let clamped_y = min(y, froxels_y - 1u);
+    let clamped_z = min(z, config.depth_slices - 1u);
+    return clamped_z * froxels_x * froxels_y + clamped_y * froxels_x + clamped_x;
+}
+
 // strand_rasterizer.wgsl
 @compute @workgroup_size(8, 8, 1)
 fn rasterize_strands(
@@ -113,14 +123,9 @@ fn rasterize_strands(
 
     // Placeholder: Output the tile_count of this tile divided by num_elements
     let tile = workgroup_id.xy;
-    let num_tiles_x = config.screen_width / config.froxel_size_x;
-    let num_tiles_y = config.screen_height / config.froxel_size_y;
-    let num_tiles_z = config.depth_slices;
-
-    let lin_idx = tile.y * num_tiles_x * num_tiles_z + tile.x * num_tiles_z; // this is technically just the first layer in z-depth.
     var frag_count: u32 = 0;
     for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) {
-        frag_count += tile_counts_buffer[lin_idx + dz];
+        frag_count += tile_counts_buffer[calculate_froxel_index(tile.x, tile.y, dz, config)];
     }
     let tile_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
 

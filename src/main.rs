@@ -991,9 +991,9 @@ fn use_strand_geometry(
     // This is an example of how to retrieve the shader storage buffer created in the main world above
     // and use it in the render world.
     for (entity, geometry) in query.iter() {
-        if raster_resources.bind_group.is_some() {
-            continue;
-        }
+        // if raster_resources.bind_group.is_some() {
+        //     continue;
+        // }
 
         // --- Raster resources ---
         info!("Using strand geometry for entity: {:?}", entity);
@@ -1001,7 +1001,7 @@ fn use_strand_geometry(
             warn!("Index storage buffer not found for entity: {:?}", entity);
             continue;
         };
-        info!("[{:?}] Index storage buffer created.", entity);
+        info!("[{:?}] Index storage buffer found.", entity);
         let Some(vertex_storage_buffer) = storage_buffers.get(&geometry.vertices) else {
             warn!("Vertex storage buffer not found for entity: {:?}", entity);
             continue;
@@ -1012,7 +1012,7 @@ fn use_strand_geometry(
             continue;
         };
         info!(
-            "[{:?}] Vertex storage buffer created: {:?}",
+            "[{:?}] Vertex storage buffer found: {:?}",
             entity, vertex_storage_buffer.buffer
         );
         let Some(froxel_buffer) = raster_resources.froxel_buffer.as_ref() else {

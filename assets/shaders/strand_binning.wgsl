@@ -449,7 +449,7 @@ fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref
     var safety = 0u;
     loop {
         safety = safety + 1u;
-        if (safety > 1000u) { break; } // Safety check
+        if (safety > 2048u) { break; } // Safety check
         
         // Add segment to current froxel
         if (!add_segment_ref_to_froxel_place(u32(fx), u32(fy), u32(fz), segment_ref, cfg)) { break; }
