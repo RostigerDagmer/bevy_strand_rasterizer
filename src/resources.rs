@@ -64,7 +64,7 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Tile counts buffer (for debug; read-only storage buffer)
+                // Tile offsets buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 3,
                     visibility: ShaderStages::COMPUTE,
@@ -75,12 +75,23 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Froxel buffer (read-write storage buffer)
+                // Tile counts buffer (for debug; read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: 4,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Froxel buffer (read-only storage buffer)
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -88,7 +99,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
@@ -99,7 +110,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Froxel configuration (uniform buffer)
                 BindGroupLayoutEntry {
-                    binding: 6,
+                    binding: 7,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -110,7 +121,7 @@ impl StrandRasterizerPipeline {
                 },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: 7,
+                    binding: 8,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -218,7 +229,6 @@ impl FromWorld for StrandBinningPipeline {
         let device = world.resource::<RenderDevice>();
 
         // --- Define Layouts ---
-        const DEFAULT_SIZE: BufferSize = BufferSize::new(1024u64).unwrap(); // Default size for storage buffers	
         // Layout for STAGE_COUNT
         let count_layout = device.create_bind_group_layout(
             "strand_binning_count_layout",

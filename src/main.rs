@@ -29,13 +29,13 @@ mod shader_types;
 use shader_types::*;
 
 const MAX_NUMBER_OF_STRANDS: u32 = 1024 * 1024; // for physics
-const SCAN_NUMBER_OF_THREADS_PER_WORKGROUP: u32 = 256; // Or whatever the scan shader uses
+
 /// The row size of the `keys` processed by each workgroup.
 pub const NUMBER_OF_ROWS_PER_WORKGROUP: u32 = 16;
 pub const NUMBER_OF_THREADS_PER_WORKGROUP: u32 = 256;
 
 /// The number of keys processed by this workgroup.
-const NUMBER_OF_KEYS_OFFSET: u32 = 4;
+const SCAN_NUMBER_OF_KEYS_OFFSET: u32 = 4;
 /// The scan step reads from the `number_segs` buffer starting at this index.
 const SCAN_LOAD_BASE_OFFSET: u32 = 8;
 /// The scan step writes to the `number_segs` buffer starting at this index.
@@ -118,6 +118,7 @@ pub fn create_strand_bind_group(
     layout: &BindGroupLayout,
     vertex_buffer: &Buffer,
     index_buffer: &Buffer,
+    tile_offsets_buffer: &Buffer,
     tile_counts_buffer: &Buffer,
     meta_buffer: &Buffer,
     packed_segments: &Buffer,
@@ -143,22 +144,26 @@ pub fn create_strand_bind_group(
             },
             BindGroupEntry {
                 binding: 3,
-                resource: tile_counts_buffer.as_entire_binding(),
+                resource: tile_offsets_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 4,
-                resource: packed_segments.as_entire_binding(),
+                resource: tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 5,
-                resource: BindingResource::TextureView(output_texture),
+                resource: packed_segments.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 6,
-                resource: froxel_config_buffer.as_entire_binding(),
+                resource: BindingResource::TextureView(output_texture),
             },
             BindGroupEntry {
                 binding: 7,
+                resource: froxel_config_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 8,
                 resource: view_buffer.clone(),
             },
         ],
@@ -383,6 +388,7 @@ fn run_binning_pass(
 
     let max_compute_workgroups_per_dimension =
         render_device.limits().max_compute_workgroups_per_dimension;
+    let threads_per_workgroup = NUMBER_OF_THREADS_PER_WORKGROUP;
 
     // --- Clear count buffer (important!) ---
     // Use encoder.clear_buffer(...) or a small compute shader pass
@@ -448,9 +454,9 @@ fn run_binning_pass(
         // Assuming reuse of tile_offsets_buffer for simplicity here, needs careful size calculation.
         let mut save_base = num_tiles; // Start writing sums after the main counts
         let mut rounds = vec![];
-        while save_base - load_base > SCAN_NUMBER_OF_THREADS_PER_WORKGROUP {
+        while save_base - load_base > NUMBER_OF_THREADS_PER_WORKGROUP {
             let number_of_workgroups =
-                (save_base - load_base).div_ceil(SCAN_NUMBER_OF_THREADS_PER_WORKGROUP);
+                (save_base - load_base).div_ceil(NUMBER_OF_THREADS_PER_WORKGROUP);
             rounds.push((load_base, save_base, number_of_workgroups));
             load_base = save_base;
             save_base += number_of_workgroups;
@@ -635,7 +641,10 @@ impl Node for StrandRasterizerNode {
 
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
-             warn!("Node running on view {:?} without ViewUniformOffset", view_entity);
+            warn!(
+                "Node running on view {:?} without ViewUniformOffset",
+                view_entity
+            );
             return Ok(());
         };
 
@@ -733,6 +742,7 @@ impl Node for StrandRasterizerNode {
             &raster_pipeline.bind_group_layout,
             vertex_buffer,
             index_buffer,
+            tile_offsets_buffer,
             tile_counts_buffer,
             meta_buffer,
             packed_segments_buffer,
@@ -894,13 +904,13 @@ fn prepare_binning_buffers(
     // Create the tile offsets buffer
     let tile_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_tile_offsets_buffer"),
-        size: (num_tiles + 1) as u64 * 4,
+        size: (num_tiles * 4 + 1) as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: true,
     });
 
     // initializes with zeros
-    let tile_offsets = vec![0u32; (num_tiles + 1) as usize];
+    let tile_offsets = vec![0u32; (num_tiles * 4 + 1) as usize];
     let mut mapped = tile_offsets_buffer.slice(..).get_mapped_range_mut();
     mapped.copy_from_slice(bytemuck::cast_slice(&tile_offsets));
     drop(mapped);
