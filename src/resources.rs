@@ -357,27 +357,32 @@ impl FromWorld for StrandBinningPipeline {
     }
 }
 
-#[derive(Resource, Default)]
 pub struct StrandBinningBindGroup {
-    // Buffers needed across stages (might need multiple BindGroup resources)
-    pub strand_points_buffer: Option<Buffer>,
-    pub strand_metadata_buffer: Option<Buffer>, // {offset, count} per strand
-    pub tile_counts_buffer: Option<Buffer>,     // array<atomic<u32>, num_tiles>
-    pub tile_offsets_buffer: Option<Buffer>, // array<u32>, size >= num_tiles + 1 (maybe larger for scan temp)
-    pub packed_segments_buffer: Option<Buffer>, // array<SegmentRef>, needs resizing based on scan total
-    pub current_tile_write_indices_buffer: Option<Buffer>, // array<atomic<u32>, num_tiles>
-
     // Bind groups for each stage
-    pub count_bind_group: Option<BindGroup>,
-    pub scan_bind_group: Option<BindGroup>, // Binds tile_counts, tile_offsets, tnumber_seg (last elem of offsets)
-    pub init_placement_idx_bind_group: Option<BindGroup>, // Binds tile_offsets, current_tile_write_indices
-    pub place_bind_group: Option<BindGroup>, // Binds geometry, tile_offsets, current_tile_write_indices, packed_segments
+    pub count_bind_group: BindGroup,
+    pub scan_bind_group: BindGroup, // Binds tile_counts, tile_offsets, tnumber_seg (last elem of offsets)
+    pub init_placement_idx_bind_group: BindGroup, // Binds tile_offsets, current_tile_write_indices
+    pub place_bind_group: BindGroup, // Binds geometry, tile_offsets, current_tile_write_indices, packed_segments
 }
+
+#[derive(Resource, Default)]
+pub struct StrandBinningBuffers {
+    // Keep Option<Buffer> for tile_counts, offsets, etc.
+    pub tile_counts_buffer: Option<Buffer>,
+    pub tile_offsets_buffer: Option<Buffer>,
+    pub current_tile_write_indices_buffer: Option<Buffer>,
+    pub packed_segments_buffer: Option<Buffer>,
+     // Add handles/references needed from StrandGeometry
+     pub vertex_buffer: Option<Buffer>, // Store the actual buffer ref
+     pub meta_buffer: Option<Buffer>, // Store the actual buffer ref
+}
+
+
+
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
     pub pipeline: Option<ComputePipeline>,
-    pub bind_group: Option<BindGroup>,
     pub froxel_buffer: Option<Buffer>,
     pub froxel_config_buffer: Option<Buffer>,
     pub output_texture: Option<TextureView>,
