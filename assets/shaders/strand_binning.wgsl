@@ -190,22 +190,32 @@ fn zeroing_shared_scan(local_id_x: u32) {
     workgroupBarrier();
 }
 
-// Exclusive scan within a workgroup
-fn scan_exclusive_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
-    // TODO: Adapt logic from reference `scan_exclusive` using subgroup ops
-    // Make sure it matches the hierarchical scan requirements.
-    return 0u; // Placeholder
-}
-
 // Sum reduction within a workgroup
 fn sum_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
-     // TODO: Adapt logic from reference `sum` using subgroup ops
-    return 0u; // Placeholder
+    var subgroup_sum = subgroupAdd(value);
+    if (subgroup_local_id == 0u) {
+        subgroup_scan_sums[subgroup_id] = subgroup_sum;
+    }
+    workgroupBarrier();
+    subgroup_sum = select(0u, subgroup_scan_sums[subgroup_local_id], subgroup_local_id < SCAN_SUBGROUPS);
+    return subgroupAdd(subgroup_sum);
+}
+
+// Exclusive scan within a workgroup
+fn scan_exclusive_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
+    let subgroup_prefix_sum = subgroupInclusiveAdd(value);
+    if (subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u) {
+        subgroup_scan_sums[subgroup_id] = subgroup_prefix_sum;
+    }
+    workgroupBarrier();
+    let prev_subgroup_sum = select(0u, subgroup_scan_sums[subgroup_local_id], subgroup_local_id < subgroup_id);
+    let prev_sum = subgroupAdd(prev_subgroup_sum);
+    return prev_sum + subgroup_prefix_sum - value;
 }
 
 fn get_scan_workgroup_index(workgroup_id: vec3u, num_workgroups: vec3u) -> u32 {
     // Adapt from reference if using dispatch_workgroup_ext
-    return workgroup_id.x; // Simplified
+    return workgroup_id.y * num_workgroups.x + workgroup_id.x + pc.workgroup_offset;
 }
 
 #endif // Scan stages common parts

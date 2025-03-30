@@ -1,6 +1,7 @@
 use std::hash::Hash;
 
 use bevy::core_pipeline::core_3d::graph::Core3d;
+use bevy::gizmos::config;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_asset::RenderAssets;
@@ -15,6 +16,7 @@ use bevy::render::view::ViewUniforms;
 use bevy::render::view::{ViewTarget, ViewUniform};
 use bevy::render::{Render, RenderApp, RenderSet, render_resource::*};
 use bevy::utils::HashMap;
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_radix_sort::{self, GetSubgroupSizePlugin, RadixSortPlugin, dispatch_workgroup_ext};
 use bytemuck::{Pod, Zeroable};
 mod dson;
@@ -554,6 +556,68 @@ fn run_binning_pass(
     // packed_segments_buffer and tile_offsets_buffer are ready for the rasterizer
 }
 
+fn run_raster_pass(
+    render_device: &RenderDevice,
+    pipeline_cache: &PipelineCache,
+    pipeline: &StrandRasterizerPipeline,
+    render_context: &mut RenderContext,
+    froxel_config: &FroxelConfig,
+    resources: &StrandRasterizerResources,
+) {
+    let Some(render_target) = &resources.output_texture else {
+        warn!("Output texture not found");
+        return;
+    };
+    let Some(packed_buffer) = &resources.froxel_buffer else {
+        warn!("Froxel buffer not found");
+        return;
+    };
+    let Some(config_buffer) = &resources.froxel_config_buffer else {
+        warn!("Froxel config buffer not found");
+        return;
+    };
+
+    let encoder = render_context.command_encoder(); // Get CommandEncoder
+
+    // --- Rasterize ---
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("Strand Rasterize"),
+            ..default()
+        });
+        let Some(raster_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipeline.rasterize_pipeline)
+        else {
+            warn!("Raster pipeline not found");
+            return;
+        };
+        pass.set_pipeline(raster_pipeline);
+        pass.set_bind_group(
+            0,
+            resources.bind_group.as_ref().unwrap(), // Assume correctly populated bind group
+            &[],
+        );
+        // Set push constants if needed
+        let pushconstants = PushConstants {
+            num_elements: resources.strand_count.unwrap_or(0),
+            workgroup_offset: 0,
+            scan_load_base: 0,
+            scan_save_base: 0,
+        };
+        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+
+        // Dispatch based on number of strands or segments
+        let workgroup_size_x = froxel_config.froxel_size_x;
+        let workgroup_size_y = froxel_config.froxel_size_y;
+        let workgroups_x = froxel_config.screen_width / workgroup_size_x;
+        let workgroups_y = froxel_config.screen_height / workgroup_size_y;
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    }
+
+    // --- Rasterization complete ---
+    // output_texture is ready for composition
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StrandRasterizerNode;
 
@@ -603,7 +667,16 @@ impl Node for StrandRasterizerNode {
         // For now, we'll skip the rasterization pass
         // In a future implementation, we would:
         // 1. Wait for the binning pass to complete
-        // 2. Execute the rasterization pass
+
+        run_raster_pass(
+            render_device,
+            pipeline_cache,
+            strand_raster_pipeline,
+            render_context,
+            &frustrum,
+            resources,
+        );
+
         // 3. Integrate with the PBR pipeline
 
         Ok(())
@@ -813,7 +886,13 @@ fn set_strand_geometry(
 
         let geometry = &geometry_library[0];
         // Extract vertices
-        let vertices: Vec<[f32; 3]> = geometry.vertices.values.clone();
+        let vertices: Vec<[f32; 3]> = geometry.vertices.values.clone().iter().map(|v| {
+            [
+                v[0] * 0.0254, // TODO: pass transform to shaders
+                v[1] * 0.0254, // TODO: pass transform to shaders
+                v[2] * 0.0254, // TODO: pass transform to shaders
+            ]
+        }).collect();
         let vertex_buffer = ShaderStorageBuffer::from(vertices);
         // info!("Vertex buffer: {:?}", vertex_buffer);
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
@@ -986,14 +1065,26 @@ struct StrandAsset {
     handle: Handle<DsonAsset>,
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
     commands.spawn((StrandAsset { handle }));
 
     commands.spawn((
-        Camera3d::default(),
+        // Camera3d::default(),
         FroxelConfig::default(),
         Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
+        PanOrbitCamera::default(),
+    ));
+
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.05, 0.05, 0.05))),
+        MeshMaterial3d(materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.0, 0.5, 0.0),
     ));
 }
 
@@ -1013,6 +1104,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(StrandRasterizerPlugin)
+        .add_plugins(PanOrbitCameraPlugin)
         .init_asset::<DsonAsset>()
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
