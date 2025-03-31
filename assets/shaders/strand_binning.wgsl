@@ -335,6 +335,7 @@ fn get_scan_workgroup_index(workgroup_id: vec3u, num_workgroups: vec3u) -> u32 {
 #ifdef STAGE_SCAN_SUMS
 @compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
 fn scan_sums(
+    @builtin(global_invocation_id) global_id: vec3u,
     @builtin(workgroup_id) workgroup_id: vec3u,
     @builtin(num_workgroups) num_workgroups: vec3u,
     @builtin(local_invocation_id) local_id: vec3u,
@@ -347,14 +348,17 @@ fn scan_sums(
     let current_read_idx = base_read_idx + local_id.x;
 
     var value = 0u;
-    // TODO: Check bounds carefully based on number of elements being scanned this round
-    // pc.scan_save_base might represent the *end* of the read range for this pass.
-    if current_read_idx < pc.scan_save_base { // Example bound check
-        value = input_counts[current_read_idx];
+    if current_read_idx < arrayLength(&input_counts) { // Example bound check
+        value = input_counts[global_id.x];
+    } else {
+        value = output_offsets[current_read_idx];
     }
 
     let wg_sum = sum_workgroup(value, subgroup_id, subgroup_local_id);
 
+    if current_read_idx < arrayLength(&output_offsets) {
+        output_offsets[current_read_idx] = wg_sum;
+    }
     if local_id.x == 0u {
         // Write sum to the next level of hierarchy
         output_offsets[pc.scan_save_base + wg_idx] = wg_sum;
@@ -375,7 +379,7 @@ fn scan_last(
 
     var value = 0u;
     if local_id.x < num_to_scan {
-         // Read from *output_offsets* as it holds intermediate sums from previous stage
+         // Read from *output_offsets* as it holds intermediate sums from previous stage (after num_tiles elements)
         value = output_offsets[read_idx];
     }
 
@@ -400,6 +404,7 @@ fn scan_last(
 #ifdef STAGE_SCAN_PRFX
 @compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
 fn scan_prfx(
+    @builtin(global_invocation_id) global_id: vec3u,
     @builtin(workgroup_id) workgroup_id: vec3u,
     @builtin(num_workgroups) num_workgroups: vec3u,
     @builtin(local_invocation_id) local_id: vec3u,
@@ -411,23 +416,18 @@ fn scan_prfx(
     let base_read_idx = pc.scan_load_base + wg_idx * SCAN_THREADS;
     let current_read_idx = base_read_idx + local_id.x;
 
-    var value = 0u;
-     // TODO: Check bounds carefully based on number of elements being scanned this round
-    if current_read_idx < pc.scan_save_base { // Example bound check
-         // Read intermediate values (which were sums before scan_last, prefix sums after)
-        value = output_offsets[current_read_idx];
-    }
+    // var value = 0u;
+    // Read intermediate values (workgroup sums)
+    let value = output_offsets[current_read_idx];
 
     // Perform exclusive scan on these values *within* the workgroup
     let local_prefix_sum = scan_exclusive_workgroup(value, subgroup_id, subgroup_local_id);
 
     // Get the prefix sum *from the level above* (calculated in previous scan_last/scan_prfx pass)
-    let block_sum = output_offsets[pc.scan_save_base + wg_idx];
+    let block_sum = output_offsets[base_read_idx];
 
     // Write final prefix sum: block_sum + local_prefix_sum
-    if current_read_idx < pc.scan_save_base {
-        output_offsets[current_read_idx] = block_sum + local_prefix_sum;
-    }
+    output_offsets[current_read_idx] = block_sum + local_prefix_sum;
 }
 #endif // STAGE_SCAN_PRFX
 

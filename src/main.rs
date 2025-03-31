@@ -425,8 +425,6 @@ fn run_binning_pass(
         });
         pass.set_bind_group(0, &bind_groups.scan_bind_group, &[]); // Scan bind group
 
-        let number_of_elements_to_scan = num_tiles; // We are scanning the tile counts
-
         // Reuse scan pipeline handles from StrandBinningPipeline
         let Some(scan_sums_pipeline) =
             pipeline_cache.get_compute_pipeline(pipelines.scan_sums_pipeline)
@@ -461,6 +459,7 @@ fn run_binning_pass(
             load_base = save_base;
             save_base += number_of_workgroups;
         }
+        info!("Scan rounds: {:?}", rounds);
 
         // Scan Sums (Hierarchical reduction)
         pass.set_pipeline(scan_sums_pipeline);
@@ -487,8 +486,8 @@ fn run_binning_pass(
         // Scan Prefix (Propagate scan results back down)
         pass.set_pipeline(scan_prfx_pipeline);
         for (load_base, save_base, number_of_workgroups) in rounds.iter().rev() {
-            pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(load_base));
-            pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(save_base));
+            pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(save_base));
+            pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(load_base));
             dispatch_workgroup_ext(
                 &mut pass,
                 *number_of_workgroups,
@@ -904,13 +903,13 @@ fn prepare_binning_buffers(
     // Create the tile offsets buffer
     let tile_offsets_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_tile_offsets_buffer"),
-        size: (num_tiles * 4 + 1) as u64 * 4,
+        size: (num_tiles * 2 + 1) as u64 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: true,
     });
 
     // initializes with zeros
-    let tile_offsets = vec![0u32; (num_tiles * 4 + 1) as usize];
+    let tile_offsets = vec![0u32; (num_tiles * 2 + 1) as usize];
     let mut mapped = tile_offsets_buffer.slice(..).get_mapped_range_mut();
     mapped.copy_from_slice(bytemuck::cast_slice(&tile_offsets));
     drop(mapped);

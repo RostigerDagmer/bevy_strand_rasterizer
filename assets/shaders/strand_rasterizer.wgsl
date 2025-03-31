@@ -178,80 +178,80 @@ fn rasterize_strands(
     //    let dz = config.depth_slices - 1 - dz_rev; // Iterate Z from far to near
 
     // Or loop FRONT TO BACK (simpler to start)
-    for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
+    // for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
-        let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
+    //     let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
 
-        // Find the range of segments for this froxel in the packed buffer
-        // Ensure read index doesn't go out of bounds
-        if (froxel_idx + 1u >= arrayLength(&tile_offsets_buffer)) { continue; } // Safety check
+    //     // Find the range of segments for this froxel in the packed buffer
+    //     // Ensure read index doesn't go out of bounds
+    //     if (froxel_idx + 1u >= arrayLength(&tile_offsets_buffer)) { continue; } // Safety check
 
-        let start_segment_offset = tile_offsets_buffer[froxel_idx];
-        let end_segment_offset = tile_offsets_buffer[froxel_idx + 1u]; // Exclusive end
-        let segment_count_in_froxel = end_segment_offset - start_segment_offset;
+    //     let start_segment_offset = tile_offsets_buffer[froxel_idx];
+    //     let end_segment_offset = tile_offsets_buffer[froxel_idx + 1u]; // Exclusive end
+    //     let segment_count_in_froxel = end_segment_offset - start_segment_offset;
 
-        // Process all segments within this froxel
-        for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
-            let packed_buffer_idx = start_segment_offset + s;
-             // Safety check packed buffer bounds
-            if (packed_buffer_idx >= arrayLength(&packed_segments_buffer)) { continue; }
+    //     // Process all segments within this froxel
+    //     for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
+    //         let packed_buffer_idx = start_segment_offset + s;
+    //          // Safety check packed buffer bounds
+    //         if (packed_buffer_idx >= arrayLength(&packed_segments_buffer)) { continue; }
 
-            let segment_ref = packed_segments_buffer[packed_buffer_idx];
+    //         let segment_ref = packed_segments_buffer[packed_buffer_idx];
 
-            // Get strand metadata
-            let strand_idx = segment_ref.strand_idx;
-            if (strand_idx >= arrayLength(&strand_metadata)) { continue; } // Safety check
-            let strand_meta = strand_metadata[strand_idx];
+    //         // Get strand metadata
+    //         let strand_idx = segment_ref.strand_idx;
+    //         if (strand_idx >= arrayLength(&strand_metadata)) { continue; } // Safety check
+    //         let strand_meta = strand_metadata[strand_idx];
 
-            // Get segment vertex indices within the strand
-            let segment_vert_idx_in_strand = segment_ref.segment_start_idx;
-            let v0_strand_idx = segment_vert_idx_in_strand;
-            let v1_strand_idx = segment_vert_idx_in_strand + 1u;
+    //         // Get segment vertex indices within the strand
+    //         let segment_vert_idx_in_strand = segment_ref.segment_start_idx;
+    //         let v0_strand_idx = segment_vert_idx_in_strand;
+    //         let v1_strand_idx = segment_vert_idx_in_strand + 1u;
 
-            // Check if segment indices are valid within the strand's vertex count
-            if (v1_strand_idx >= strand_meta.count) { continue; }
+    //         // Check if segment indices are valid within the strand's vertex count
+    //         if (v1_strand_idx >= strand_meta.count) { continue; }
 
-            // Calculate absolute vertex indices
-            let v0_abs_idx = strand_meta.offset + v0_strand_idx;
-            let v1_abs_idx = strand_meta.offset + v1_strand_idx;
+    //         // Calculate absolute vertex indices
+    //         let v0_abs_idx = strand_meta.offset + v0_strand_idx;
+    //         let v1_abs_idx = strand_meta.offset + v1_strand_idx;
 
-            // Safety check vertex buffer bounds
-            if (v0_abs_idx >= arrayLength(&vertices) || v1_abs_idx >= arrayLength(&vertices)) { continue; }
+    //         // Safety check vertex buffer bounds
+    //         if (v0_abs_idx >= arrayLength(&vertices) || v1_abs_idx >= arrayLength(&vertices)) { continue; }
 
-            // Get world-space vertex positions
-            let v0_world = vertices[v0_abs_idx].xyz;
-            let v1_world = vertices[v1_abs_idx].xyz;
+    //         // Get world-space vertex positions
+    //         let v0_world = vertices[v0_abs_idx].xyz;
+    //         let v1_world = vertices[v1_abs_idx].xyz;
 
-            // Project to screen space (pixels)
-            let p0_screen = world_to_screen(v0_world, view, f32(config.screen_width), f32(config.screen_height));
-            let p1_screen = world_to_screen(v1_world, view, f32(config.screen_width), f32(config.screen_height));
+    //         // Project to screen space (pixels)
+    //         let p0_screen = world_to_screen(v0_world, view, f32(config.screen_width), f32(config.screen_height));
+    //         let p1_screen = world_to_screen(v1_world, view, f32(config.screen_width), f32(config.screen_height));
 
-            // Skip if segment is fully behind camera or off-screen after projection
-            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
+    //         // Skip if segment is fully behind camera or off-screen after projection
+    //         if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
 
-            // Calculate analytical coverage
-            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy);
+    //         // Calculate analytical coverage
+    //         let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy);
 
-            // Simple linear falloff based on distance
-            let coverage = clamp(1.0 - dist / HAIR_RADIUS_PIXELS, 0.0, 1.0);
+    //         // Simple linear falloff based on distance
+    //         let coverage = clamp(1.0 - dist / HAIR_RADIUS_PIXELS, 0.0, 1.0);
 
-            if (coverage > 0.0) {
-                // Calculate color/alpha contribution of this hair segment fragment
-                let hair_fragment_alpha = HAIR_ALPHA * coverage;
-                let hair_fragment = vec4<f32>(HAIR_COLOR, hair_fragment_alpha);
+    //         if (coverage > 0.0) {
+    //             // Calculate color/alpha contribution of this hair segment fragment
+    //             let hair_fragment_alpha = HAIR_ALPHA * coverage;
+    //             let hair_fragment = vec4<f32>(HAIR_COLOR, hair_fragment_alpha);
 
-                // Blend this fragment OVER the current accumulated color
-                final_color = blend_over(hair_fragment, final_color);
-            }
-        } // End loop over segments in froxel
+    //             // Blend this fragment OVER the current accumulated color
+    //             final_color = blend_over(hair_fragment, final_color);
+    //         }
+    //     } // End loop over segments in froxel
 
-        // --- Optional Early Exit ---
-        // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        // if (final_color.a > 0.99) {
-        //     break; // Stop Z loop
-        // }
+    //     // --- Optional Early Exit ---
+    //     // If pixel becomes nearly opaque, we can stop processing deeper Z slices
+    //     // if (final_color.a > 0.99) {
+    //     //     break; // Stop Z loop
+    //     // }
 
-    } // End loop over depth slices (dz)
+    // } // End loop over depth slices (dz)
 
     // Write the final accumulated color to the render target
     textureStore(render_target, pixel_coord_int, final_color);
