@@ -937,7 +937,7 @@ fn prepare_binning_buffers(
     // Create the packed segments buffer
     let packed_segments_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_packed_segments_buffer"),
-        size: 1024 * 1024 * 4, // Initial size, will be resized after scan
+        size: 1024 * 1024 * 8 * 4, // Initial size, will be resized after scan
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
