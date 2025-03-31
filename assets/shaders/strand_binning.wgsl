@@ -288,146 +288,263 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(0) var<storage, read> input_counts: array<u32>; // tile_counts_buffer (non-atomic read)
 @group(0) @binding(1) var<storage, read_write> output_offsets: array<u32>; // tile_offsets_buffer
 
-// Constants for scan logic (can be shader defs or derived)
 const SCAN_THREADS: u32 = #{NUMBER_OF_THREADS_PER_WORKGROUP}; // e.g., 256
-const SCAN_SUBGROUP_THREADS: u32 = #{NUMBER_OF_THREADS_PER_SUBGROUP}; // e.g., 64
-const SCAN_SUBGROUPS: u32 = SCAN_THREADS / SCAN_SUBGROUP_THREADS;
+const SCAN_SUBGROUP_THREADS: u32 = #{NUMBER_OF_THREADS_PER_SUBGROUP}; // e.g., 32
+const SCAN_SUBGROUPS: u32 = SCAN_THREADS / SCAN_SUBGROUP_THREADS; // e.g., 8
 
-var<workgroup> subgroup_scan_sums: array<u32, SCAN_SUBGROUPS>;
-
-// --- Scan Helper Functions (Adapt from reference scan shader) ---
-
-fn zeroing_shared_scan(local_id_x: u32) {
-    if local_id_x < SCAN_SUBGROUPS { subgroup_scan_sums[local_id_x] = 0u; }
-    workgroupBarrier();
-}
-
-// Sum reduction within a workgroup
-fn sum_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
-    var subgroup_sum = subgroupAdd(value);
-    if subgroup_local_id == 0u {
-        subgroup_scan_sums[subgroup_id] = subgroup_sum;
-    }
-    workgroupBarrier();
-    subgroup_sum = select(0u, subgroup_scan_sums[subgroup_local_id], subgroup_local_id < SCAN_SUBGROUPS);
-    return subgroupAdd(subgroup_sum);
-}
-
-// Exclusive scan within a workgroup
-fn scan_exclusive_workgroup(value: u32, subgroup_id: u32, subgroup_local_id: u32) -> u32 {
-    let subgroup_prefix_sum = subgroupInclusiveAdd(value);
-    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
-        subgroup_scan_sums[subgroup_id] = subgroup_prefix_sum;
-    }
-    workgroupBarrier();
-    let prev_subgroup_sum = select(0u, subgroup_scan_sums[subgroup_local_id], subgroup_local_id < subgroup_id);
-    let prev_sum = subgroupAdd(prev_subgroup_sum);
-    return prev_sum + subgroup_prefix_sum - value;
-}
+// Shared memory for inter-subgroup communication and temporary storage
+var<workgroup> subgroup_partials: array<u32, SCAN_SUBGROUPS>;
+var<workgroup> wg_scan_storage: array<u32, SCAN_THREADS>; // For Blelloch intermediate/final values
+// --- Helper Functions ---
 
 fn get_scan_workgroup_index(workgroup_id: vec3u, num_workgroups: vec3u) -> u32 {
-    // Adapt from reference if using dispatch_workgroup_ext
-    return workgroup_id.y * num_workgroups.x + workgroup_id.x + pc.workgroup_offset;
+    let flat_grid_index = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    return flat_grid_index + pc.workgroup_offset;
 }
 
-#endif // Scan stages common parts
+// Performs an INCLUSIVE scan within the workgroup using Blelloch method modification.
+// Stores the intermediate (potentially zeroed last element) result in wg_scan_storage.
+// Returns the total sum of the workgroup (only valid for the last thread).
+fn workgroup_inclusive_scan_blelloch(
+    local_id: vec3u,
+    subgroup_id: u32,
+    subgroup_local_id: u32,
+    value: u32
+) -> u32 {
+    let sg_inclusive_sum = subgroupInclusiveAdd(value);
+
+    // Last lane of each subgroup writes its inclusive sum (subgroup total) to shared memory
+    if (local_id.x < SCAN_SUBGROUPS) { subgroup_partials[local_id.x] = 0u; }
+    workgroupBarrier();
+    if (subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u) {
+        subgroup_partials[subgroup_id] = sg_inclusive_sum;
+    }
+    workgroupBarrier();
+
+    // Scan the subgroup partial sums (sequentially by thread 0) -> Exclusive Prefix
+    if (local_id.x == 0u) {
+        var accumulator = 0u;
+        for (var i = 0u; i < SCAN_SUBGROUPS; i = i + 1u) {
+            let temp = subgroup_partials[i];
+            subgroup_partials[i] = accumulator; // Write exclusive prefix
+            accumulator += temp;
+        }
+    }
+    workgroupBarrier();
+
+    // Combine subgroup scan results with the scanned partials (exclusive prefix)
+    let prefix_for_my_subgroup = subgroup_partials[subgroup_id];
+    let block_local_inclusive_sum = sg_inclusive_sum + prefix_for_my_subgroup;
+
+    // Store intermediate result in workgroup storage (for Blelloch down-sweep prep)
+    wg_scan_storage[local_id.x] = block_local_inclusive_sum;
+    workgroupBarrier();
+
+    // Blelloch modification: Last thread reads total sum AND zeros its storage slot
+    var total_wg_sum = 0u;
+    if (local_id.x == SCAN_THREADS - 1u) {
+        total_wg_sum = wg_scan_storage[local_id.x]; // Read total sum before zeroing
+        wg_scan_storage[local_id.x] = 0u;          // Zero last element's storage
+    }
+    // Note: total_wg_sum only valid on last thread here.
+    workgroupBarrier();
+
+    // Intermediate results for down-sweep are now in wg_scan_storage (last element zeroed)
+    return total_wg_sum;
+}
+
+// Performs an EXCLUSIVE scan within the workgroup.
+// Stores the final exclusive scan result in wg_scan_storage.
+// Returns the total sum of the workgroup (exclusive sum of last element + value of last element).
+// Only valid for the last thread.
+fn workgroup_exclusive_scan(
+    local_id: vec3u,
+    subgroup_id: u32,
+    subgroup_local_id: u32,
+    value: u32
+) -> u32 {
+
+    let sg_exclusive_sum = subgroupExclusiveAdd(value);
+    let sg_inclusive_sum = subgroupInclusiveAdd(value); // Need inclusive sum for totals
+
+    // Last lane of each subgroup writes its INCLUSIVE sum (subgroup total) to shared memory
+    if (local_id.x < SCAN_SUBGROUPS) { subgroup_partials[local_id.x] = 0u; }
+    workgroupBarrier();
+    if (subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u) {
+        subgroup_partials[subgroup_id] = sg_inclusive_sum;
+    }
+    workgroupBarrier();
+
+    // Scan the subgroup partial sums (sequentially by thread 0) -> Exclusive Prefix
+    if (local_id.x == 0u) {
+        var accumulator = 0u;
+        for (var i = 0u; i < SCAN_SUBGROUPS; i = i + 1u) {
+            let temp = subgroup_partials[i]; // Read original inclusive sum
+            subgroup_partials[i] = accumulator; // Write exclusive prefix
+            accumulator += temp;
+        }
+    }
+    workgroupBarrier();
+
+    // Combine subgroup exclusive scan results with the scanned partials (exclusive prefix)
+    let prefix_for_my_subgroup = subgroup_partials[subgroup_id];
+    let final_exclusive_sum = sg_exclusive_sum + prefix_for_my_subgroup;
+
+    // Store final exclusive sum in workgroup storage
+    wg_scan_storage[local_id.x] = final_exclusive_sum;
+    workgroupBarrier();
+
+    // Calculate total sum (last element's exclusive sum + last element's value)
+    var total_wg_sum = 0u;
+    if (local_id.x == SCAN_THREADS - 1u) {
+        // Read the last element's computed exclusive sum and add its original value
+        total_wg_sum = wg_scan_storage[SCAN_THREADS - 1u] + value;
+    }
+    // Return value only used by last thread.
+    return total_wg_sum;
+}
+#endif // SCAN_STAGE COMMON
+
+// --- Scan Stages ---
 
 #ifdef STAGE_SCAN_SUMS
-@compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
+// Up-Sweep Stage: Calculates block sums and intermediate 'y' values for Blelloch down-sweep.
+@compute @workgroup_size(SCAN_THREADS, 1, 1)
 fn scan_sums(
-    @builtin(global_invocation_id) global_id: vec3u,
     @builtin(workgroup_id) workgroup_id: vec3u,
     @builtin(num_workgroups) num_workgroups: vec3u,
     @builtin(local_invocation_id) local_id: vec3u,
     @builtin(subgroup_id) subgroup_id: u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32
 ) {
-    zeroing_shared_scan(local_id.x);
     let wg_idx = get_scan_workgroup_index(workgroup_id, num_workgroups);
-    let base_read_idx = pc.scan_load_base + wg_idx * SCAN_THREADS;
-    let current_read_idx = base_read_idx + local_id.x;
+    let element_idx_in_pass = wg_idx * SCAN_THREADS + local_id.x; // Index relative to this pass's data block (0-based)
+    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base; // Number of elements for this pass
+    // Index to read from global buffer section for this pass's input
+    let read_idx = pc.scan_load_base + element_idx_in_pass;
 
     var value = 0u;
-    if current_read_idx < arrayLength(&input_counts) { // Example bound check
-        value = input_counts[global_id.x];
-    } else {
-        value = output_offsets[current_read_idx];
+    // Read input value only if within the declared number of elements for this pass
+    if element_idx_in_pass < num_elements_this_pass {
+        if pc.scan_load_base == 0u { // First pass reads original counts
+            value = input_counts[read_idx];
+        } else { 
+            // Subsequent passes read intermediate sums from output buffer
+            value = output_offsets[read_idx];
+        }
     }
 
-    let wg_sum = sum_workgroup(value, subgroup_id, subgroup_local_id);
+    // wg_scan_storage now holds intermediate 'y' values (last element zeroed)
+    let total_wg_sum = workgroup_inclusive_scan_blelloch(
+        local_id, subgroup_id, subgroup_local_id, value
+    );
 
-    if current_read_idx < arrayLength(&output_offsets) {
-        output_offsets[current_read_idx] = wg_sum;
+    // Write intermediate result 'y_i' back to the *same location* it was read from.
+    // Only write if the thread processed valid data for this pass
+    if element_idx_in_pass < num_elements_this_pass {
+       output_offsets[read_idx] = wg_scan_storage[local_id.x];
     }
-    if local_id.x == 0u {
-        // Write sum to the next level of hierarchy
-        output_offsets[pc.scan_save_base + wg_idx] = wg_sum;
+
+    // Last thread writes the total workgroup sum for the *next* level's input
+    if local_id.x == SCAN_THREADS - 1u {
+       // Only write a sum if the workgroup's *first* element was within bounds.
+       let first_element_idx_in_pass = wg_idx * SCAN_THREADS;
+       if first_element_idx_in_pass < num_elements_this_pass {
+            let sum_write_idx = pc.scan_save_base + wg_idx;
+                output_offsets[sum_write_idx] = total_wg_sum;
+       }
     }
 }
 #endif // STAGE_SCAN_SUMS
 
 #ifdef STAGE_SCAN_LAST
-@compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
+// Top-Level Scan Stage: Performs exclusive scan on the highest level block sums.
+@compute @workgroup_size(SCAN_THREADS, 1, 1)
 fn scan_last(
     @builtin(local_invocation_id) local_id: vec3u,
     @builtin(subgroup_id) subgroup_id: u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32
 ) {
-    zeroing_shared_scan(local_id.x);
-    let num_to_scan = pc.scan_save_base - pc.scan_load_base;
-    let read_idx = pc.scan_load_base + local_id.x;
+    let element_idx_in_pass = local_id.x; // Index relative to this pass (0..SCAN_THREADS-1)
+
+    // Number of elements = difference between save/load bases (exclusive end for save_base)
+    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base;
+
+    // Index to read sums from
+    let read_idx = pc.scan_load_base + element_idx_in_pass;
 
     var value = 0u;
-    if local_id.x < num_to_scan {
-         // Read from *output_offsets* as it holds intermediate sums from previous stage (after num_tiles elements)
+    if element_idx_in_pass < num_elements_this_pass {
         value = output_offsets[read_idx];
     }
 
-    let prefix_sum = scan_exclusive_workgroup(value, subgroup_id, subgroup_local_id);
+    // wg_scan_storage now holds final exclusive scan results for the workgroup elements
+    let total_sum_from_helper = workgroup_exclusive_scan(
+        local_id, subgroup_id, subgroup_local_id, value
+    );
 
-    if local_id.x < num_to_scan {
-          // Write prefix sum back into output_offsets
-        output_offsets[read_idx] = prefix_sum;
+    // Write exclusive scan result back to the *same location* it was read from.
+    if element_idx_in_pass < num_elements_this_pass {
+        output_offsets[read_idx] = wg_scan_storage[local_id.x];
     }
 
-     // Write total sum (last element's prefix_sum + last element's value)
-     // Needs careful coordination - often done by last thread.
-    if local_id.x == SCAN_THREADS - 1u {
-        let total_sum = prefix_sum + value; // Sum for this workgroup (only 1 WG in scan_last)
-         // Write to the designated total count slot (num_tiles index)
-        let num_tiles = pc.num_elements; // Assuming num_elements holds num_tiles
-        output_offsets[num_tiles] = total_sum;
+    if (element_idx_in_pass == num_elements_this_pass - 1u) && (num_elements_this_pass > 0u) {
+        // This thread processed the last valid element. Calculate total based on its results.
+        let last_element_exclusive_sum = wg_scan_storage[element_idx_in_pass];
+        let last_element_value = value; // Value read by this thread
+        output_offsets[pc.scan_save_base] = last_element_exclusive_sum + last_element_value;
+    } else if (local_id.x == 0u && num_elements_this_pass == 0u) {
+         // Handle edge case of zero elements: Write 0 total sum. Thread 0 does this.
+         output_offsets[pc.scan_save_base] = 0u;
     }
 }
 #endif // STAGE_SCAN_LAST
 
 #ifdef STAGE_SCAN_PRFX
-@compute @workgroup_size(#NUMBER_OF_THREADS_PER_WORKGROUP, 1, 1)
+// Down-Sweep Stage: Propagates block prefixes down and combines with intermediate 'y' values.
+@compute @workgroup_size(SCAN_THREADS, 1, 1)
 fn scan_prfx(
-    @builtin(global_invocation_id) global_id: vec3u,
     @builtin(workgroup_id) workgroup_id: vec3u,
     @builtin(num_workgroups) num_workgroups: vec3u,
     @builtin(local_invocation_id) local_id: vec3u,
-    @builtin(subgroup_id) subgroup_id: u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(subgroup_id) subgroup_id: u32, // Unused but keep signature
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32 // Unused
 ) {
-    zeroing_shared_scan(local_id.x);
     let wg_idx = get_scan_workgroup_index(workgroup_id, num_workgroups);
-    let base_read_idx = pc.scan_load_base + wg_idx * SCAN_THREADS;
-    let current_read_idx = base_read_idx + local_id.x;
+    let element_idx_in_pass = wg_idx * SCAN_THREADS + local_id.x; // Index relative to this pass's data block
+    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base; // Number of elements for this pass
 
-    // var value = 0u;
-    // Read intermediate values (workgroup sums)
-    let value = output_offsets[current_read_idx];
+    // Read the block prefix sum (exclusive sum of the preceding block)
+    // These prefixes were generated by the previous level (SCAN_LAST or SCAN_PRFX)
+    // and are stored starting at pc.scan_load_base.
+    var block_prefix_sum = 0u;
+    if (wg_idx > 0u) {
+        let prefix_read_idx = pc.scan_load_base + wg_idx - 1u;
+        block_prefix_sum = output_offsets[prefix_read_idx];
+    }
 
-    // Perform exclusive scan on these values *within* the workgroup
-    let local_prefix_sum = scan_exclusive_workgroup(value, subgroup_id, subgroup_local_id);
+    if element_idx_in_pass < num_elements_this_pass {
+        // Calculate index to read intermediate 'y_i' and write final output value.
+        // 'y_i' values reside where the corresponding SCAN_SUMS pass wrote them.
+        let data_rw_idx = pc.scan_save_base + element_idx_in_pass;
 
-    // Get the prefix sum *from the level above* (calculated in previous scan_last/scan_prfx pass)
-    let block_sum = output_offsets[base_read_idx];
+        // Read the intermediate value y_i stored by the corresponding SCAN_SUMS pass
+        let y_i = output_offsets[data_rw_idx];
 
-    // Write final prefix sum: block_sum + local_prefix_sum
-    output_offsets[current_read_idx] = block_sum + local_prefix_sum;
+        // Store y_i in shared memory to efficiently get y_{i-1}
+        wg_scan_storage[local_id.x] = y_i;
+        workgroupBarrier();
+
+        // Get y_{i-1} (value from previous thread in workgroup's intermediate value)
+        // If local_id.x is 0, y_im1 should be 0.
+        let y_im1 = select(0u, wg_scan_storage[local_id.x - 1u], local_id.x > 0u);
+
+        // Calculate final exclusive sum: block_prefix + y_{i-1}
+        let final_value = block_prefix_sum + y_im1;
+
+        // Write final exclusive prefix sum value back to global memory
+        output_offsets[data_rw_idx] = final_value;
+    }
 }
 #endif // STAGE_SCAN_PRFX
 
