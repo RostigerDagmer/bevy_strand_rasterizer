@@ -23,6 +23,13 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 
 var<push_constant> pc: PushConstants;
 
+const PI = 3.14159265359;
+const PI_HALF = PI / 2.0;
+const SQRT_2_PI = sqrt(2.0 * PI);
+
+const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
+const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
+
 @group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
@@ -80,32 +87,114 @@ var<push_constant> pc: PushConstants;
 //     environment_map_intensity: f32,
 // };
 
-fn marschner_R() -> f32 {
-    return 0.0;
+// --- Helpers ---
+
+fn fresnel(eta: f32, cos_theta: f32) -> f32 {
+    // Schlick's approximation or full Fresnel equations
+    let r0 = 1.0 / pow((1.0 - eta) / (1.0 + eta), 2.0);
+    let cos_theta_clamped = max(0.0, cos_theta); // Ensure non-negative base for pow
+    return r0 + (1.0 - r0) * pow(1.0 - cos_theta_clamped, 5.0);
 }
 
-fn marschner_TT() -> f32 {
-    return 0.0;
+fn gaussian(x: f32, sigma: f32, mu: f32) -> f32 {
+    let exponent = -0.5 * pow((x - mu) / sigma, 2.0);
+    return (1.0 / (sigma * SQRT_2_PI)) * exp(exponent);
 }
 
-fn marschner_TRT() -> f32 {
-    return 0.0;
+fn signed_angle_between(a: vec3<f32>, b: vec3<f32>, n: vec3<f32>) -> f32 {
+    let angle = acos(dot(normalize(a), normalize(b)));
+    let sign = sign(dot(cross(a, b), n));
+    return angle * sign;
 }
 
-fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>) -> vec4<f32> {
+// --- Marschner Model ---
+
+fn marschner_R(theta_i: f32, theta_r: f32, phi: f32, attenuation: f32) -> vec2<f32> {
+    /// Longitudinal surface reflection (Mr)
+    let beta_r = theta_i - theta_r;
+    let alpha_r = 0.1309; // TODO: material paramter in radians
+    let Mr = gaussian(beta_r, alpha_r, 0.0);
+
+    /// Azimuthal surface reflection (Nr)
+    let eta = 1.55; // TODO: material parameter (IOR)
+    let theta_d = cos(phi / 2.0);
+    let Nr = attenuation * fresnel(eta, theta_d);
+
+    return vec2<f32>(Mr, Nr);
+}
+
+fn marschner_TT(theta_i: f32, theta_r: f32, phi: f32) -> vec2<f32> {
+    /// Longitudinal transmission (Mtt)
+    let shift_tt = 0.0; // TODO: material parameter (shift factor)
+    let beta_tt = (theta_i - theta_r) / 2.0 - shift_tt;
+    let alpha_tt = 0.21; // TODO: material paramter in radians
+    let Mtt = gaussian(beta_tt, alpha_tt, 0.0);
+
+    /// Azimuthal transmission (Ntt)
+    let attenuation = 0.65; // TODO: material parameter (attenuation factor)
+    let eta = 1.55; // TODO: material parameter (IOR)
+
+    let phi_tt = phi - PI_HALF; // entry ray
+    let theta_d = cos(phi_tt / 2.0);
+    let theta_d_ = sqrt(max(0.0, 1.0 - (1.0 - theta_d * theta_d) / (eta * eta)));; // TODO: check if this is actually correct
+    let f1 = (1.0 - fresnel(eta, theta_d));
+    let f2 = (1.0 - fresnel(1.0 / eta, theta_d_));
+    let Ntt = attenuation * f1 * f2;
+
+    return vec2<f32>(Mtt, Ntt);
+}
+
+fn marschner_TRT(theta_i: f32, theta_r: f32, phi: f32) -> vec2<f32> {
+    /// Longitudinal transmission-reflection (Mtrt)
+    let beta_trt = -(theta_r - theta_i) * 1.5;
+    let alpha_trt = 0.3; // TODO: material paramter in radians
+    let Mtrt = gaussian(beta_trt, alpha_trt, 0.0);
+
+    /// Azimuthal transmission-reflection (Ntrt)
+    let attenuation = 0.45; // TODO: material parameter (attenuation factor)
+    let eta = 1.55; // TODO: material parameter (IOR)
+    let phi_trt = phi - PI;
+    let theta_d = cos(phi_trt / 2.0);
+    let theta_d_ = sqrt(max(0.0, 1.0 - (1.0 - theta_d * theta_d) / (eta * eta)));
+
+    let f1 = (1.0 - fresnel(eta, theta_d));
+    let f2 = fresnel(1.0 / eta, theta_d_);
+    let f3 = (1.0 - fresnel(1.0 / eta, theta_d_));
+    let Ntrt = attenuation * f1 * f2 * f3;
+
+    return vec2<f32>(Mtrt, Ntrt);
+}
+
+// Returns the BCSDF color value for the Marschner model
+fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, hair_color: vec4<f32>, specular_color: vec4<f32>) -> vec3<f32> {
 
     let u = direction;
-    let normal = view_normal;
+    
+    // Compute the key angles needed for Marschner model
+    let theta_i = acos(dot(direction, light_normal));
+    let theta_r = acos(dot(direction, view_normal));
 
-    // orthonormal basis
-    let v = normalize(cross(normal, u));
-    let w = cross(u, v);
+    let light_projected = normalize(light_normal - dot(light_normal, u) * u);
+    let view_projected = normalize(view_normal - dot(view_normal, u) * u);
 
+    let phi = signed_angle_between(light_projected, view_projected, u);
+
+    let sigma_a = 1.0 - hair_color.xyz;
+    let single_pass_absorption = exp(-2.0 * sigma_a);
+    let dual_pass_absorption = exp(-4.0 * sigma_a);
+    let specular_attenuation = specular_color.w;
+
+    let R = marschner_R(theta_i, theta_r, phi, specular_attenuation);
+    let TT = marschner_TT(theta_i, theta_r, phi);
+    let TRT = marschner_TRT(theta_i, theta_r, phi);
+
+    let R_contrib = R.x * R.y * specular_color.xyz;
+    let TT_contrib = TT.x * TT.y * single_pass_absorption;
+    let TRT_contrib = TRT.x * TRT.y * dual_pass_absorption;
+
+    return R_contrib + TT_contrib + TRT_contrib;
 
 }
-
-const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
-const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn shade_strands(
@@ -126,8 +215,8 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    let strand_color = vec4<f32>(0.7, 0.9, 0.5, 0.3);
-    let strand_normal = vec3<f32>(0.0, 0.0, 0.0);
+    var strand_absorption_color = vec4<f32>(0.7, 0.1, 0.05, 0.3);
+    var strand_specular_color = vec4<f32>(1.0, 1.0, 1.0, 0.6);
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) {
         let segment_offset = segment_id + i;
@@ -142,26 +231,34 @@ fn shade_strands(
 
         let vertex = vertices[index];
         let next_vertex = vertices[i_dir];
-        let normal = normalize(vec3<f32>(vertex.xyz));
-        let color = vec4<f32>(vertex.w, vertex.w, vertex.w, 1.0);
 
         // fiber direction
-        var u = normalize(next_vertex.xyz - vertex.xyz);
+        var U = normalize(next_vertex.xyz - vertex.xyz);
         if next_point < segment_offset {
             // invert direction for the tip
-            u = -u;
+            U = -U;
         }
 
+        // view direction
+        let V = normalize(view.world_position - vertex.xyz);
+
         // TODO: we can theoretically split this across multiple workgroups
-        // for (var j = 0; j < light_count; j = j+1) {
-        //     let light: types::DirectionalLight = lights.directional_lights[j];
-        //     let light_flags = light.flags;
-        //     // TODO
-        // }
+        for (var j = 0u; j < light_count; j = j+1) {
+            let light: types::DirectionalLight = lights.directional_lights[j];
+            let light_flags = light.flags;
+            let L = light.direction_to_light; // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
+            
+            let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color);
+
+            var c = bcsdf * light.color.xyz;
+            c = mix(c, lights.ambient_color.xyz / 255.0, 0.01); // ambient TODO: ambient lighting
+            strand_absorption_color = vec4<f32>(c.xyz, strand_absorption_color.w);
+
+        }
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;
         let y_coord = out_row;
         let x_coord = out_col * pc.workgroup_offset + segment_offset; // remember that workgroup_offset is abused for column width in this context
-        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), strand_color);
+        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), strand_absorption_color);
     }
 }

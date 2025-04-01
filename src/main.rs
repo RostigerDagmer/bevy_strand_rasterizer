@@ -3,7 +3,7 @@ use std::u32::MAX;
 
 use bevy::core_pipeline::core_3d::graph::Core3d;
 use bevy::gizmos::{config, light};
-use bevy::pbr::{LightMeta, MeshBindGroups, MeshViewBindGroup, ViewLightsUniformOffset};
+use bevy::pbr::{CascadeShadowConfigBuilder, LightMeta, MeshBindGroups, MeshViewBindGroup, ViewLightsUniformOffset};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_asset::RenderAssets;
@@ -1353,12 +1353,34 @@ fn setup(
     ));
 
     // add one light
+    // commands.spawn((
+    //     PointLight {
+    //         shadows_enabled: true,
+    //         ..default()
+    //     },
+    //     Transform::from_xyz(4.0, 8.0, 4.0),
+    // ));
+
     commands.spawn((
-        PointLight {
+        DirectionalLight {
+            illuminance: light_consts::lux::OVERCAST_DAY,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0),
+        Transform {
+            translation: Vec3::new(0.0, 2.0, 0.0),
+            rotation: Quat::from_rotation_x(-3.141592 / 4.),
+            ..default()
+        },
+        // The default cascade config is designed to handle large scenes.
+        // As this example has a much smaller world, we can tighten the shadow
+        // bounds for better visual quality.
+        CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 4.0,
+            maximum_distance: 10.0,
+            ..default()
+        }
+        .build(),
     ));
 }
 
