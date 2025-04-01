@@ -19,7 +19,7 @@ struct FroxelConfig { // Ensure this matches Rust exactly
 
 struct SegmentRef { // Ensure this matches Rust if defined there
     strand_idx: u32,
-    segment_start_idx: u32, // Index into strand_meta perhaps? Or original vertex buffer? Define clearly.
+    segment_start_idx: u32, // Index into index buffer
 }
 
 struct StrandMeta { // Ensure this matches Rust exactly
@@ -105,7 +105,7 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
 // Define hair properties (can be uniforms later)
 const HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
 const HAIR_COLOR : vec3<f32> = vec3<f32>(0.8, 0.7, 0.6); // Example: Hair color
-const HAIR_ALPHA : f32 = 0.1; // Example: Alpha per covered fragment (lower for softer look)
+const HAIR_ALPHA : f32 = 0.2; // Example: Alpha per covered fragment (lower for softer look)
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
@@ -138,7 +138,7 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(final_rgb, final_alpha);
 }
 
-#define DEBUG
+// #define DEBUG
 
 
 @compute @workgroup_size(8, 8, 1) // Should match froxel_size_x, froxel_size_y
@@ -168,7 +168,7 @@ fn rasterize_strands(
     }
     #ifdef DEBUG
         // Debug: Output the tile_count of this tile divided by num_elements
-        final_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
+        let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
     # endif // DEBUG
 
     // if (frag_count == 0) {
@@ -199,12 +199,19 @@ fn rasterize_strands(
 
             // Get strand metadata
             let strand_idx = segment_ref.strand_idx;
-            if (strand_idx >= arrayLength(&strand_metadata)) { continue; } // Safety check
+            if (strand_idx >= arrayLength(&strand_metadata)) { 
+                final_color = vec4<f32>(1.0, 0.0, 0.0, 1.0); // Debug color
+                continue; 
+            } // Safety check
             let strand_meta = strand_metadata[strand_idx];
 
+            let v0_idx = segment_ref.segment_start_idx;
+            let v1_idx = segment_ref.segment_start_idx + 1u;
+            if ((v1_idx - strand_meta.offset) >= strand_meta.count - 1) { continue; } // Safety check
+
             // Get segment vertex indices within the strand
-            let v0_strand_idx = indices[segment_ref.segment_start_idx];
-            let v1_strand_idx = indices[segment_ref.segment_start_idx + 1u];
+            let v0_strand_idx = indices[v0_idx];
+            let v1_strand_idx = indices[v1_idx];
 
             // Get world-space vertex positions
             let v0_world = vertices[v0_strand_idx].xyz;
@@ -235,11 +242,16 @@ fn rasterize_strands(
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        // if (final_color.a > 0.99) {
-        //     break; // Stop Z loop
-        // }
+        if (final_color.a > 0.99) {
+            break; // Stop Z loop
+        }
 
     } // End loop over depth slices (dz)
+
+    #ifdef DEBUG
+        // Debug: Output the tile_count of this tile divided by num_elements
+        final_color = final_color + debug_color;
+    # endif // DEBUG
 
     // Write the final accumulated color to the render target
     textureStore(render_target, pixel_coord_int, final_color);

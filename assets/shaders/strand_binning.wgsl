@@ -21,7 +21,7 @@ struct FroxelConfig { // Ensure this matches Rust exactly
 
 struct SegmentRef { // Ensure this matches Rust if defined there
     strand_idx: u32,
-    segment_start_idx: u32, // Index into strand_meta perhaps? Or original vertex buffer? Define clearly.
+    segment_start_idx: u32, // Index into the index buffer
 }
 
 struct StrandMeta { // Ensure this matches Rust exactly
@@ -764,7 +764,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         // Define SegmentRef - How is segment_start_idx used?
         // Option 1: Index into index buffer
         let segment_start_vtx_idx = start_vertex_offset + i - 1u;
-        let segment_ref = SegmentRef(strand_idx, indices[segment_start_vtx_idx]);
+        let segment_ref = SegmentRef(strand_idx, segment_start_vtx_idx);
 
         trace_segment_through_froxels_place(prev_screen_pos, current_screen_pos, segment_ref, config);
 

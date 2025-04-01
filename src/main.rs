@@ -1009,11 +1009,12 @@ fn set_strand_geometry(
                 .fold((Vec::new(), Vec::new()), |mut acc, strand| {
                     let strand_indices = &strand[2..];
                     acc.0.extend_from_slice(strand_indices);
-                    let last_strand_offset = acc.1.last().copied().unwrap_or((0, 0)).1;
-                    acc.1.push((
-                        strand_indices.len() as u32,
-                        last_strand_offset + strand_indices.len() as u32,
-                    ));
+                    match acc.1.last().copied() {
+                        Some((last_strand_count, last_strand_offset)) => {
+                            acc.1.push((strand_indices.len() as u32, last_strand_offset + last_strand_count));
+                        }
+                        None => acc.1.push((strand_indices.len() as u32, 0)),
+                    }
                     acc
                 });
 
