@@ -8,6 +8,7 @@ pub struct StrandGeometry {
     pub indices: Handle<ShaderStorageBuffer>,
     pub meta: Handle<ShaderStorageBuffer>,
     pub strand_count: u32,
+    pub max_segments_in_strand: u32,
 }
 
 

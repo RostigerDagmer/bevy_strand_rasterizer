@@ -1,7 +1,9 @@
 use std::hash::Hash;
+use std::u32::MAX;
 
 use bevy::core_pipeline::core_3d::graph::Core3d;
-use bevy::gizmos::config;
+use bevy::gizmos::{config, light};
+use bevy::pbr::{LightMeta, MeshBindGroups, MeshViewBindGroup, ViewLightsUniformOffset};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_asset::RenderAssets;
@@ -29,6 +31,9 @@ mod shader_types;
 use shader_types::*;
 
 const MAX_NUMBER_OF_STRANDS: u32 = 1024 * 1024; // for physics
+const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
+
+const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
 
 /// The row size of the `keys` processed by each workgroup.
 pub const NUMBER_OF_ROWS_PER_WORKGROUP: u32 = 16;
@@ -324,6 +329,75 @@ pub fn create_strand_binning_bind_group(
     };
 }
 
+pub fn create_strand_shading_group(
+    device: &RenderDevice,
+    layout: &BindGroupLayout,
+    vertex_buffer: &Buffer,
+    index_buffer: &Buffer,
+    meta_buffer: &Buffer,
+    output_texture: &TextureView,
+    view_buffer: BindingResource,
+    light_buffer: BindingResource,
+) -> BindGroup {
+    device.create_bind_group(
+        Some("strand_shading_bind_group"),
+        layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: index_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: meta_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: view_buffer.clone(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: light_buffer.clone(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: BindingResource::TextureView(output_texture),
+            },
+        ],
+    )
+}
+
+pub fn create_shading_target_texture(
+    device: &RenderDevice,
+    strand_count: u32,
+    max_strand_segment_count: u32,
+) -> (Texture, TextureView) {
+
+    // calculate how many columns we need
+    let cols = strand_count.div_ceil(MAX_TEXTURE_EXTENT);
+
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_rasterizer_output"),
+        size: Extent3d {
+            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR * cols,
+            height: MAX_TEXTURE_EXTENT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[TextureFormat::Rgba8Unorm],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    (texture, view)
+}
+
 // Create froxel configuration uniform buffer
 pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
     let buffer = device.create_buffer(&BufferDescriptor {
@@ -550,6 +624,67 @@ fn run_binning_pass(
     // packed_segments_buffer and tile_offsets_buffer are ready for the rasterizer
 }
 
+fn run_shading_pass(
+    render_device: &RenderDevice,
+    pipeline_cache: &PipelineCache,
+    pipeline: &StrandShadingPipeline,
+    render_context: &mut RenderContext,
+    froxel_config: &FroxelConfig,
+    resources: &StrandRasterizerResources,
+    bind_group: &BindGroup,
+    view_light_uniform_offset: &ViewLightsUniformOffset,
+) {
+    let Some(render_target) = &resources.output_texture else {
+        warn!("Output texture not found");
+        return;
+    };
+    let Some(packed_buffer) = &resources.froxel_buffer else {
+        warn!("Froxel buffer not found");
+        return;
+    };
+    let Some(config_buffer) = &resources.froxel_config_buffer else {
+        warn!("Froxel config buffer not found");
+        return;
+    };
+
+    let encoder = render_context.command_encoder(); // Get CommandEncoder
+
+    // --- Shading ---
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("Strand Shading"),
+            ..default()
+        });
+        let Some(shading_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
+        else {
+            warn!("Shading pipeline not found");
+            return;
+        };
+        pass.set_pipeline(shading_pipeline);
+        pass.set_bind_group(0, bind_group, &[0, 0, 0, 0, 0, 0, view_light_uniform_offset.offset]);
+        // Set push constants if needed
+        let pushconstants = PushConstants {
+            num_elements: resources.strand_count.unwrap_or(0),
+            workgroup_offset: 0,
+            scan_load_base: 0,
+            scan_save_base: 0,
+        };
+        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+
+        // Dispatch based on number of strands or segments
+        let workgroup_size_x = froxel_config.froxel_size_x;
+        let workgroup_size_y = froxel_config.froxel_size_y;
+        let workgroups_x = froxel_config.screen_width / workgroup_size_x;
+        let workgroups_y = froxel_config.screen_height / workgroup_size_y;
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    }
+
+    // --- Shading complete ---
+    // output_texture is ready for composition
+}
+
+
 fn run_raster_pass(
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
@@ -635,10 +770,14 @@ impl Node for StrandRasterizerNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let render_device = world.resource::<RenderDevice>();
         let binning_pipeline = world.resource::<StrandBinningPipeline>();
+        let shading_pipeline = world.resource::<StrandShadingPipeline>();
         let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
         let binning_buffers = world.resource::<StrandBinningBuffers>(); // Get the buffers
+        let shading_resources = world.resource::<StrandShadingResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
+        // let standard_view_layout = world.resource::<MeshBindGroups>();
+        let light_meta = world.resource::<LightMeta>(); // Get light meta
 
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
@@ -649,9 +788,35 @@ impl Node for StrandRasterizerNode {
             return Ok(());
         };
 
+        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity) else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewLightUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        // let Some(mesh_view_bind_group) = world.get::<MeshViewBindGroup>(view_entity) else {
+        //     // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+        //     warn!(
+        //         "Node running on view {:?} without MeshViewBindGroup",
+        //         view_entity
+        //     );
+        //     return Ok(());
+        // };
+
+        let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without LightBinding",
+                view_entity
+            );
+            return Ok(());
+        };
+
         // --- Check Prerequisites ---
         let Some(view_binding) = view_uniforms.uniforms.buffer() else {
-            // This can happen early on, or if the buffer is empty
             warn!("ViewUniforms binding not available.");
             return Ok(());
         };
@@ -661,6 +826,7 @@ impl Node for StrandRasterizerNode {
             offset: view_uniform_offset.offset as u64,
             size: Some(ViewUniform::min_size()),
         });
+        // pass.set_bind_group(I, &mesh_view_bind_group.value, &offsets); // Reference
 
         let Some(vertex_buffer) = binning_buffers.vertex_buffer.as_ref() else {
             warn!("Vertex buffer handle not found in resources.");
@@ -749,8 +915,34 @@ impl Node for StrandRasterizerNode {
             packed_segments_buffer,
             raster_resources.output_texture.as_ref().unwrap(),
             froxel_config_buffer,
-            view_binding,
+            view_binding.clone(),
         );
+
+        // Shading pass
+
+        if let Some(output_texture) = &shading_resources.output_texture {
+            let shading_bind_group = create_strand_shading_group(
+                render_device,
+                &shading_pipeline.bind_group_layout,
+                vertex_buffer,
+                index_buffer,
+                meta_buffer,
+                &output_texture,
+                view_binding,
+                light_binding,
+            );
+    
+            run_shading_pass(
+                render_device,
+                pipeline_cache,
+                shading_pipeline,
+                render_context,
+                &frustrum,
+                raster_resources,
+                &shading_bind_group,
+                view_light_uniform_offset
+            );
+        }
 
         // For now, we'll skip the rasterization pass
         // In a future implementation, we would:
@@ -1006,9 +1198,12 @@ fn set_strand_geometry(
             polyline_list
                 .values
                 .iter()
-                .fold((Vec::new(), Vec::new()), |mut acc, strand| {
+                .fold((Vec::new(), Vec::new(), 0), |mut acc, strand| {
                     let strand_indices = &strand[2..];
                     acc.0.extend_from_slice(strand_indices);
+                    if strand_indices.len() > acc.2 {
+                        acc.2 = strand_indices.len();
+                    }
                     match acc.1.last().copied() {
                         Some((last_strand_count, last_strand_offset)) => {
                             acc.1.push((strand_indices.len() as u32, last_strand_offset + last_strand_count));
@@ -1024,6 +1219,7 @@ fn set_strand_geometry(
             .into_iter()
             .map(StrandMeta::from)
             .collect();
+        let max_segments_in_strand = packed_strand_info.2 as u32;
 
         let index_buffer = ShaderStorageBuffer::from(strand_indices);
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
@@ -1036,6 +1232,7 @@ fn set_strand_geometry(
             indices: index_buffer_handle,
             meta: meta_buffer_handle,
             strand_count: polyline_list.values.len() as u32,
+            max_segments_in_strand
         });
     }
 }
@@ -1135,6 +1332,8 @@ fn use_strand_geometry(
         binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
         raster_resources.strand_count = Some(geometry.strand_count);
 
+        create_shading_target_texture(&device, geometry.strand_count, geometry.max_segments_in_strand);
+
         info!("Created bind group for strand rasterizer");
     }
 }
@@ -1164,6 +1363,15 @@ fn setup(
         Mesh3d(meshes.add(Cuboid::new(0.05, 0.05, 0.05))),
         MeshMaterial3d(materials.add(Color::srgb_u8(124, 144, 255))),
         Transform::from_xyz(0.0, 0.5, 0.0),
+    ));
+
+    // add one light
+    commands.spawn((
+        PointLight {
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0),
     ));
 }
 

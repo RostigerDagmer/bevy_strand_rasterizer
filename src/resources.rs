@@ -170,6 +170,132 @@ impl FromWorld for StrandRasterizerPipeline {
     }
 }
 
+#[derive(Resource)]
+pub struct StrandShadingPipeline {
+    pub bind_group_layout: BindGroupLayout,
+    pub shading_pipeline: CachedComputePipelineId,
+}
+
+impl StrandShadingPipeline {
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        // We shade in strand space so we only need the vertex, index and meta buffers in terms of geometry.
+        // We also need the View and light buffers and an output buffer containing the shading data along line segments.
+        device.create_bind_group_layout(
+            "strand_shading_bind_group_layout",
+            &[
+                // Vertex buffer (read-only storage buffer)
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Index Buffer
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Meta buffer (read-only storage buffer)
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // View Uniform Buffer
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(ViewUniform::min_size()),
+                    },
+                    count: None,
+                },
+                // Light Uniform Buffer
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Output texture (write-only storage texture)
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba8Unorm,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                // NOTE: Additional textures here if necessary for more accurate blending during rasterization
+            ],
+        )
+    }
+}
+
+impl FromWorld for StrandShadingPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        let bind_group_layout = Self::create_bind_group_layout(device);
+
+        let shader_loader = world.resource::<AssetServer>();
+        let shading_shader = shader_loader.load("shaders/strand_shading.wgsl");
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let cdefs = vec![
+            ShaderDefVal::UInt(
+                "MAX_TEXTURE_EXTENT".into(),
+                crate::MAX_TEXTURE_EXTENT, // Use crate:: constant
+            ),
+        ];
+
+        let shading_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_shading_pipeline".into()),
+            layout: vec![bind_group_layout.clone()],
+            shader: shading_shader,
+            shader_defs: cdefs,
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: "shade_strands".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        info!(
+            "Created strand shading compute pipelines: shading={:?}",
+            shading_pipeline
+        );
+
+        StrandShadingPipeline {
+            bind_group_layout,
+            shading_pipeline,
+        }
+    }
+}
+
 // Assume you have resources for your binning pipelines and bind groups
 #[derive(Resource)]
 pub struct StrandBinningPipeline {
@@ -421,6 +547,11 @@ pub struct StrandRasterizerResources {
     pub output_texture: Option<TextureView>,
     pub strand_count: Option<u32>,
     pub frustrum_config: Option<FroxelConfig>,
+}
+
+#[derive(Resource, Default)]
+pub struct StrandShadingResources {
+    pub output_texture: Option<TextureView>,
 }
 
 #[derive(Clone, Debug)]
