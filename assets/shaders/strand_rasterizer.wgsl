@@ -149,11 +149,6 @@ fn rasterize_strands(
 ) {
     let pixel_coord_int = vec2<i32>(global_id.xy);
 
-    // // Check if pixel is outside screen bounds
-    // if (pixel_coord_int.x >= i32(config.screen_width) || pixel_coord_int.y >= i32(config.screen_height)) {
-    //     return;
-    // }
-
     let pixel_center = vec2<f32>(global_id.xy) + vec2<f32>(0.5, 0.5); // Center of the pixel
 
     // Initialize final pixel color (start transparent black)
@@ -162,20 +157,15 @@ fn rasterize_strands(
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
 
-    var frag_count: u32 = 0;
-    for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) {
-        frag_count += tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
-    }
     #ifdef DEBUG
+        var frag_count: u32 = 0;
+        for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) {
+            frag_count += tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
+        }
         // Debug: Output the tile_count of this tile divided by num_elements
         let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
     # endif // DEBUG
 
-    // if (frag_count == 0) {
-    //     // Early exit if no strands in this tile
-    //     textureStore(render_target, pixel_coord_int, final_color);
-    //     return;
-    // }
     // Or loop FRONT TO BACK (simpler to start)
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
@@ -249,43 +239,10 @@ fn rasterize_strands(
     } // End loop over depth slices (dz)
 
     #ifdef DEBUG
-        // Debug: Output the tile_count of this tile divided by num_elements
+        // this makes the debug color more visible than blending it.
         final_color = final_color + debug_color;
     # endif // DEBUG
 
     // Write the final accumulated color to the render target
     textureStore(render_target, pixel_coord_int, final_color);
 }
-
-// strand_rasterizer.wgsl
-// @compute @workgroup_size(8, 8, 1)
-// fn rasterize_strands(
-//     @builtin(global_invocation_id) id: vec3<u32>,
-//     @builtin(workgroup_id) workgroup_id: vec3u,
-//     @builtin(num_workgroups) num_workgroups: vec3u,
-//     @builtin(local_invocation_id) local_id: vec3u,
-// )
-// {
-//     // TODO: Implement strand rasterization
-//     // - Read vertices and indices
-//     // - Bin strands into froxels
-//     // - Write to output texture
-
-//     // Placeholder: Output the tile_count of this tile divided by num_elements
-//     let tile = workgroup_id.xy;
-//     var frag_count: u32 = 0;
-//     for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) {
-//         frag_count += tile_counts_buffer[calculate_froxel_index(tile.x, tile.y, dz, config)];
-//     }
-//     let tile_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
-
-//     // Compute the base texture coordinates for this tile
-//     let base_x = i32(tile.x * config.froxel_size_x);
-//     let base_y = i32(tile.y * config.froxel_size_y);
-//     var random_color = random_colors[u32(hash12(vec2<f32>(tile)) * 20.0) % 20];
-//     let texture_coord: vec2<i32> = vec2(base_x + i32(local_id.x), base_y + i32(local_id.y));
-
-//     if (texture_coord.x < i32(config.screen_width) && texture_coord.y < i32(config.screen_height)) {
-//         textureStore(render_target, texture_coord, tile_color);
-//     }
-// }
