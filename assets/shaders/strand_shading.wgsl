@@ -30,12 +30,12 @@ const SQRT_2_PI = sqrt(2.0 * PI);
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(3) var<uniform> view: View;
-@group(0) @binding(4) var<uniform> lights: types::Lights;
-@group(0) @binding(5) var output_texture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
+@group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
+@group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+@group(0) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -215,8 +215,10 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    var strand_absorption_color = vec4<f32>(0.7, 0.1, 0.05, 0.3);
-    var strand_specular_color = vec4<f32>(1.0, 1.0, 1.0, 0.6);
+    var strand_absorption_color = vec4<f32>(0.7, 0.1, 0.05, 0.6);
+    var strand_specular_color = vec4<f32>(0.8, 0.5, 0.6, 0.7);
+
+    let ambient_factor = 0.05;
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) {
         let segment_offset = segment_id + i;
@@ -250,8 +252,8 @@ fn shade_strands(
             
             let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color);
 
-            var c = bcsdf * light.color.xyz;
-            c = mix(c, lights.ambient_color.xyz / 255.0, 0.01); // ambient TODO: ambient lighting
+            var c = bcsdf * (light.color.xyz / 1000.0);
+            c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
             strand_absorption_color = vec4<f32>(c.xyz, strand_absorption_color.w);
 
         }

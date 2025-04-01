@@ -1,4 +1,4 @@
-use bevy::{prelude::*, render::{extract_component::ExtractComponent, storage::ShaderStorageBuffer}};
+use bevy::{math::bounding::Aabb3d, prelude::*, render::{extract_component::ExtractComponent, storage::ShaderStorageBuffer}};
 use bytemuck::{Pod, Zeroable};
 
 
@@ -9,6 +9,7 @@ pub struct StrandGeometry {
     pub meta: Handle<ShaderStorageBuffer>,
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
+    pub aabb: Aabb3d,
 }
 
 
@@ -20,12 +21,6 @@ pub struct FroxelConfig {
     pub froxel_size_x: u32,
     pub froxel_size_y: u32,
     pub depth_slices: u32,
-    pub aabb_min_x: u32,
-    pub aabb_min_y: u32,
-    pub aabb_min_z: f32,
-    pub aabb_max_x: u32,
-    pub aabb_max_y: u32,
-    pub aabb_max_z: f32,
 }
 impl Default for FroxelConfig {
     fn default() -> Self {
@@ -35,12 +30,6 @@ impl Default for FroxelConfig {
             froxel_size_x: 8,
             froxel_size_y: 8,
             depth_slices: 16,
-            aabb_min_x: 0,
-            aabb_min_y: 0,
-            aabb_min_z: 0.0,
-            aabb_max_x: 1920 / 8,
-            aabb_max_y: 1080 / 8,
-            aabb_max_z: 1.0,
         }
     }
 }

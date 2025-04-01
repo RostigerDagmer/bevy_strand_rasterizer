@@ -19,6 +19,98 @@ use bevy::{
 
 use crate::{components::FroxelConfig, shader_types::PushConstants};
 
+pub mod layouts {
+    pub mod rasterizer {
+        use bevy::render::render_resource::ShaderDefVal;
+
+        pub const VERTEX_BUFFER: u32 = 0;
+        pub const INDEX_BUFFER: u32 = 1;
+        pub const META_BUFFER: u32 = 2;
+        pub const TILE_OFFSETS_BUFFER: u32 = 3;
+        pub const TILE_COUNTS_BUFFER: u32 = 4;
+        pub const FROXEL_TILE_BUFFER: u32 = 5;
+        pub const OUTPUT_TEXTURE: u32 = 6;
+        pub const FROXEL_CONFIG: u32 = 7;
+        pub const VIEW_UNIFORM: u32 = 8;
+        pub const SHADING_BUFFER: u32 = 9;
+
+        pub fn shader_defs() -> Vec<ShaderDefVal> {
+            vec![
+                ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
+                ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
+                ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
+                ShaderDefVal::UInt("TILE_OFFSETS_BUFFER".into(), TILE_OFFSETS_BUFFER),
+                ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
+                ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
+                ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
+                ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
+                ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
+                ShaderDefVal::UInt("SHADING_BUFFER".into(), SHADING_BUFFER),
+            ]
+        }
+    }
+
+    pub mod binning {
+        use bevy::render::render_resource::ShaderDefVal;
+
+        pub const VERTEX_BUFFER: u32 = 0;
+        pub const INDEX_BUFFER: u32 = 1;
+        pub const META_BUFFER: u32 = 2;
+        pub const TILE_COUNTS_BUFFER: u32 = 3;
+        pub const TILE_OFFSETS_BUFFER: u32 = 4;
+        pub const CURRENT_TILE_WRITE_INDICES: u32 = 5;
+        pub const FROXEL_TILE_BUFFER: u32 = 6;
+        pub const FROXEL_CONFIG: u32 = 7;
+        pub const VIEW_UNIFORM: u32 = 8;
+        pub const GEO_BUFFER: u32 = 9;
+
+        pub fn shader_defs() -> Vec<ShaderDefVal> {
+            vec![
+                ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
+                ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
+                ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
+                ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
+                ShaderDefVal::UInt("TILE_OFFSETS_BUFFER".into(), TILE_OFFSETS_BUFFER),
+                ShaderDefVal::UInt(
+                    "CURRENT_TILE_WRITE_INDICES".into(),
+                    CURRENT_TILE_WRITE_INDICES,
+                ),
+                ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
+                ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
+                ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
+                ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
+            ]
+        }
+    }
+
+    pub mod shading {
+        use bevy::render::render_resource::ShaderDefVal;
+
+        pub const VERTEX_BUFFER: u32 = 0;
+        pub const INDEX_BUFFER: u32 = 1;
+        pub const META_BUFFER: u32 = 2;
+        pub const VIEW_UNIFORM: u32 = 3;
+        pub const LIGHT_UNIFORM: u32 = 4;
+        pub const OUTPUT_TEXTURE: u32 = 5;
+
+        pub fn shader_defs() -> Vec<ShaderDefVal> {
+            vec![
+                ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
+                ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
+                ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
+                ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
+                ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
+                ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
+            ]
+        }
+    }
+
+    pub mod post_process {
+        pub const INPUT_TEXTURE: u32 = 0;
+        pub const PARAMS_BUFFER: u32 = 1;
+    }
+}
+
 #[derive(Resource)]
 pub struct StrandRasterizerPipeline {
     // stub
@@ -33,7 +125,7 @@ impl StrandRasterizerPipeline {
             &[
                 // Vertex buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 0,
+                    binding: layouts::rasterizer::VERTEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -44,7 +136,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Index Buffer
                 BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: layouts::rasterizer::INDEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -55,7 +147,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Meta buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: layouts::rasterizer::META_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -66,7 +158,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Tile offsets buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -77,7 +169,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Tile counts buffer (for debug; read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -88,7 +180,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Froxel buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -99,7 +191,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: 6,
+                    binding: layouts::rasterizer::OUTPUT_TEXTURE,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
@@ -110,7 +202,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Froxel configuration (uniform buffer)
                 BindGroupLayoutEntry {
-                    binding: 7,
+                    binding: layouts::rasterizer::FROXEL_CONFIG,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -121,7 +213,7 @@ impl StrandRasterizerPipeline {
                 },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: 8,
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -132,7 +224,7 @@ impl StrandRasterizerPipeline {
                 },
                 // Shading Buffer
                 BindGroupLayoutEntry {
-                    binding: 9,
+                    binding: layouts::rasterizer::SHADING_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::ReadOnly,
@@ -155,12 +247,17 @@ impl FromWorld for StrandRasterizerPipeline {
         let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
+        let cdefs = [vec![ShaderDefVal::UInt(
+            "MAX_TEXTURE_EXTENT".into(),
+            crate::MAX_TEXTURE_EXTENT,
+        )], layouts::rasterizer::shader_defs()].concat();
+
 
         let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_rasterize_pipeline".into()),
             layout: vec![bind_group_layout.clone()],
             shader: rasterize_shader,
-            shader_defs: vec![],
+            shader_defs: cdefs,
             push_constant_ranges: vec![PushConstantRange {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
@@ -196,7 +293,7 @@ impl StrandShadingPipeline {
             &[
                 // Vertex buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 0,
+                    binding: layouts::shading::VERTEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -207,7 +304,7 @@ impl StrandShadingPipeline {
                 },
                 // Index Buffer
                 BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: layouts::shading::INDEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -218,7 +315,7 @@ impl StrandShadingPipeline {
                 },
                 // Meta buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: layouts::shading::META_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -229,7 +326,7 @@ impl StrandShadingPipeline {
                 },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: layouts::shading::VIEW_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -240,7 +337,7 @@ impl StrandShadingPipeline {
                 },
                 // Light Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: layouts::shading::LIGHT_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -251,7 +348,7 @@ impl StrandShadingPipeline {
                 },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: layouts::shading::OUTPUT_TEXTURE,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
@@ -275,12 +372,10 @@ impl FromWorld for StrandShadingPipeline {
         let shading_shader = shader_loader.load("shaders/strand_shading.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
-        let cdefs = vec![
-            ShaderDefVal::UInt(
-                "MAX_TEXTURE_EXTENT".into(),
-                crate::MAX_TEXTURE_EXTENT, // Use crate:: constant
-            ),
-        ];
+        let cdefs = [vec![ShaderDefVal::UInt(
+            "MAX_TEXTURE_EXTENT".into(),
+            crate::MAX_TEXTURE_EXTENT,
+        )], layouts::shading::shader_defs()].concat();
 
         let shading_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_shading_pipeline".into()),
@@ -370,16 +465,20 @@ impl FromWorld for StrandBinningPipeline {
         let count_layout = device.create_bind_group_layout(
             "strand_binning_count_layout",
             &[
-                Self::storage_buffer_entry(0, true, None),  // vertices
-                Self::storage_buffer_entry(1, true, None),  // indices
-                Self::storage_buffer_entry(2, true, None),  // strand_meta
-                Self::storage_buffer_entry(3, false, None), // tile_counts_buffer (atomic write)
+                Self::storage_buffer_entry(layouts::binning::VERTEX_BUFFER, true, None), // vertices
+                Self::storage_buffer_entry(layouts::binning::INDEX_BUFFER, true, None),  // indices
+                Self::storage_buffer_entry(layouts::binning::META_BUFFER, true, None), // strand_meta
+                Self::storage_buffer_entry(layouts::binning::TILE_COUNTS_BUFFER, false, None), // tile_counts_buffer (atomic write)
                 Self::uniform_buffer_entry(
-                    4,
+                    layouts::binning::FROXEL_CONFIG,
                     false,
                     Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
                 ), // config
-                Self::uniform_buffer_entry(5, false, Some(ViewUniform::min_size())), // view
+                Self::uniform_buffer_entry(
+                    layouts::binning::VIEW_UNIFORM,
+                    false,
+                    Some(ViewUniform::min_size()),
+                ), // view
             ],
         );
 
@@ -387,9 +486,8 @@ impl FromWorld for StrandBinningPipeline {
         let scan_layout = device.create_bind_group_layout(
             "strand_binning_scan_layout",
             &[
-                Self::storage_buffer_entry(0, true, None), // tile_counts_buffer (read)
-                Self::storage_buffer_entry(1, false, None), // tile_offsets_buffer (read/write)
-                                                           // Binding 4 (tnumber_seg in ref) is implicitly handled by writing to end of tile_offsets_buffer
+                Self::storage_buffer_entry(layouts::binning::TILE_COUNTS_BUFFER, true, None), // tile_counts_buffer (read)
+                Self::storage_buffer_entry(layouts::binning::TILE_OFFSETS_BUFFER, false, None), // tile_offsets_buffer (read/write)
             ],
         );
 
@@ -397,8 +495,12 @@ impl FromWorld for StrandBinningPipeline {
         let init_place_layout = device.create_bind_group_layout(
             "strand_binning_init_place_layout",
             &[
-                Self::storage_buffer_entry(0, true, None), // tile_offsets_buffer (read)
-                Self::storage_buffer_entry(1, false, None), // current_tile_write_indices_buffer (atomic write)
+                Self::storage_buffer_entry(layouts::binning::TILE_OFFSETS_BUFFER, true, None), // tile_offsets_buffer (read)
+                Self::storage_buffer_entry(
+                    layouts::binning::CURRENT_TILE_WRITE_INDICES,
+                    false,
+                    None,
+                ), // current_tile_write_indices_buffer (atomic write)
             ],
         );
 
@@ -406,17 +508,25 @@ impl FromWorld for StrandBinningPipeline {
         let place_layout = device.create_bind_group_layout(
             "strand_binning_place_layout",
             &[
-                Self::storage_buffer_entry(0, true, None),  // vertices
-                Self::storage_buffer_entry(1, true, None),  // indices
-                Self::storage_buffer_entry(2, true, None),  // strand_meta
-                Self::storage_buffer_entry(3, false, None), // current_tile_write_indices_buffer (atomic read/write)
-                Self::storage_buffer_entry(4, false, None), // packed_segments_buffer (write)
+                Self::storage_buffer_entry(layouts::binning::VERTEX_BUFFER, true, None), // vertices
+                Self::storage_buffer_entry(layouts::binning::INDEX_BUFFER, true, None),  // indices
+                Self::storage_buffer_entry(layouts::binning::META_BUFFER, true, None), // strand_meta
+                Self::storage_buffer_entry(
+                    layouts::binning::CURRENT_TILE_WRITE_INDICES,
+                    false,
+                    None,
+                ), // current_tile_write_indices_buffer (atomic read/write)
+                Self::storage_buffer_entry(layouts::binning::FROXEL_TILE_BUFFER, false, None), // packed_segments_buffer (write)
                 Self::uniform_buffer_entry(
-                    5,
+                    layouts::binning::FROXEL_CONFIG,
                     false,
                     Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
                 ), // config
-                Self::uniform_buffer_entry(6, false, Some(ViewUniform::min_size())), // view
+                Self::uniform_buffer_entry(
+                    layouts::binning::VIEW_UNIFORM,
+                    false,
+                    Some(ViewUniform::min_size()),
+                ), // view
             ],
         );
 
@@ -428,7 +538,7 @@ impl FromWorld for StrandBinningPipeline {
         let subgroup_size: (u32, u32) = (32, 32); // Defaults because SubgroupSize plugin doesn't work at this stage of app-build.
 
         // Shader defs for scan stages (match reference)
-        let cdefs = vec![
+        let cdefs = [vec![
             ShaderDefVal::UInt(
                 "NUMBER_OF_THREADS_PER_WORKGROUP".into(),
                 crate::NUMBER_OF_THREADS_PER_WORKGROUP, // Use crate:: constant
@@ -441,7 +551,7 @@ impl FromWorld for StrandBinningPipeline {
                 "NUMBER_OF_ROWS_PER_WORKGROUP".into(), // This might not be relevant if scan logic is adapted
                 crate::NUMBER_OF_ROWS_PER_WORKGROUP,
             ),
-        ];
+        ] , layouts::binning::shader_defs()].concat();
 
         // Push constant range covering the potentially larger struct
         let push_constant_range = PushConstantRange {

@@ -5,23 +5,27 @@
 
 // --- Structures ---
 
+struct Aabb {
+    min: vec3<f32>,
+    max: vec3<f32>,
+}
+
 struct FroxelConfig { // Ensure this matches Rust exactly
     screen_width: u32,
     screen_height: u32,
     froxel_size_x: u32,
     froxel_size_y: u32,
     depth_slices: u32,
-    aabb_min_x: u32,
-    aabb_min_y: u32,
-    aabb_min_z: f32,
-    aabb_max_x: u32,
-    aabb_max_y: u32,
-    aabb_max_z: f32,
 }
 
 struct SegmentRef { // Ensure this matches Rust if defined there
     strand_idx: u32,
     segment_start_idx: u32, // Index into the index buffer
+}
+
+struct StrandGeo {
+    strand_count: u32,
+    aabb: Aabb,
 }
 
 struct StrandMeta { // Ensure this matches Rust exactly
@@ -34,8 +38,10 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
     num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
     scan_load_base: u32,
     scan_save_base: u32,
+    // geo_id: u32, // For geo buffers
     // Add other needed constants
 }
+
 var<push_constant> pc: PushConstants;
 
 // --- Common Helper Functions ---
@@ -82,12 +88,13 @@ fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_he
 // --- STAGE_COUNT ---
 #ifdef STAGE_COUNT
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
-@group(0) @binding(3) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
-@group(0) @binding(4) var<uniform> config: FroxelConfig;
-@group(0) @binding(5) var<uniform> view: View; // Or ViewUniform
+@group(0) @binding(#VERTEX_BUFFER) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(#INDEX_BUFFER) var<storage, read> indices: array<u32>;
+@group(0) @binding(#META_BUFFER) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
+@group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
+@group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
+@group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View; // Or ViewUniform
+// @group(0) @binding(#GEO_BUFFER) var<uniform> geos: array<StrandGeo>; // Has AABB for bounds check
 
 
 fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
@@ -285,8 +292,8 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 #ifdef SCAN_STAGE
 
 // Common scan bindings
-@group(0) @binding(0) var<storage, read> input_counts: array<u32>; // tile_counts_buffer (non-atomic read)
-@group(0) @binding(1) var<storage, read_write> output_offsets: array<u32>; // tile_offsets_buffer
+@group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read> input_counts: array<u32>; // tile_counts_buffer (non-atomic read)
+@group(0) @binding(#TILE_OFFSETS_BUFFER) var<storage, read_write> output_offsets: array<u32>; // tile_offsets_buffer
 
 const SCAN_THREADS: u32 = #{NUMBER_OF_THREADS_PER_WORKGROUP}; // e.g., 256
 const SCAN_SUBGROUP_THREADS: u32 = #{NUMBER_OF_THREADS_PER_SUBGROUP}; // e.g., 32
@@ -549,8 +556,8 @@ fn scan_prfx(
 // --- STAGE_INIT_PLACE ---
 #ifdef STAGE_INIT_PLACE
 
-@group(0) @binding(0) var<storage, read> tile_offsets_buffer: array<u32>;
-@group(0) @binding(1) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
+@group(0) @binding(#TILE_OFFSETS_BUFFER) var<storage, read> tile_offsets_buffer: array<u32>;
+@group(0) @binding(#CURRENT_TILE_WRITE_INDICES) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
 
 @compute @workgroup_size(256, 1, 1) // Example workgroup size
 fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -573,13 +580,13 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 // --- STAGE_PLACE ---
 #ifdef STAGE_PLACE
 
-@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(3) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
-@group(0) @binding(4) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
-@group(0) @binding(5) var<uniform> config: FroxelConfig;
-@group(0) @binding(6) var<uniform> view: View;
+@group(0) @binding(#VERTEX_BUFFER) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(#INDEX_BUFFER) var<storage, read> indices: array<u32>;
+@group(0) @binding(#META_BUFFER) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(#CURRENT_TILE_WRITE_INDICES) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
+@group(0) @binding(#FROXEL_TILE_BUFFER) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
+@group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
+@group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View;
 
 fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, segment_ref: SegmentRef, cfg: FroxelConfig) -> bool {
     // Optional AABB Check

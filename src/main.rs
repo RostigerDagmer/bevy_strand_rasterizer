@@ -3,6 +3,7 @@ use std::u32::MAX;
 
 use bevy::core_pipeline::core_3d::graph::Core3d;
 use bevy::gizmos::{config, light};
+use bevy::math::bounding::Aabb3d;
 use bevy::pbr::{CascadeShadowConfigBuilder, LightMeta, MeshBindGroups, MeshViewBindGroup, ViewLightsUniformOffset};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
@@ -120,7 +121,7 @@ impl Plugin for StrandRasterizerPlugin {
 }
 
 // Create the bind group for the strand rasterizer
-pub fn create_strand_bind_group(
+pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
     layout: &BindGroupLayout,
     vertex_buffer: &Buffer,
@@ -139,43 +140,43 @@ pub fn create_strand_bind_group(
         layout,
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::rasterizer::VERTEX_BUFFER,
                 resource: vertex_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::rasterizer::INDEX_BUFFER,
                 resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 2,
+                binding: resources::layouts::rasterizer::META_BUFFER,
                 resource: meta_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 3,
+                binding: resources::layouts::rasterizer::TILE_OFFSETS_BUFFER,
                 resource: tile_offsets_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 4,
+                binding: resources::layouts::rasterizer::TILE_COUNTS_BUFFER,
                 resource: tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 5,
+                binding: resources::layouts::rasterizer::FROXEL_TILE_BUFFER,
                 resource: packed_segments.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 6,
+                binding: resources::layouts::rasterizer::OUTPUT_TEXTURE,
                 resource: BindingResource::TextureView(output_texture),
             },
             BindGroupEntry {
-                binding: 7,
+                binding: resources::layouts::rasterizer::FROXEL_CONFIG,
                 resource: froxel_config_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 8,
+                binding: resources::layouts::rasterizer::VIEW_UNIFORM,
                 resource: view_buffer.clone(),
             },
             BindGroupEntry {
-                binding: 9,
+                binding: resources::layouts::rasterizer::SHADING_BUFFER,
                 resource: BindingResource::TextureView(shading_buffer)
             }
         ],
@@ -198,19 +199,19 @@ pub fn create_strand_binning_bind_group(
         &pipeline.count_layout, // Use count_layout
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::binning::VERTEX_BUFFER,
                 resource: strand_points_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::binning::INDEX_BUFFER,
                 resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 2,
+                binding: resources::layouts::binning::META_BUFFER,   
                 resource: strand_metadata_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 3,
+                binding: resources::layouts::binning::TILE_COUNTS_BUFFER,
                 resource: binning_resources
                     .tile_counts_buffer
                     .as_ref()
@@ -218,7 +219,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 4,
+                binding: resources::layouts::binning::FROXEL_CONFIG,
                 resource: raster_resources
                     .froxel_config_buffer
                     .as_ref()
@@ -226,7 +227,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 5,
+                binding: resources::layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
             },
         ],
@@ -238,7 +239,7 @@ pub fn create_strand_binning_bind_group(
         &pipeline.scan_layout, // Use scan_layout
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::binning::TILE_COUNTS_BUFFER,
                 resource: binning_resources
                     .tile_counts_buffer
                     .as_ref()
@@ -246,7 +247,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::binning::TILE_OFFSETS_BUFFER,
                 resource: binning_resources
                     .tile_offsets_buffer
                     .as_ref()
@@ -263,7 +264,7 @@ pub fn create_strand_binning_bind_group(
         &pipeline.init_place_layout, // Use init_place_layout
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::binning::TILE_OFFSETS_BUFFER,
                 resource: binning_resources
                     .tile_offsets_buffer
                     .as_ref()
@@ -271,7 +272,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::binning::CURRENT_TILE_WRITE_INDICES,
                 resource: binning_resources
                     .current_tile_write_indices_buffer
                     .as_ref()
@@ -287,19 +288,19 @@ pub fn create_strand_binning_bind_group(
         &pipeline.place_layout, // Use place_layout
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::binning::VERTEX_BUFFER,
                 resource: strand_points_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::binning::INDEX_BUFFER,
                 resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 2,
+                binding: resources::layouts::binning::META_BUFFER,
                 resource: strand_metadata_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 3,
+                binding: resources::layouts::binning::CURRENT_TILE_WRITE_INDICES,
                 resource: binning_resources
                     .current_tile_write_indices_buffer
                     .as_ref()
@@ -307,7 +308,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 4,
+                binding: resources::layouts::binning::FROXEL_TILE_BUFFER,
                 resource: binning_resources
                     .packed_segments_buffer
                     .as_ref()
@@ -315,7 +316,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 5,
+                binding: resources::layouts::binning::FROXEL_CONFIG,
                 resource: raster_resources
                     .froxel_config_buffer
                     .as_ref()
@@ -323,7 +324,7 @@ pub fn create_strand_binning_bind_group(
                     .as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 6,
+                binding: resources::layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
             },
         ],
@@ -336,7 +337,7 @@ pub fn create_strand_binning_bind_group(
     };
 }
 
-pub fn create_strand_shading_group(
+pub fn create_strand_shading_bind_group(
     device: &RenderDevice,
     layout: &BindGroupLayout,
     vertex_buffer: &Buffer,
@@ -352,27 +353,27 @@ pub fn create_strand_shading_group(
         layout,
         &[
             BindGroupEntry {
-                binding: 0,
+                binding: resources::layouts::shading::VERTEX_BUFFER,
                 resource: vertex_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 1,
+                binding: resources::layouts::shading::INDEX_BUFFER,
                 resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 2,
+                binding: resources::layouts::shading::META_BUFFER,
                 resource: meta_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: 3,
+                binding: resources::layouts::shading::VIEW_UNIFORM,
                 resource: view_buffer.clone(),
             },
             BindGroupEntry {
-                binding: 4,
+                binding: resources::layouts::shading::LIGHT_UNIFORM,
                 resource: light_buffer.clone(),
             },
             BindGroupEntry {
-                binding: 5,
+                binding: resources::layouts::shading::OUTPUT_TEXTURE,
                 resource: BindingResource::TextureView(output_texture),
             },
         ],
@@ -894,9 +895,8 @@ impl Node for StrandRasterizerNode {
         );
 
         // Shading pass
-
         if let Some(output_texture) = &shading_resources.output_texture {
-            let (shading_bind_group, shading_group_offsets) = create_strand_shading_group(
+            let (shading_bind_group, shading_group_offsets) = create_strand_shading_bind_group(
                 render_device,
                 &shading_pipeline.bind_group_layout,
                 vertex_buffer,
@@ -907,7 +907,7 @@ impl Node for StrandRasterizerNode {
                 light_binding,
                 view_light_uniform_offset
             );
-            let raster_bind_group = create_strand_bind_group(
+            let raster_bind_group = create_strand_raster_bind_group(
                 render_device,
                 &raster_pipeline.bind_group_layout,
                 vertex_buffer,
@@ -931,6 +931,7 @@ impl Node for StrandRasterizerNode {
                 &shading_bind_group,
                 &shading_group_offsets
             );
+            // Raster pass
             run_raster_pass(
                 render_device,
                 pipeline_cache,
@@ -1150,17 +1151,19 @@ fn set_strand_geometry(
 
         let geometry = &geometry_library[0];
         // Extract vertices
+        // TODO: time this. Could also be done in a compute shader
+        let aabb = Aabb3d::from_point_cloud(Isometry3d::IDENTITY, geometry.vertices.values.iter().cloned()); // todo: pass transform
         let vertices: Vec<[f32; 4]> = geometry
-            .vertices
-            .values
-            .clone()
-            .iter()
-            .map(|v| {
-                [
-                    v[0] * 0.0254, // TODO: pass transform to shaders
-                    v[1] * 0.0254, // TODO: pass transform to shaders
-                    v[2] * 0.0254, // TODO: pass transform to shaders
-                    1.0,
+        .vertices
+        .values
+        .clone()
+        .iter()
+        .map(|v| {
+            [
+                v[0] * 0.0254, // TODO: pass transform to shaders
+                v[1] * 0.0254, // TODO: pass transform to shaders
+                v[2] * 0.0254, // TODO: pass transform to shaders
+                1.0,
                 ]
             })
             .collect();
@@ -1215,7 +1218,8 @@ fn set_strand_geometry(
             indices: index_buffer_handle,
             meta: meta_buffer_handle,
             strand_count: polyline_list.values.len() as u32,
-            max_segments_in_strand
+            max_segments_in_strand,
+            aabb
         });
     }
 }
@@ -1315,6 +1319,17 @@ fn use_strand_geometry(
         binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
         binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
         raster_resources.strand_count = Some(geometry.strand_count);
+        let aabb_max = geometry.aabb.max;
+        let aabb_min = geometry.aabb.min;
+        // let frustrum = raster_resources.frustrum_config.as_mut().unwrap();
+        // frustrum.aabb_max_x = aabb_max.x;   
+        // frustrum.aabb_max_y = aabb_max.y;
+        // frustrum.aabb_max_z = aabb_max.z;
+        // frustrum.aabb_min_x = aabb_min.x;
+        // frustrum.aabb_min_y = aabb_min.y;
+        // frustrum.aabb_min_z = aabb_min.z;
+        // raster_resources.frustrum_config = Some(frustrum.clone());
+
 
         let (shading_buffer, shading_buffer_view) = create_shading_target_texture(&device, geometry.strand_count, geometry.max_segments_in_strand);
         shading_resources.output_texture = Some(shading_buffer_view);

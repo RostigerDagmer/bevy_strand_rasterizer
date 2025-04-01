@@ -9,12 +9,6 @@ struct FroxelConfig { // Ensure this matches Rust exactly
     froxel_size_x: u32,
     froxel_size_y: u32,
     depth_slices: u32,
-    aabb_min_x: u32,
-    aabb_min_y: u32,
-    aabb_min_z: f32,
-    aabb_max_x: u32,
-    aabb_max_y: u32,
-    aabb_max_z: f32,
 }
 
 struct SegmentRef { // Ensure this matches Rust if defined there
@@ -36,19 +30,20 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 }
 var<push_constant> pc: PushConstants;
 
-const MAX_TEXTURE_EXT: u32 = 8192u; // TODO: shaderdef
+const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
+const MIN_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
 
-
-@group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(3) var<storage, read> tile_offsets_buffer: array<u32>;
-@group(0) @binding(4) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
-@group(0) @binding(5) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
-@group(0) @binding(6) var render_target: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(7) var<uniform> config: FroxelConfig;
-@group(0) @binding(8) var<uniform> view: View;
-@group(0) @binding(9) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
+@group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
+@group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read> tile_offsets_buffer: array<u32>;
+@group(0) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
+@group(0) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
+@group(0) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
+@group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
+@group(0) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
@@ -105,11 +100,6 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
     return clamped_z * froxels_x * froxels_y + clamped_y * froxels_x + clamped_x;
 }
 
-// Define hair properties (can be uniforms later)
-const HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
-// const HAIR_COLOR : vec3<f32> = vec3<f32>(0.8, 0.7, 0.6); // Example: Hair color
-const HAIR_ALPHA : f32 = 0.2; // Example: Alpha per covered fragment (lower for softer look)
-
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
 fn point_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, t: f32) -> f32 {
@@ -147,12 +137,11 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 
 // #define DEBUG
 
-
-@compute @workgroup_size(8, 8, 1) // Should match froxel_size_x, froxel_size_y
+@compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(
-    @builtin(global_invocation_id) global_id: vec3<u32>, // Represents the pixel coordinate (x, y, 0)
-    @builtin(workgroup_id) workgroup_id: vec3u,         // Represents the tile index (tx, ty, 0)
-    @builtin(local_invocation_id) local_id: vec3u          // Represents pixel within tile (lx, ly, 0)
+    @builtin(global_invocation_id) global_id: vec3<u32>,    // Represents the pixel coordinate (x, y, 0)
+    @builtin(workgroup_id) workgroup_id: vec3u,             // Represents the tile index (tx, ty, 0)
+    @builtin(local_invocation_id) local_id: vec3u           // Represents pixel within tile (lx, ly, 0)
 ) {
     let pixel_coord_int = vec2<i32>(global_id.xy);
 
@@ -173,17 +162,17 @@ fn rasterize_strands(
         let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
     # endif // DEBUG
 
-    // Or loop FRONT TO BACK (simpler to start)
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
         let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
 
-        // Find the range of segments for this froxel in the packed buffer
-        // Ensure read index doesn't go out of bounds
-        if (froxel_idx + 1u >= arrayLength(&tile_offsets_buffer)) { continue; } // Safety check
+        // bounds check
+        if (froxel_idx >= arrayLength(&tile_offsets_buffer)) { continue; }
 
         let start_segment_offset = tile_offsets_buffer[froxel_idx];
         let segment_count_in_froxel = tile_counts_buffer[froxel_idx];
+
+        var froxel_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 
         // Process all segments within this froxel
         for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
@@ -225,8 +214,11 @@ fn rasterize_strands(
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
             let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
 
+            // blend hair radius from MIN to MAX based on distance to camera
+            let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
+
             // Simple linear falloff based on distance
-            let coverage = clamp(1.0 - dist / HAIR_RADIUS_PIXELS, 0.0, 1.0);
+            let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
 
             if (coverage > 0.0) {
                 // Calculate color/alpha contribution of this hair segment fragment
@@ -243,10 +235,16 @@ fn rasterize_strands(
                 let hair_color = mix(shading0, shading1, clamp(t, 0.0, 1.0));
                 let hair_fragment = vec4<f32>(hair_color.xyz, hair_color.w * coverage);
 
-                // Blend this fragment OVER the current accumulated color
-                final_color = blend_over(hair_fragment, final_color);
+                // Order independent transparency
+                froxel_color = mix(hair_fragment, froxel_color, hair_fragment.a);
+            }
+            if (froxel_color.a > 0.99) {
+                break; // Stop segment loop
             }
         } // End loop over segments in froxel
+
+        // Order dependent transparency (we go front to back)
+        final_color = blend_over(froxel_color, final_color);
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
