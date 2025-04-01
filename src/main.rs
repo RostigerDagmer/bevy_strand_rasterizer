@@ -4,7 +4,10 @@ use std::u32::MAX;
 use bevy::core_pipeline::core_3d::graph::Core3d;
 use bevy::gizmos::{config, light};
 use bevy::math::bounding::Aabb3d;
-use bevy::pbr::{CascadeShadowConfigBuilder, LightMeta, MeshBindGroups, MeshViewBindGroup, ViewLightsUniformOffset};
+use bevy::pbr::{
+    CascadeShadowConfigBuilder, LightMeta, MeshBindGroups, MeshViewBindGroup,
+    ViewLightsUniformOffset,
+};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_asset::RenderAssets;
@@ -177,8 +180,8 @@ pub fn create_strand_raster_bind_group(
             },
             BindGroupEntry {
                 binding: resources::layouts::rasterizer::SHADING_BUFFER,
-                resource: BindingResource::TextureView(shading_buffer)
-            }
+                resource: BindingResource::TextureView(shading_buffer),
+            },
         ],
     )
 }
@@ -207,7 +210,7 @@ pub fn create_strand_binning_bind_group(
                 resource: index_buffer.as_entire_binding(),
             },
             BindGroupEntry {
-                binding: resources::layouts::binning::META_BUFFER,   
+                binding: resources::layouts::binning::META_BUFFER,
                 resource: strand_metadata_buffer.as_entire_binding(),
             },
             BindGroupEntry {
@@ -229,6 +232,14 @@ pub fn create_strand_binning_bind_group(
             BindGroupEntry {
                 binding: resources::layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
+            },
+            BindGroupEntry {
+                binding: resources::layouts::binning::GEO_BUFFER,
+                resource: binning_resources
+                    .geos_buffer
+                    .as_ref()
+                    .unwrap()
+                    .as_entire_binding(),
             },
         ],
     );
@@ -327,6 +338,14 @@ pub fn create_strand_binning_bind_group(
                 binding: resources::layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
             },
+            BindGroupEntry {
+                binding: resources::layouts::binning::GEO_BUFFER,
+                resource: binning_resources
+                    .geos_buffer
+                    .as_ref()
+                    .unwrap()
+                    .as_entire_binding(),
+            }
         ],
     );
     return StrandBinningBindGroup {
@@ -348,36 +367,39 @@ pub fn create_strand_shading_bind_group(
     light_buffer: BindingResource,
     view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> (BindGroup, Vec<u32>) {
-    (device.create_bind_group(
-        Some("strand_shading_bind_group"),
-        layout,
-        &[
-            BindGroupEntry {
-                binding: resources::layouts::shading::VERTEX_BUFFER,
-                resource: vertex_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: resources::layouts::shading::INDEX_BUFFER,
-                resource: index_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: resources::layouts::shading::META_BUFFER,
-                resource: meta_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: resources::layouts::shading::VIEW_UNIFORM,
-                resource: view_buffer.clone(),
-            },
-            BindGroupEntry {
-                binding: resources::layouts::shading::LIGHT_UNIFORM,
-                resource: light_buffer.clone(),
-            },
-            BindGroupEntry {
-                binding: resources::layouts::shading::OUTPUT_TEXTURE,
-                resource: BindingResource::TextureView(output_texture),
-            },
-        ],
-    ), vec![view_light_uniform_offset.offset])
+    (
+        device.create_bind_group(
+            Some("strand_shading_bind_group"),
+            layout,
+            &[
+                BindGroupEntry {
+                    binding: resources::layouts::shading::VERTEX_BUFFER,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: resources::layouts::shading::INDEX_BUFFER,
+                    resource: index_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: resources::layouts::shading::META_BUFFER,
+                    resource: meta_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: resources::layouts::shading::VIEW_UNIFORM,
+                    resource: view_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: resources::layouts::shading::LIGHT_UNIFORM,
+                    resource: light_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: resources::layouts::shading::OUTPUT_TEXTURE,
+                    resource: BindingResource::TextureView(output_texture),
+                },
+            ],
+        ),
+        vec![view_light_uniform_offset.offset],
+    )
 }
 
 pub fn create_shading_target_texture(
@@ -385,7 +407,6 @@ pub fn create_shading_target_texture(
     strand_count: u32,
     max_strand_segment_count: u32,
 ) -> (Texture, TextureView) {
-
     // calculate how many columns we need
     let cols = strand_count.div_ceil(MAX_TEXTURE_EXTENT);
 
@@ -450,8 +471,8 @@ pub fn create_render_target_texture(
 fn run_binning_pass(
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
-    bind_groups: &StrandBinningBindGroup, // Assume correctly populated bind groups
-    buffers: &StrandBinningBuffers,       // Assume correctly populated buffers
+    bind_groups: &StrandBinningBindGroup,
+    buffers: &StrandBinningBuffers,
     pipelines: &StrandBinningPipeline,
     render_context: &mut RenderContext,
     froxel_config: &FroxelConfig,
@@ -472,7 +493,10 @@ fn run_binning_pass(
     let max_compute_workgroups_per_dimension =
         render_device.limits().max_compute_workgroups_per_dimension;
 
-    info!("max_compute_workgroups_per_dimension: {:?}", max_compute_workgroups_per_dimension);
+    info!(
+        "max_compute_workgroups_per_dimension: {:?}",
+        max_compute_workgroups_per_dimension
+    );
     let threads_per_workgroup = NUMBER_OF_THREADS_PER_WORKGROUP;
 
     // --- Clear count buffer (important!) ---
@@ -644,13 +668,11 @@ fn run_shading_pass(
     bind_group: &BindGroup,
     offsets: &Vec<u32>,
 ) {
-
     let Some(strand_count) = resources.strand_count else {
         warn!("Strand count not set.");
         return;
     };
-    let Some(shading_pipeline) =
-        pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
+    let Some(shading_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
     else {
         warn!("Shading pipeline not found");
         return;
@@ -682,7 +704,6 @@ fn run_shading_pass(
     // --- Shading complete ---
     // output_texture is ready for composition
 }
-
 
 fn run_raster_pass(
     render_device: &RenderDevice,
@@ -787,7 +808,8 @@ impl Node for StrandRasterizerNode {
             return Ok(());
         };
 
-        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity) else {
+        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity)
+        else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
                 "Node running on view {:?} without ViewLightUniformOffset",
@@ -830,6 +852,12 @@ impl Node for StrandRasterizerNode {
             warn!("Meta buffer handle not found in resources.");
             return Ok(());
         };
+
+        let Some(geos_buffer) = binning_buffers.geos_buffer.as_ref() else {
+            warn!("Geos buffer handle not found in resources.");
+            return Ok(());
+        };
+
         let Some(tile_counts_buffer) = binning_buffers.tile_counts_buffer.as_ref() else {
             /* ... */
             return Ok(());
@@ -905,7 +933,7 @@ impl Node for StrandRasterizerNode {
                 &output_texture,
                 view_binding.clone(),
                 light_binding,
-                view_light_uniform_offset
+                view_light_uniform_offset,
             );
             let raster_bind_group = create_strand_raster_bind_group(
                 render_device,
@@ -921,7 +949,7 @@ impl Node for StrandRasterizerNode {
                 view_binding.clone(),
                 output_texture,
             );
-    
+
             run_shading_pass(
                 render_device,
                 pipeline_cache,
@@ -929,7 +957,7 @@ impl Node for StrandRasterizerNode {
                 render_context,
                 shading_resources,
                 &shading_bind_group,
-                &shading_group_offsets
+                &shading_group_offsets,
             );
             // Raster pass
             run_raster_pass(
@@ -1152,18 +1180,21 @@ fn set_strand_geometry(
         let geometry = &geometry_library[0];
         // Extract vertices
         // TODO: time this. Could also be done in a compute shader
-        let aabb = Aabb3d::from_point_cloud(Isometry3d::IDENTITY, geometry.vertices.values.iter().cloned()); // todo: pass transform
+        let aabb = Aabb3d::from_point_cloud(
+            Isometry3d::IDENTITY,
+            geometry.vertices.values.iter().cloned(),
+        ); // todo: pass transform
         let vertices: Vec<[f32; 4]> = geometry
-        .vertices
-        .values
-        .clone()
-        .iter()
-        .map(|v| {
-            [
-                v[0] * 0.0254, // TODO: pass transform to shaders
-                v[1] * 0.0254, // TODO: pass transform to shaders
-                v[2] * 0.0254, // TODO: pass transform to shaders
-                1.0,
+            .vertices
+            .values
+            .clone()
+            .iter()
+            .map(|v| {
+                [
+                    v[0] * 0.0254, // TODO: pass transform to shaders
+                    v[1] * 0.0254, // TODO: pass transform to shaders
+                    v[2] * 0.0254, // TODO: pass transform to shaders
+                    1.0,
                 ]
             })
             .collect();
@@ -1192,7 +1223,10 @@ fn set_strand_geometry(
                     }
                     match acc.1.last().copied() {
                         Some((last_strand_count, last_strand_offset)) => {
-                            acc.1.push((strand_indices.len() as u32, last_strand_offset + last_strand_count));
+                            acc.1.push((
+                                strand_indices.len() as u32,
+                                last_strand_offset + last_strand_count,
+                            ));
                         }
                         None => acc.1.push((strand_indices.len() as u32, 0)),
                     }
@@ -1207,19 +1241,28 @@ fn set_strand_geometry(
             .collect();
         let max_segments_in_strand = packed_strand_info.2 as u32;
 
+        let geos_data = vec![StrandGeo::new(
+            polyline_list.values.len() as u32,
+            max_segments_in_strand,
+            aabb,
+        )];
+
         let index_buffer = ShaderStorageBuffer::from(strand_indices);
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
+        let geo_buffer = ShaderStorageBuffer::from(geos_data);
         // info!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
+        let geo_buffer_handle = storage_buffers.add(geo_buffer);
 
         commands.entity(entity).insert(StrandGeometry {
             vertices: vertex_buffer_handle,
             indices: index_buffer_handle,
             meta: meta_buffer_handle,
+            geos: geo_buffer_handle,
             strand_count: polyline_list.values.len() as u32,
             max_segments_in_strand,
-            aabb
+            aabb,
         });
     }
 }
@@ -1288,11 +1331,15 @@ fn use_strand_geometry(
             warn!("Vertex storage buffer not found for entity: {:?}", entity);
             continue;
         };
-
         let Some(meta_storage_buffer) = storage_buffers.get(&geometry.meta) else {
             warn!("Meta storage buffer not found for entity: {:?}", entity);
             continue;
         };
+        let Some(geo_storage_buffer) = storage_buffers.get(&geometry.geos) else {
+            warn!("Geo storage buffer not found for entity: {:?}", entity);
+            continue;
+        };
+
         info!(
             "[{:?}] Vertex storage buffer found: {:?}",
             entity, vertex_storage_buffer.buffer
@@ -1318,20 +1365,14 @@ fn use_strand_geometry(
         binning_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
         binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
         binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
+        binning_resources.geos_buffer = Some(geo_storage_buffer.buffer.clone());
         raster_resources.strand_count = Some(geometry.strand_count);
-        let aabb_max = geometry.aabb.max;
-        let aabb_min = geometry.aabb.min;
-        // let frustrum = raster_resources.frustrum_config.as_mut().unwrap();
-        // frustrum.aabb_max_x = aabb_max.x;   
-        // frustrum.aabb_max_y = aabb_max.y;
-        // frustrum.aabb_max_z = aabb_max.z;
-        // frustrum.aabb_min_x = aabb_min.x;
-        // frustrum.aabb_min_y = aabb_min.y;
-        // frustrum.aabb_min_z = aabb_min.z;
-        // raster_resources.frustrum_config = Some(frustrum.clone());
 
-
-        let (shading_buffer, shading_buffer_view) = create_shading_target_texture(&device, geometry.strand_count, geometry.max_segments_in_strand);
+        let (shading_buffer, shading_buffer_view) = create_shading_target_texture(
+            &device,
+            geometry.strand_count,
+            geometry.max_segments_in_strand,
+        );
         shading_resources.output_texture = Some(shading_buffer_view);
         shading_resources.strand_count = Some(geometry.strand_count);
         shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);

@@ -479,6 +479,7 @@ impl FromWorld for StrandBinningPipeline {
                     false,
                     Some(ViewUniform::min_size()),
                 ), // view
+                Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
 
@@ -527,6 +528,7 @@ impl FromWorld for StrandBinningPipeline {
                     false,
                     Some(ViewUniform::min_size()),
                 ), // view
+                Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
 
@@ -655,9 +657,10 @@ pub struct StrandBinningBuffers {
     pub current_tile_write_indices_buffer: Option<Buffer>,
     pub packed_segments_buffer: Option<Buffer>,
     // Add handles/references needed from StrandGeometry
-    pub vertex_buffer: Option<Buffer>, // Store the actual buffer ref
-    pub index_buffer: Option<Buffer>,  // Store the actual buffer ref
-    pub meta_buffer: Option<Buffer>,   // Store the actual buffer ref
+    pub vertex_buffer: Option<Buffer>,
+    pub index_buffer: Option<Buffer>,
+    pub meta_buffer: Option<Buffer>, 
+    pub geos_buffer: Option<Buffer>,
 }
 
 #[derive(Resource, Default)]

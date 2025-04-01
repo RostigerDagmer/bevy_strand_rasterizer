@@ -7,6 +7,7 @@ pub struct StrandGeometry {
     pub vertices: Handle<ShaderStorageBuffer>,
     pub indices: Handle<ShaderStorageBuffer>,
     pub meta: Handle<ShaderStorageBuffer>,
+    pub geos: Handle<ShaderStorageBuffer>,
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
     pub aabb: Aabb3d,

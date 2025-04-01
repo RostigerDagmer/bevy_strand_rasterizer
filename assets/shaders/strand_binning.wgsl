@@ -7,8 +7,10 @@
 
 struct Aabb {
     min: vec3<f32>,
+    pad1: f32,
     max: vec3<f32>,
-}
+    pad2: f32,
+} // align(16)
 
 struct FroxelConfig { // Ensure this matches Rust exactly
     screen_width: u32,
@@ -25,8 +27,11 @@ struct SegmentRef { // Ensure this matches Rust if defined there
 
 struct StrandGeo {
     strand_count: u32,
+    max_segments_in_strand: u32,
+    pad1: u32,
+    pad2: u32,
     aabb: Aabb,
-}
+} // align(16)
 
 struct StrandMeta { // Ensure this matches Rust exactly
     count: u32,     // Number of vertices in strand
@@ -94,7 +99,7 @@ fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_he
 @group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
 @group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
 @group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View; // Or ViewUniform
-// @group(0) @binding(#GEO_BUFFER) var<uniform> geos: array<StrandGeo>; // Has AABB for bounds check
+@group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
 
 fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
@@ -587,6 +592,7 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(#FROXEL_TILE_BUFFER) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
 @group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
 @group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View;
+@group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
 fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, segment_ref: SegmentRef, cfg: FroxelConfig) -> bool {
     // Optional AABB Check
@@ -759,7 +765,8 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     if num_vertices_in_strand < 2u {
         return;
     }
-
+    // let aabb = geos[pc.geo_id].aabb; // TODO: pc modification
+    let aabb = geos[0].aabb;
     var prev_vtx = vertices[indices[start_vertex_offset]];
     var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height));
 
