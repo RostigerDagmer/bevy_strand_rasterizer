@@ -26,9 +26,9 @@ var<push_constant> pc: PushConstants;
 @group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(3) var output_texture: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(4) var<uniform> view: View;
-@group(0) @binding(5) var<uniform> lights: types::Lights;
+@group(0) @binding(3) var<uniform> view: View;
+@group(0) @binding(4) var<uniform> lights: types::Lights;
+@group(0) @binding(5) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -80,17 +80,42 @@ var<push_constant> pc: PushConstants;
 //     environment_map_intensity: f32,
 // };
 
+fn marschner_R() -> f32 {
+    return 0.0;
+}
+
+fn marschner_TT() -> f32 {
+    return 0.0;
+}
+
+fn marschner_TRT() -> f32 {
+    return 0.0;
+}
+
+fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>) -> vec4<f32> {
+
+    let u = direction;
+    let normal = view_normal;
+
+    // orthonormal basis
+    let v = normalize(cross(normal, u));
+    let w = cross(u, v);
+
+
+}
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
+const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn shade_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3u,         
     @builtin(local_invocation_id) local_id: vec3u          
 ) {
 
-    let strand_id = workgroup_id.x * 64 + local_id.x;
+    let strand_id = workgroup_id.x;
+    let segment_id = local_id.x;
     if strand_id >= pc.num_elements {
         return;
     }
@@ -100,27 +125,43 @@ fn shade_strands(
     let strand_count = strand_meta.count;
 
     let light_count = lights.n_directional_lights;
-    let light_flags = lights.flags;
 
-    let strand_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    let strand_color = vec4<f32>(0.0, 0.0, 0.5, 0.5);
     let strand_normal = vec3<f32>(0.0, 0.0, 0.0);
 
-    for i in 0..strand_count {
-        let vertex = vertices[strand_offset + i];
+    for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) {
+        let segment_offset = segment_id + i;
+        var next_point = segment_offset + 1u;
+        if next_point >= strand_count {
+            // we use the previous point to indicate fibre direction and reverse it
+            // we still have to shade the tip of the strand
+            next_point = strand_count - 1u;
+        }
+        let index = indices[strand_offset + segment_offset];
+        let i_dir = indices[strand_offset + next_point];
+
+        let vertex = vertices[index];
+        let next_vertex = vertices[i_dir];
         let normal = normalize(vec3<f32>(vertex.xyz));
         let color = vec4<f32>(vertex.w, vertex.w, vertex.w, 1.0);
 
-        // TODO: we can theoretically split this across multiple workgroups
-        for j in 0..light_count {
-            let light: types::DirectionalLight = lights.directional_lights[j];
-            // TODO
+        // fiber direction
+        var u = normalize(next_vertex.xyz - vertex.xyz);
+        if next_point < segment_offset {
+            // invert direction for the tip
+            u = -u;
         }
+
+        // TODO: we can theoretically split this across multiple workgroups
+        // for (var j = 0; j < light_count; j = j+1) {
+        //     let light: types::DirectionalLight = lights.directional_lights[j];
+        //     let light_flags = light.flags;
+        //     // TODO
+        // }
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;
         let y_coord = out_row;
-        let x_coord = out_col * pc.workgroup_offset + i;
-        textureStore(output_texture, vec2<i32>(x_coord, y_coord), strand_color);
+        let x_coord = out_col * pc.workgroup_offset + segment_offset;
+        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), strand_color);
     }
-
-
 }

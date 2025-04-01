@@ -233,7 +233,7 @@ impl StrandShadingPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -552,6 +552,8 @@ pub struct StrandRasterizerResources {
 #[derive(Resource, Default)]
 pub struct StrandShadingResources {
     pub output_texture: Option<TextureView>,
+    pub strand_count: Option<u32>,
+    pub max_segments_in_strand: Option<u32>,
 }
 
 #[derive(Clone, Debug)]

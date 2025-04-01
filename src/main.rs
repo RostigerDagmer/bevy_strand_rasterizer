@@ -14,7 +14,7 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::storage::GpuShaderStorageBuffer;
 use bevy::render::storage::ShaderStorageBuffer;
-use bevy::render::view::{ViewTarget, ViewUniform, ViewUniformOffset};
+use bevy::render::view::{self, ViewTarget, ViewUniform, ViewUniformOffset};
 use bevy::render::view::{ViewUniforms, prepare_view_uniforms};
 use bevy::render::{Render, RenderApp, RenderSet, render_resource::*};
 use bevy::utils::HashMap;
@@ -65,6 +65,8 @@ impl Plugin for StrandRasterizerPlugin {
         // render_app.add_plugins(GetSubgroupSizePlugin);
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandRasterizerPipeline>();
+        render_app.init_resource::<StrandShadingPipeline>();
+        render_app.init_resource::<StrandShadingResources>();
         render_app.init_resource::<StrandBinningPipeline>();
         render_app.init_resource::<StrandBinningBuffers>();
         render_app.init_resource::<CompositionPipeline>();
@@ -338,8 +340,9 @@ pub fn create_strand_shading_group(
     output_texture: &TextureView,
     view_buffer: BindingResource,
     light_buffer: BindingResource,
-) -> BindGroup {
-    device.create_bind_group(
+    view_light_uniform_offset: &ViewLightsUniformOffset,
+) -> (BindGroup, Vec<u32>) {
+    (device.create_bind_group(
         Some("strand_shading_bind_group"),
         layout,
         &[
@@ -368,7 +371,7 @@ pub fn create_strand_shading_group(
                 resource: BindingResource::TextureView(output_texture),
             },
         ],
-    )
+    ), vec![view_light_uniform_offset.offset])
 }
 
 pub fn create_shading_target_texture(
@@ -462,6 +465,8 @@ fn run_binning_pass(
 
     let max_compute_workgroups_per_dimension =
         render_device.limits().max_compute_workgroups_per_dimension;
+
+    info!("max_compute_workgroups_per_dimension: {:?}", max_compute_workgroups_per_dimension);
     let threads_per_workgroup = NUMBER_OF_THREADS_PER_WORKGROUP;
 
     // --- Clear count buffer (important!) ---
@@ -629,55 +634,43 @@ fn run_shading_pass(
     pipeline_cache: &PipelineCache,
     pipeline: &StrandShadingPipeline,
     render_context: &mut RenderContext,
-    froxel_config: &FroxelConfig,
-    resources: &StrandRasterizerResources,
+    resources: &StrandShadingResources,
     bind_group: &BindGroup,
-    view_light_uniform_offset: &ViewLightsUniformOffset,
+    offsets: &Vec<u32>,
 ) {
-    let Some(render_target) = &resources.output_texture else {
-        warn!("Output texture not found");
+
+    let Some(strand_count) = resources.strand_count else {
+        warn!("Strand count not set.");
         return;
     };
-    let Some(packed_buffer) = &resources.froxel_buffer else {
-        warn!("Froxel buffer not found");
-        return;
-    };
-    let Some(config_buffer) = &resources.froxel_config_buffer else {
-        warn!("Froxel config buffer not found");
+    let Some(shading_pipeline) =
+        pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
+    else {
+        warn!("Shading pipeline not found");
         return;
     };
 
     let encoder = render_context.command_encoder(); // Get CommandEncoder
-
     // --- Shading ---
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("Strand Shading"),
             ..default()
         });
-        let Some(shading_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
-        else {
-            warn!("Shading pipeline not found");
-            return;
-        };
         pass.set_pipeline(shading_pipeline);
-        pass.set_bind_group(0, bind_group, &[0, 0, 0, 0, 0, 0, view_light_uniform_offset.offset]);
+        pass.set_bind_group(0, bind_group, offsets);
         // Set push constants if needed
         let pushconstants = PushConstants {
             num_elements: resources.strand_count.unwrap_or(0),
-            workgroup_offset: 0,
+            workgroup_offset: resources.max_segments_in_strand.unwrap_or(0),
             scan_load_base: 0,
             scan_save_base: 0,
         };
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
         // Dispatch based on number of strands or segments
-        let workgroup_size_x = froxel_config.froxel_size_x;
-        let workgroup_size_y = froxel_config.froxel_size_y;
-        let workgroups_x = froxel_config.screen_width / workgroup_size_x;
-        let workgroups_y = froxel_config.screen_height / workgroup_size_y;
-        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        // TODO: this limits us to e.g. 65535 strands. With most workgroups staying underutilized.
+        pass.dispatch_workgroups(strand_count, 1, 1);
     }
 
     // --- Shading complete ---
@@ -776,7 +769,6 @@ impl Node for StrandRasterizerNode {
         let shading_resources = world.resource::<StrandShadingResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
-        // let standard_view_layout = world.resource::<MeshBindGroups>();
         let light_meta = world.resource::<LightMeta>(); // Get light meta
 
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
@@ -796,15 +788,6 @@ impl Node for StrandRasterizerNode {
             );
             return Ok(());
         };
-
-        // let Some(mesh_view_bind_group) = world.get::<MeshViewBindGroup>(view_entity) else {
-        //     // This node might run on views without this (e.g. shadow maps). Handle appropriately.
-        //     warn!(
-        //         "Node running on view {:?} without MeshViewBindGroup",
-        //         view_entity
-        //     );
-        //     return Ok(());
-        // };
 
         let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
@@ -921,7 +904,7 @@ impl Node for StrandRasterizerNode {
         // Shading pass
 
         if let Some(output_texture) = &shading_resources.output_texture {
-            let shading_bind_group = create_strand_shading_group(
+            let (shading_bind_group, shading_group_offsets) = create_strand_shading_group(
                 render_device,
                 &shading_pipeline.bind_group_layout,
                 vertex_buffer,
@@ -930,6 +913,7 @@ impl Node for StrandRasterizerNode {
                 &output_texture,
                 view_binding,
                 light_binding,
+                view_light_uniform_offset
             );
     
             run_shading_pass(
@@ -937,10 +921,9 @@ impl Node for StrandRasterizerNode {
                 pipeline_cache,
                 shading_pipeline,
                 render_context,
-                &frustrum,
-                raster_resources,
+                shading_resources,
                 &shading_bind_group,
-                view_light_uniform_offset
+                &shading_group_offsets
             );
         }
 
@@ -1280,6 +1263,7 @@ fn use_strand_geometry(
     binning_pipeline: Res<StrandBinningPipeline>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
     mut binning_resources: ResMut<StrandBinningBuffers>,
+    mut shading_resources: ResMut<StrandShadingResources>,
     view_uniforms: Res<ViewUniforms>,
 ) {
     // This is an example of how to retrieve the shader storage buffer created in the main world above
@@ -1332,7 +1316,10 @@ fn use_strand_geometry(
         binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
         raster_resources.strand_count = Some(geometry.strand_count);
 
-        create_shading_target_texture(&device, geometry.strand_count, geometry.max_segments_in_strand);
+        let (shading_buffer, shading_buffer_view) = create_shading_target_texture(&device, geometry.strand_count, geometry.max_segments_in_strand);
+        shading_resources.output_texture = Some(shading_buffer_view);
+        shading_resources.strand_count = Some(geometry.strand_count);
+        shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);
 
         info!("Created bind group for strand rasterizer");
     }
