@@ -132,6 +132,7 @@ pub fn create_strand_bind_group(
     output_texture: &TextureView,
     froxel_config_buffer: &Buffer,
     view_buffer: BindingResource,
+    shading_buffer: &TextureView,
 ) -> BindGroup {
     device.create_bind_group(
         Some("strand_rasterizer_bind_group"),
@@ -173,6 +174,10 @@ pub fn create_strand_bind_group(
                 binding: 8,
                 resource: view_buffer.clone(),
             },
+            BindGroupEntry {
+                binding: 9,
+                resource: BindingResource::TextureView(shading_buffer)
+            }
         ],
     )
 }
@@ -685,6 +690,7 @@ fn run_raster_pass(
     render_context: &mut RenderContext,
     froxel_config: &FroxelConfig,
     resources: &StrandRasterizerResources,
+    shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
 ) {
     let Some(render_target) = &resources.output_texture else {
@@ -723,7 +729,7 @@ fn run_raster_pass(
         // Set push constants if needed
         let pushconstants = PushConstants {
             num_elements: resources.strand_count.unwrap_or(0),
-            workgroup_offset: 0,
+            workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
             scan_load_base: 0,
             scan_save_base: 0,
         };
@@ -887,20 +893,6 @@ impl Node for StrandRasterizerNode {
             strand_count,
         );
 
-        let raster_bind_group = create_strand_bind_group(
-            render_device,
-            &raster_pipeline.bind_group_layout,
-            vertex_buffer,
-            index_buffer,
-            tile_offsets_buffer,
-            tile_counts_buffer,
-            meta_buffer,
-            packed_segments_buffer,
-            raster_resources.output_texture.as_ref().unwrap(),
-            froxel_config_buffer,
-            view_binding.clone(),
-        );
-
         // Shading pass
 
         if let Some(output_texture) = &shading_resources.output_texture {
@@ -911,9 +903,23 @@ impl Node for StrandRasterizerNode {
                 index_buffer,
                 meta_buffer,
                 &output_texture,
-                view_binding,
+                view_binding.clone(),
                 light_binding,
                 view_light_uniform_offset
+            );
+            let raster_bind_group = create_strand_bind_group(
+                render_device,
+                &raster_pipeline.bind_group_layout,
+                vertex_buffer,
+                index_buffer,
+                tile_offsets_buffer,
+                tile_counts_buffer,
+                meta_buffer,
+                packed_segments_buffer,
+                raster_resources.output_texture.as_ref().unwrap(),
+                froxel_config_buffer,
+                view_binding.clone(),
+                output_texture,
             );
     
             run_shading_pass(
@@ -925,23 +931,17 @@ impl Node for StrandRasterizerNode {
                 &shading_bind_group,
                 &shading_group_offsets
             );
+            run_raster_pass(
+                render_device,
+                pipeline_cache,
+                raster_pipeline,
+                render_context,
+                &frustrum,
+                raster_resources,
+                shading_resources,
+                &raster_bind_group,
+            );
         }
-
-        // For now, we'll skip the rasterization pass
-        // In a future implementation, we would:
-        // 1. Wait for the binning pass to complete
-
-        run_raster_pass(
-            render_device,
-            pipeline_cache,
-            raster_pipeline,
-            render_context,
-            &frustrum,
-            raster_resources,
-            &raster_bind_group,
-        );
-
-        // 3. Integrate with the PBR pipeline
 
         Ok(())
     }

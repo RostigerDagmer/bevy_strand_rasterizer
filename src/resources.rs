@@ -130,6 +130,17 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                // Shading Buffer
+                BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::ReadOnly,
+                        format: TextureFormat::Rgba8Unorm,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
             ],
         )
     }

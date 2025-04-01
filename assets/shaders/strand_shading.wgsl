@@ -126,7 +126,7 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    let strand_color = vec4<f32>(0.0, 0.0, 0.5, 0.5);
+    let strand_color = vec4<f32>(0.7, 0.9, 0.5, 0.3);
     let strand_normal = vec3<f32>(0.0, 0.0, 0.0);
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) {
@@ -161,7 +161,7 @@ fn shade_strands(
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;
         let y_coord = out_row;
-        let x_coord = out_col * pc.workgroup_offset + segment_offset;
+        let x_coord = out_col * pc.workgroup_offset + segment_offset; // remember that workgroup_offset is abused for column width in this context
         textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), strand_color);
     }
 }

@@ -36,6 +36,8 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 }
 var<push_constant> pc: PushConstants;
 
+const MAX_TEXTURE_EXT: u32 = 8192u; // TODO: shaderdef
+
 
 @group(0) @binding(0) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
@@ -46,6 +48,7 @@ var<push_constant> pc: PushConstants;
 @group(0) @binding(6) var render_target: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(7) var<uniform> config: FroxelConfig;
 @group(0) @binding(8) var<uniform> view: View;
+@group(0) @binding(9) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
@@ -104,19 +107,12 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
 
 // Define hair properties (can be uniforms later)
 const HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
-const HAIR_COLOR : vec3<f32> = vec3<f32>(0.8, 0.7, 0.6); // Example: Hair color
+// const HAIR_COLOR : vec3<f32> = vec3<f32>(0.8, 0.7, 0.6); // Example: Hair color
 const HAIR_ALPHA : f32 = 0.2; // Example: Alpha per covered fragment (lower for softer look)
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
-fn point_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-    let l2 = distance(a, b);
-    if (l2 == 0.0) { return distance(p, a); } // Segment is a point
-    let l2_sq = l2 * l2;
-
-    // Project p onto the line defined by a, b. t is the projection parameter.
-    let t = dot(p - a, b - a) / l2_sq;
-
+fn point_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, t: f32) -> f32 {
     // Clamp t to [0, 1] to stay within the segment
     let t_clamped = clamp(t, 0.0, 1.0);
 
@@ -124,6 +120,17 @@ fn point_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     let closest_point = a + t_clamped * (b - a);
 
     return distance(p, closest_point);
+}
+
+fn fragment_position_line_relative(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let l2 = distance(a, b);
+    if (l2 == 0.0) { return 0.0; } // Segment is a point
+    let l2_sq = l2 * l2;
+
+    // Project p onto the line defined by a, b. t is the projection parameter.
+    let t = dot(p - a, b - a) / l2_sq;
+
+    return t;
 }
 
 // Helper: Basic alpha blending (foreground "over" background)
@@ -215,15 +222,26 @@ fn rasterize_strands(
             if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
 
             // Calculate analytical coverage
-            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy);
+            let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
+            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
 
             // Simple linear falloff based on distance
             let coverage = clamp(1.0 - dist / HAIR_RADIUS_PIXELS, 0.0, 1.0);
 
             if (coverage > 0.0) {
                 // Calculate color/alpha contribution of this hair segment fragment
-                let hair_fragment_alpha = HAIR_ALPHA * coverage;
-                let hair_fragment = vec4<f32>(HAIR_COLOR, hair_fragment_alpha);
+                // sample the shading buffer (maybe a sampler here, maybe not if we'll use spline interpolation in the rasterizer directly)
+                let out_row = strand_idx % MAX_TEXTURE_EXT;
+                let out_col = strand_idx / MAX_TEXTURE_EXT;
+                let y_coord = out_row;
+                let x0_coord = out_col * pc.workgroup_offset + (v0_idx - strand_meta.offset);
+                let x1_coord = out_col * pc.workgroup_offset + (v1_idx - strand_meta.offset);
+
+                let shading0 = textureLoad(shading_buffer, vec2<u32>(x0_coord, y_coord));
+                let shading1 = textureLoad(shading_buffer, vec2<u32>(x1_coord, y_coord));
+
+                let hair_color = mix(shading0, shading1, clamp(t, 0.0, 1.0));
+                let hair_fragment = vec4<f32>(hair_color.xyz, hair_color.w * coverage);
 
                 // Blend this fragment OVER the current accumulated color
                 final_color = blend_over(hair_fragment, final_color);
