@@ -2,16 +2,29 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
+            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
+            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniform,
     },
 };
 
-use crate::{components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
+use crate::{
+    components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT,
+    shader_types::PushConstants,
+};
 
 use super::shading::StrandShadingResources;
+
+
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -192,7 +205,6 @@ impl FromWorld for StrandRasterizerPipeline {
     }
 }
 
-
 // Create the bind group for the strand rasterizer
 pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
@@ -278,7 +290,6 @@ pub fn create_render_target_texture(
     let view = texture.create_view(&TextureViewDescriptor::default());
     (texture, view)
 }
-
 
 pub fn run_raster_pass(
     render_context: &mut RenderContext,

@@ -1,4 +1,4 @@
-use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{LightMeta, ViewLightsUniformOffset}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
+use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{LightMeta, ViewLightsUniformOffset}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
 
 use crate::{components::*, dson::DsonAsset, pipelines::{binning::*, composite::*, raster::*, shading::*}, resources::*, shader_types::*};
 
@@ -77,24 +77,6 @@ impl Plugin for StrandRasterizerPlugin {
             );
     }
 }
-
-// Create froxel configuration uniform buffer
-pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
-    let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("strand_froxel_config_buffer"),
-        size: std::mem::size_of::<FroxelConfig>() as u64,
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        mapped_at_creation: true,
-    });
-
-    // Initialize with configuration
-    let mut mapped = buffer.slice(..).get_mapped_range_mut();
-    mapped.copy_from_slice(bytemuck::bytes_of(config));
-    drop(mapped);
-    buffer.unmap();
-    buffer
-}
-
 
 #[derive(Debug, Clone, Default)]
 pub struct StrandRasterizerNode;
@@ -227,24 +209,24 @@ impl Node for StrandRasterizerNode {
             return Ok(());
         };
 
-        let strand_binning_bind_groups = &create_strand_binning_bind_group(
+        let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
             render_device,
             binning_pipeline,
-            vertex_buffer,
-            index_buffer,
-            meta_buffer,
             view_binding.clone(),
             raster_resources,
             binning_buffers,
-        );
+        ) else {
+            warn!("Failed to create strand binning bind group.");
+            return Ok(());
+        };
 
         run_binning_pass(
             render_device,
+            render_context,
             pipeline_cache,
             strand_binning_bind_groups,
             binning_buffers,
             binning_pipeline,
-            render_context,
             &frustrum,
             strand_count,
         );
@@ -417,11 +399,27 @@ fn set_strand_geometry(
     }
 }
 
+// Create froxel configuration uniform buffer
+pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("strand_froxel_config_buffer"),
+        size: std::mem::size_of::<FroxelConfig>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+
+    // Initialize with configuration
+    let mut mapped = buffer.slice(..).get_mapped_range_mut();
+    mapped.copy_from_slice(bytemuck::bytes_of(config));
+    drop(mapped);
+    buffer.unmap();
+    buffer
+}
+
 // render world buffe retrieval
 fn use_froxel_buffer(
     query: Query<(Entity, &FroxelConfig), Added<FroxelConfig>>,
     device: Res<RenderDevice>,
-    pipeline: Res<StrandBinningPipeline>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
     mut binning_resources: ResMut<StrandBinningBuffers>,
 ) {
@@ -456,12 +454,9 @@ fn use_strand_geometry(
     query: Query<(Entity, &StrandGeometry)>,
     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
     device: Res<RenderDevice>,
-    raster_pipeline: Res<StrandRasterizerPipeline>,
-    binning_pipeline: Res<StrandBinningPipeline>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
     mut binning_resources: ResMut<StrandBinningBuffers>,
     mut shading_resources: ResMut<StrandShadingResources>,
-    view_uniforms: Res<ViewUniforms>,
 ) {
     // This is an example of how to retrieve the shader storage buffer created in the main world above
     // and use it in the render world.

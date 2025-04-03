@@ -364,13 +364,14 @@ pub fn prepare_binning_buffers(
 pub fn create_strand_binning_bind_group(
     device: &RenderDevice,
     pipeline: &StrandBinningPipeline,
-    strand_points_buffer: &Buffer,
-    index_buffer: &Buffer,
-    strand_metadata_buffer: &Buffer,
     view_uniforms: BindingResource,
     raster_resources: &StrandRasterizerResources,
     binning_resources: &StrandBinningBuffers,
-) -> StrandBinningBindGroup {
+) -> Result<StrandBinningBindGroup, ()> {
+
+    let strand_points_buffer = binning_resources.vertex_buffer.as_ref().ok_or(())?;
+    let index_buffer = binning_resources.index_buffer.as_ref().ok_or(())?;
+    let strand_metadata_buffer = binning_resources.meta_buffer.as_ref().ok_or(())?;
     // Count Bind Group
     let count_bind_group = device.create_bind_group(
         Some("strand_count_bind_group"),
@@ -523,22 +524,22 @@ pub fn create_strand_binning_bind_group(
             }
         ],
     );
-    return StrandBinningBindGroup {
+    return Ok(StrandBinningBindGroup {
         count_bind_group,
         scan_bind_group,
         init_placement_idx_bind_group,
         place_bind_group,
-    };
+    });
 }
 
 
 pub fn run_binning_pass(
     render_device: &RenderDevice,
+    render_context: &mut RenderContext,
     pipeline_cache: &PipelineCache,
     bind_groups: &StrandBinningBindGroup,
     buffers: &StrandBinningBuffers,
     pipelines: &StrandBinningPipeline,
-    render_context: &mut RenderContext,
     froxel_config: &FroxelConfig,
     num_strands_or_segments: u32,
 ) {
