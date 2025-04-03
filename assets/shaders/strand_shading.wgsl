@@ -8,6 +8,10 @@
 
 const LEG_ROOTS_5 = array<f32, 5>(-0.906179845938664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906179845938664);
 const LEG_WEIGHTS_5 = array<f32, 5>(0.23692688505618897, 0.4786286704993665, 0.568888888888889, 0.4786286704993665, 0.23692688505618897);
+const LEG_ROOTS_10 = array<f32, 10>(-0.9739065285171717, -0.8650633666889844, -0.6794095682990244, -0.4333953941292472, -0.14887433898163116, 0.14887433898163116, 0.4333953941292472, 0.6794095682990244, 0.8650633666889844, 0.9739065285171717);
+const LEG_WEIGHTS_10 = array<f32, 10>(0.06667134430868714, 0.14945134915058053, 0.21908636251598224, 0.26926671930999674, 0.2955242247147533, 0.2955242247147533, 0.26926671930999674, 0.21908636251598224, 0.14945134915058053, 0.06667134430868714);
+const LEG_ROOTS_15 = array<f32, 15>(-0.9879925180204854, -0.937273392400706, -0.8482065834104272, -0.7244177313601701, -0.5709721726085388, -0.3941513470775634, -0.20119409399743454, 0.0, 0.20119409399743454, 0.3941513470775634, 0.5709721726085388, 0.7244177313601701, 0.8482065834104272, 0.937273392400706, 0.9879925180204854);
+const LEG_WEIGHTS_15 = array<f32, 15>(0.030753241996118154, 0.07036604748810715, 0.10715922046717176, 0.13957067792615432, 0.16626920581699411, 0.18616100001556224, 0.19843148532711163, 0.20257824192556137, 0.19843148532711163, 0.18616100001556224, 0.16626920581699411, 0.13957067792615432, 0.10715922046717176, 0.07036604748810715, 0.030753241996118154);
 
 // --- Structures ---
 
@@ -159,10 +163,10 @@ const BETA_P = 0.3;
 const BETA_P_SQR = BETA_P * BETA_P;
 
 
-const PATH_COUNT = 3u;
-const QUAD_COUNT = 5u;
-const LEG_ROOTS = LEG_ROOTS_5;
-const LEG_WEIGHTS = LEG_WEIGHTS_5;
+const PATH_COUNT = 4u;
+const QUAD_COUNT = 10u;
+const LEG_ROOTS = LEG_ROOTS_10;
+const LEG_WEIGHTS = LEG_WEIGHTS_10;
 
 // notes:   mu_a :  absorption
 //          h :     incident shift
@@ -217,7 +221,7 @@ fn A(p: u32, h_: f32, eta: f32, eta_prime: f32, mu_a_prime: vec3<f32>, theta_d: 
 
     let T = exp(absorption_term_exponent);
     if p == 0 {
-        return f * T; //vec3<f32>(1.0, 1.0, 1.0); // (1.0 - mu_a_prime);
+        return f * T * T; //vec3<f32>(1.0, 1.0, 1.0); // (1.0 - mu_a_prime);
     } else {
         let f_ = (1.0 - f);
         let fp = pow(f, f32(p - 1));
@@ -381,9 +385,10 @@ fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val:
     // for more information on this see: model_building.ipynb
     let beta_azim_val = sqrt(v_azim_val);
     var total_reflectance = Mp(v_long_val, theta_i, theta_r, alpha_p_val) * specular_a_rgb_val.xyz * specular_a_rgb_val.w;
+    // var total_reflectance = vec3<f32>(0.0, 0.0, 0.0);
     for (var p = 0u; p < PATH_COUNT; p = p + 1) {
         let Np_val = Np(p, phi_i, theta_i, theta_r, eta_val, mu_a_rgb_val, v_azim_val, beta_azim_val);
-        total_reflectance = total_reflectance + Np_val / f32(PATH_COUNT);
+        total_reflectance = total_reflectance + Np_val;
     }
     return total_reflectance;
 }
@@ -404,9 +409,9 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     let sigma_a = 1.0 - hair_color.xyz; // Artist adjustable absorption coefficient
     // let sigma_a = SIGMA_AE * 0.5 + SIGMA_AP * 0.5; // TODO: use hair color to mix between eumelanin and pheomelanin
     let eta = 1.55; // Refractive index of hair
-    let beta = 0.35; // Roughness of hair
-    let alpha = 0.24; // Roughness of hair
-    let shift = 0.1; // specular shift
+    let beta = 0.4; // Roughness of hair
+    let alpha = 0.25; // Roughness of hair
+    let shift = 0.02; // specular shift
 
     let v_long_val = alpha * alpha;
     let v_azim_val = beta * beta;
@@ -448,9 +453,9 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.7);
+    var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 1.0);
     // var strand_absorption_color = vec4<f32>(0.6, 0.1, 0.05, 0.5);
-    var strand_specular_color = vec4<f32>(0.93, 0.38, 0.175, 0.99);
+    var strand_specular_color = vec4<f32>(0.93, 0.48, 0.375, 2.0);
 
     let ambient_factor = 0.05;
     let ao_factor = 0.3;
@@ -493,7 +498,7 @@ fn shade_strands(
             let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color, ao_intensity);
             // let bcsdf = marschnerShading(vertex.xyz, L, V, U, strand_absorption_color.xyz, strand_specular_color);
 
-            var c = bcsdf;// * light.color.xyz; //* (1.0 - ao_intensity) * vec3<f32>(1.0, 1.0, 1.0); // * (light.color.xyz / 2000.0); // * ao_intensity;
+            var c = bcsdf;// * light.color.xyz * 0.0001; //* (1.0 - ao_intensity) * vec3<f32>(1.0, 1.0, 1.0); // * (light.color.xyz / 2000.0); // * ao_intensity;
             c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
 
             // diffuse * light.lightColor * light.lightIntensity * NdotL + ambient;

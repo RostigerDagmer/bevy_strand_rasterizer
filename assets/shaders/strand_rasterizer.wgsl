@@ -33,8 +33,8 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 var<push_constant> pc: PushConstants;
 
 const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
-const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
+const MIN_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
 
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
@@ -240,9 +240,6 @@ fn rasterize_strands(
                 // Order independent transparency
                 froxel_color += hair_fragment;
             }
-            if (froxel_color.a > 0.99) {
-                break; // Stop segment loop
-            }
         } // End loop over segments in froxel
 
         // Order dependent transparency (we go front to back)
@@ -250,7 +247,7 @@ fn rasterize_strands(
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        if (final_color.a > 0.99) {
+        if (final_color.a > 0.9999) {
             break; // Stop Z loop
         }
 
