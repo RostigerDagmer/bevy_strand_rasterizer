@@ -36,6 +36,8 @@ struct StrandGeo {
 struct StrandMeta { // Ensure this matches Rust exactly
     count: u32,     // Number of vertices in strand
     offset: u32,    // Start index in the original indices buffer (or vertices buffer?)
+    pad1: u32,
+    pad2: u32,
 }
 
 struct PushConstants { // Ensure this matches Rust and range covers all fields

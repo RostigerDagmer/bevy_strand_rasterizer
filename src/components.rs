@@ -30,7 +30,7 @@ impl Default for FroxelConfig {
             screen_height: 1080,
             froxel_size_x: 8,
             froxel_size_y: 8,
-            depth_slices: 16,
+            depth_slices: 64,
         }
     }
 }

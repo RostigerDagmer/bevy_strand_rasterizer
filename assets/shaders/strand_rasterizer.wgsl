@@ -19,6 +19,8 @@ struct SegmentRef { // Ensure this matches Rust if defined there
 struct StrandMeta { // Ensure this matches Rust exactly
     count: u32,     // Number of vertices in strand
     offset: u32,    // Start index in the original indices buffer (or vertices buffer?)
+    pad1: u32,      // Padding for alignment
+    pad2: u32,      // Padding for alignment
 }
 
 struct PushConstants { // Ensure this matches Rust and range covers all fields
@@ -31,8 +33,8 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
 var<push_constant> pc: PushConstants;
 
 const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
-const MIN_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
+const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
 
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
@@ -226,8 +228,8 @@ fn rasterize_strands(
                 let out_row = strand_idx % MAX_TEXTURE_EXT;
                 let out_col = strand_idx / MAX_TEXTURE_EXT;
                 let y_coord = out_row;
-                let x0_coord = out_col * pc.workgroup_offset + (v0_idx - strand_meta.offset);
-                let x1_coord = out_col * pc.workgroup_offset + (v1_idx - strand_meta.offset);
+                let x0_coord = out_col * (pc.workgroup_offset + 1) + (v0_idx - strand_meta.offset);
+                let x1_coord = out_col * (pc.workgroup_offset + 1) + (v1_idx - strand_meta.offset);
 
                 let shading0 = textureLoad(shading_buffer, vec2<u32>(x0_coord, y_coord));
                 let shading1 = textureLoad(shading_buffer, vec2<u32>(x1_coord, y_coord));
@@ -236,7 +238,7 @@ fn rasterize_strands(
                 let hair_fragment = vec4<f32>(hair_color.xyz, hair_color.w * coverage);
 
                 // Order independent transparency
-                froxel_color = mix(hair_fragment, froxel_color, hair_fragment.a);
+                froxel_color += hair_fragment;
             }
             if (froxel_color.a > 0.99) {
                 break; // Stop segment loop
@@ -244,7 +246,7 @@ fn rasterize_strands(
         } // End loop over segments in froxel
 
         // Order dependent transparency (we go front to back)
-        final_color = blend_over(froxel_color, final_color);
+        final_color = blend_over(final_color, froxel_color);
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
