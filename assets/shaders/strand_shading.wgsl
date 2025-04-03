@@ -163,7 +163,7 @@ const BETA_P = 0.3;
 const BETA_P_SQR = BETA_P * BETA_P;
 
 
-const PATH_COUNT = 4u;
+const PATH_COUNT = 3u;
 const QUAD_COUNT = 10u;
 const LEG_ROOTS = LEG_ROOTS_10;
 const LEG_WEIGHTS = LEG_WEIGHTS_10;
@@ -330,7 +330,7 @@ fn Mp(v_long_val: f32, theta_i_: f32, theta_r: f32, alpha_p_shift: f32) -> f32 {
     // }
     let csch_val = csch(1.0 / v_long_val);
 
-    let bessel_val = bessel_first_approx(bessel_arg, 8u);
+    let bessel_val = bessel_first_approx(bessel_arg, 5u);
     // let m_val = (csch_val / (2.0 * v_long_val)) * bessel_val * exp(exp_arg);
     // return m_val;
 

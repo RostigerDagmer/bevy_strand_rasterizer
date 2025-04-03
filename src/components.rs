@@ -1,6 +1,12 @@
 use bevy::{math::bounding::Aabb3d, prelude::*, render::{extract_component::ExtractComponent, storage::ShaderStorageBuffer}};
 use bytemuck::{Pod, Zeroable};
 
+use crate::dson::DsonAsset;
+
+#[derive(Component)]
+pub struct StrandAsset {
+    pub handle: Handle<DsonAsset>,
+}
 
 #[derive(Component, ExtractComponent, Debug, Clone)]
 pub struct StrandGeometry {
