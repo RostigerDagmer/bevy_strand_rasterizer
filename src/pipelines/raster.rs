@@ -22,9 +22,7 @@ use crate::{
     shader_types::PushConstants,
 };
 
-use super::shading::StrandShadingResources;
-
-
+use super::{binning::StrandBinningBuffers, shading::StrandShadingResources};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -208,19 +206,24 @@ impl FromWorld for StrandRasterizerPipeline {
 // Create the bind group for the strand rasterizer
 pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
-    layout: &BindGroupLayout,
-    vertex_buffer: &Buffer,
-    index_buffer: &Buffer,
-    tile_offsets_buffer: &Buffer,
-    tile_counts_buffer: &Buffer,
-    meta_buffer: &Buffer,
-    packed_segments: &Buffer,
-    output_texture: &TextureView,
-    froxel_config_buffer: &Buffer,
+    pipeline: &StrandRasterizerPipeline,
+    resources: &StrandRasterizerResources,
+    buffers: &StrandBinningBuffers,
+    shading_resources: &StrandShadingResources,
     view_buffer: BindingResource,
-    shading_buffer: &TextureView,
-) -> BindGroup {
-    device.create_bind_group(
+) -> Result<BindGroup, ()> {
+    let layout = &pipeline.bind_group_layout;
+    let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
+    let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
+    let tile_offsets_buffer = buffers.tile_offsets_buffer.as_ref().ok_or(())?;
+    let tile_counts_buffer = buffers.tile_counts_buffer.as_ref().ok_or(())?;
+    let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    let packed_segments = resources.froxel_buffer.as_ref().ok_or(())?;
+    let output_texture = resources.output_texture.as_ref().ok_or(())?;
+    let froxel_config_buffer = resources.froxel_config_buffer.as_ref().ok_or(())?;
+    let shading_buffer = shading_resources.output_texture.as_ref().ok_or(())?;
+
+    Ok(device.create_bind_group(
         Some("strand_rasterizer_bind_group"),
         layout,
         &[
@@ -265,7 +268,7 @@ pub fn create_strand_raster_bind_group(
                 resource: BindingResource::TextureView(shading_buffer),
             },
         ],
-    )
+    ))
 }
 
 // Create output texture for the rasterizer

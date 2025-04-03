@@ -107,7 +107,7 @@ impl Node for StrandRasterizerNode {
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
-
+        
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
@@ -147,56 +147,6 @@ impl Node for StrandRasterizerNode {
             offset: view_uniform_offset.offset as u64,
             size: Some(ViewUniform::min_size()),
         });
-        // pass.set_bind_group(I, &mesh_view_bind_group.value, &offsets); // Reference
-
-        let Some(vertex_buffer) = binning_buffers.vertex_buffer.as_ref() else {
-            warn!("Vertex buffer handle not found in resources.");
-            return Ok(());
-        };
-        let Some(index_buffer) = binning_buffers.index_buffer.as_ref() else {
-            warn!("Index buffer handle not found in resources.");
-            return Ok(());
-        };
-        let Some(meta_buffer) = binning_buffers.meta_buffer.as_ref() else {
-            warn!("Meta buffer handle not found in resources.");
-            return Ok(());
-        };
-
-        let Some(geos_buffer) = binning_buffers.geos_buffer.as_ref() else {
-            warn!("Geos buffer handle not found in resources.");
-            return Ok(());
-        };
-
-        let Some(tile_counts_buffer) = binning_buffers.tile_counts_buffer.as_ref() else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(tile_offsets_buffer) = binning_buffers.tile_offsets_buffer.as_ref() else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(current_tile_write_indices_buffer) =
-            binning_buffers.current_tile_write_indices_buffer.as_ref()
-        else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(packed_segments_buffer) = binning_buffers.packed_segments_buffer.as_ref() else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(froxel_config_buffer) = raster_resources.froxel_config_buffer.as_ref() else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(frustrum) = raster_resources.frustrum_config else {
-            /* ... */
-            return Ok(());
-        };
-        let Some(strand_count) = raster_resources.strand_count else {
-            /* ... */
-            return Ok(());
-        };
 
         // Get the dimensions to calculate dispatch size
         let Some(frustrum) = raster_resources.frustrum_config else {
@@ -204,11 +154,13 @@ impl Node for StrandRasterizerNode {
             return Ok(());
         };
 
+        // Get the strand count for dispatch dimensions
         let Some(strand_count) = raster_resources.strand_count else {
             warn!("No strand count set.");
             return Ok(());
         };
 
+        // Binning bind group
         let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
             render_device,
             binning_pipeline,
@@ -217,6 +169,33 @@ impl Node for StrandRasterizerNode {
             binning_buffers,
         ) else {
             warn!("Failed to create strand binning bind group.");
+            return Ok(());
+        };
+
+        // Shading bind group
+        let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
+            render_device,
+            &shading_pipeline,
+            &shading_resources,
+            &binning_buffers,
+            view_binding.clone(),
+            light_binding,
+            view_light_uniform_offset,
+        ) else {
+            warn!("Failed to create strand shading bind group.");
+            return Ok(());
+        };
+
+        // Raster bind group
+        let Ok(raster_bind_group) = create_strand_raster_bind_group(
+            render_device,
+            &raster_pipeline,
+            &raster_resources,
+            &binning_buffers,
+            &shading_resources,
+            view_binding.clone(),
+        ) else {
+            warn!("Failed to create strand raster bind group.");
             return Ok(());
         };
 
@@ -231,53 +210,24 @@ impl Node for StrandRasterizerNode {
             strand_count,
         );
 
-        // Shading pass
-        if let Some(output_texture) = &shading_resources.output_texture {
-            let (shading_bind_group, shading_group_offsets) = create_strand_shading_bind_group(
-                render_device,
-                &shading_pipeline.bind_group_layout,
-                vertex_buffer,
-                index_buffer,
-                meta_buffer,
-                &output_texture,
-                view_binding.clone(),
-                light_binding,
-                view_light_uniform_offset,
-            );
-            let raster_bind_group = create_strand_raster_bind_group(
-                render_device,
-                &raster_pipeline.bind_group_layout,
-                vertex_buffer,
-                index_buffer,
-                tile_offsets_buffer,
-                tile_counts_buffer,
-                meta_buffer,
-                packed_segments_buffer,
-                raster_resources.output_texture.as_ref().unwrap(),
-                froxel_config_buffer,
-                view_binding.clone(),
-                output_texture,
-            );
-
-            run_shading_pass(
-                render_context,
-                pipeline_cache,
-                shading_pipeline,
-                shading_resources,
-                &shading_bind_group,
-                &shading_group_offsets,
-            );
-            // Raster pass
-            run_raster_pass(
-                render_context,
-                pipeline_cache,
-                raster_pipeline,
-                &frustrum,
-                raster_resources,
-                shading_resources,
-                &raster_bind_group,
-            );
-        }
+        run_shading_pass(
+            render_context,
+            pipeline_cache,
+            shading_pipeline,
+            shading_resources,
+            &shading_bind_group,
+            &shading_group_offsets,
+        );
+    
+        run_raster_pass(
+            render_context,
+            pipeline_cache,
+            raster_pipeline,
+            &frustrum,
+            raster_resources,
+            shading_resources,
+            &raster_bind_group,
+        );
 
         Ok(())
     }

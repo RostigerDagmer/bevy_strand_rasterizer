@@ -10,6 +10,8 @@ use bevy::{
 
 use crate::{pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
 
+use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources};
+
 const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
 
 #[derive(Resource, Default)]
@@ -147,16 +149,20 @@ impl FromWorld for StrandShadingPipeline {
 
 pub fn create_strand_shading_bind_group(
     device: &RenderDevice,
-    layout: &BindGroupLayout,
-    vertex_buffer: &Buffer,
-    index_buffer: &Buffer,
-    meta_buffer: &Buffer,
-    output_texture: &TextureView,
+    pipeline: &StrandShadingPipeline,
+    shading_resources: &StrandShadingResources,
+    buffers: &StrandBinningBuffers,
     view_buffer: BindingResource,
     light_buffer: BindingResource,
     view_light_uniform_offset: &ViewLightsUniformOffset,
-) -> (BindGroup, Vec<u32>) {
-    (
+) -> Result<(BindGroup, Vec<u32>), ()> {
+
+    let layout = &pipeline.bind_group_layout;
+    let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
+    let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
+    let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
+    Ok((
         device.create_bind_group(
             Some("strand_shading_bind_group"),
             layout,
@@ -188,7 +194,7 @@ pub fn create_strand_shading_bind_group(
             ],
         ),
         vec![view_light_uniform_offset.offset],
-    )
+    ))
 }
 
 pub fn create_shading_target_texture(
