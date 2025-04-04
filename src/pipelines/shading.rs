@@ -1,5 +1,5 @@
 use bevy::{
-    pbr::ViewLightsUniformOffset, prelude::*, render::{
+    pbr::{ShadowSamplers, ViewLightsUniformOffset, ViewShadowBindings}, prelude::*, render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
         },
@@ -90,6 +90,53 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
+                // Cluster Indices
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::CLUSTER_INDICES,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Cluster Offsets and Counts
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::CLUSTER_OFFSETS_AND_COUNTS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Clusterable Objects
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::CLUSTERABLE_OBJECTS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Point Light Depth Texture
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::POINT_LIGHT_DEPTH_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // Directional Light Depth Texture
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    count: None,
+                },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
@@ -156,6 +203,10 @@ pub fn create_strand_shading_bind_group(
     light_buffer: BindingResource,
     view_uniform_offset: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
+    cluster_indices: BindingResource,
+    cluster_offsets_and_counts: BindingResource,
+    clusterable_objects: BindingResource,
+    shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
 
     let layout = &pipeline.bind_group_layout;
@@ -188,6 +239,28 @@ pub fn create_strand_shading_bind_group(
                     binding: layouts::shading::LIGHT_UNIFORM,
                     resource: light_buffer.clone(),
                 },
+                BindGroupEntry {
+                    binding: layouts::shading::CLUSTER_INDICES,
+                    resource: cluster_indices.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::CLUSTER_OFFSETS_AND_COUNTS,
+                    resource: cluster_offsets_and_counts.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::CLUSTERABLE_OBJECTS,
+                    resource: clusterable_objects.clone(),
+                },
+                // Bind the shadow map texture
+                BindGroupEntry {
+                    binding: layouts::shading::POINT_LIGHT_DEPTH_TEXTURE,
+                    resource: BindingResource::Sampler(&shadows.point_light_comparison_sampler),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    resource: BindingResource::Sampler(&shadows.directional_light_comparison_sampler),
+                },
+                // Bind the output texture
                 BindGroupEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
