@@ -4,7 +4,7 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
         },
         renderer::{RenderContext, RenderDevice},
-        view::ViewUniform,
+        view::{ViewUniform, ViewUniformOffset},
     }
 };
 
@@ -74,7 +74,7 @@ impl StrandShadingPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: Some(ViewUniform::min_size()),
                     },
                     count: None,
@@ -154,6 +154,7 @@ pub fn create_strand_shading_bind_group(
     buffers: &StrandBinningBuffers,
     view_buffer: BindingResource,
     light_buffer: BindingResource,
+    view_uniform_offset: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
 
@@ -193,7 +194,7 @@ pub fn create_strand_shading_bind_group(
                 },
             ],
         ),
-        vec![view_light_uniform_offset.offset],
+        vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
     ))
 }
 
@@ -229,7 +230,7 @@ pub fn run_shading_pass(
     pipeline: &StrandShadingPipeline,
     resources: &StrandShadingResources,
     bind_group: &BindGroup,
-    offsets: &Vec<u32>,
+    offsets: &[u32],
 ) {
     let Some(strand_count) = resources.strand_count else {
         warn!("Strand count not set.");

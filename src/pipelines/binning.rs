@@ -2,10 +2,17 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, TextureFormat, TextureSampleType, TextureView, TextureViewDimension
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferSize,
+            BufferUsages, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState,
+            ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            TextureFormat, TextureSampleType, TextureView, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
-        view::ViewUniform,
+        view::{ViewUniform, ViewUniformOffset},
     },
 };
 use bevy_radix_sort::dispatch_workgroup_ext;
@@ -31,6 +38,7 @@ pub struct StrandBinningBindGroup {
     pub scan_bind_group: BindGroup, // Binds tile_counts, tile_offsets, tnumber_seg (last elem of offsets)
     pub init_placement_idx_bind_group: BindGroup, // Binds tile_offsets, current_tile_write_indices
     pub place_bind_group: BindGroup, // Binds geometry, tile_offsets, current_tile_write_indices, packed_segments
+    pub offsets: Vec<u32>,           // Uniform dynamic offsets
 }
 
 #[derive(Resource, Default)]
@@ -43,7 +51,7 @@ pub struct StrandBinningBuffers {
     // Add handles/references needed from StrandGeometry
     pub vertex_buffer: Option<Buffer>,
     pub index_buffer: Option<Buffer>,
-    pub meta_buffer: Option<Buffer>, 
+    pub meta_buffer: Option<Buffer>,
     pub geos_buffer: Option<Buffer>,
 }
 
@@ -120,7 +128,7 @@ impl FromWorld for StrandBinningPipeline {
                 ), // config
                 Self::uniform_buffer_entry(
                     layouts::binning::VIEW_UNIFORM,
-                    false,
+                    true,
                     Some(ViewUniform::min_size()),
                 ), // view
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
@@ -169,7 +177,7 @@ impl FromWorld for StrandBinningPipeline {
                 ), // config
                 Self::uniform_buffer_entry(
                     layouts::binning::VIEW_UNIFORM,
-                    false,
+                    true,
                     Some(ViewUniform::min_size()),
                 ), // view
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
@@ -184,20 +192,24 @@ impl FromWorld for StrandBinningPipeline {
         let subgroup_size: (u32, u32) = (32, 32); // Defaults because SubgroupSize plugin doesn't work at this stage of app-build.
 
         // Shader defs for scan stages (match reference)
-        let cdefs = [vec![
-            ShaderDefVal::UInt(
-                "NUMBER_OF_THREADS_PER_WORKGROUP".into(),
-                NUMBER_OF_THREADS_PER_WORKGROUP,
-            ),
-            ShaderDefVal::UInt(
-                "NUMBER_OF_THREADS_PER_SUBGROUP".into(),
-                subgroup_size.0, // Use detected subgroup size
-            ),
-            ShaderDefVal::UInt(
-                "NUMBER_OF_ROWS_PER_WORKGROUP".into(), // This might not be relevant if scan logic is adapted
-                NUMBER_OF_ROWS_PER_WORKGROUP,
-            ),
-        ] , layouts::binning::shader_defs()].concat();
+        let cdefs = [
+            vec![
+                ShaderDefVal::UInt(
+                    "NUMBER_OF_THREADS_PER_WORKGROUP".into(),
+                    NUMBER_OF_THREADS_PER_WORKGROUP,
+                ),
+                ShaderDefVal::UInt(
+                    "NUMBER_OF_THREADS_PER_SUBGROUP".into(),
+                    subgroup_size.0, // Use detected subgroup size
+                ),
+                ShaderDefVal::UInt(
+                    "NUMBER_OF_ROWS_PER_WORKGROUP".into(), // This might not be relevant if scan logic is adapted
+                    NUMBER_OF_ROWS_PER_WORKGROUP,
+                ),
+            ],
+            layouts::binning::shader_defs(),
+        ]
+        .concat();
 
         // Push constant range covering the potentially larger struct
         let push_constant_range = PushConstantRange {
@@ -365,10 +377,10 @@ pub fn create_strand_binning_bind_group(
     device: &RenderDevice,
     pipeline: &StrandBinningPipeline,
     view_uniforms: BindingResource,
+    view_uniform_offset: &ViewUniformOffset,
     raster_resources: &StrandRasterizerResources,
     binning_resources: &StrandBinningBuffers,
 ) -> Result<StrandBinningBindGroup, ()> {
-
     let strand_points_buffer = binning_resources.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = binning_resources.index_buffer.as_ref().ok_or(())?;
     let strand_metadata_buffer = binning_resources.meta_buffer.as_ref().ok_or(())?;
@@ -521,7 +533,7 @@ pub fn create_strand_binning_bind_group(
                     .as_ref()
                     .unwrap()
                     .as_entire_binding(),
-            }
+            },
         ],
     );
     return Ok(StrandBinningBindGroup {
@@ -529,9 +541,9 @@ pub fn create_strand_binning_bind_group(
         scan_bind_group,
         init_placement_idx_bind_group,
         place_bind_group,
+        offsets: vec![view_uniform_offset.offset],
     });
 }
-
 
 pub fn run_binning_pass(
     render_device: &RenderDevice,
@@ -579,7 +591,7 @@ pub fn run_binning_pass(
             return;
         };
         pass.set_pipeline(count_pipeline);
-        pass.set_bind_group(0, &bind_groups.count_bind_group, &[]);
+        pass.set_bind_group(0, &bind_groups.count_bind_group, &bind_groups.offsets);
         // Set push constants if needed (e.g., num_strands_or_segments)
         // pass.set_push_constants(...);
 
@@ -709,7 +721,7 @@ pub fn run_binning_pass(
             return;
         };
         pass.set_pipeline(place_pipeline);
-        pass.set_bind_group(0, &bind_groups.place_bind_group, &[]);
+        pass.set_bind_group(0, &bind_groups.place_bind_group, &bind_groups.offsets);
         // Set push constants if needed
         // pass.set_push_constants(...);
 

@@ -1,4 +1,4 @@
-use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{LightMeta, ViewLightsUniformOffset}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
+use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{LightMeta, ViewLightsUniformOffset}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
 
 use crate::{components::*, dson::DsonAsset, pipelines::{binning::*, composite::*, raster::*, shading::*}, resources::*, shader_types::*};
 
@@ -107,7 +107,7 @@ impl Node for StrandRasterizerNode {
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
-        
+
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
@@ -137,16 +137,10 @@ impl Node for StrandRasterizerNode {
         };
 
         // --- Check Prerequisites ---
-        let Some(view_binding) = view_uniforms.uniforms.buffer() else {
+        let Some(view_binding) = view_uniforms.uniforms.binding() else {
             warn!("ViewUniforms binding not available.");
             return Ok(());
         };
-
-        let view_binding = BindingResource::Buffer(BufferBinding {
-            buffer: view_binding,
-            offset: view_uniform_offset.offset as u64,
-            size: Some(ViewUniform::min_size()),
-        });
 
         // Get the dimensions to calculate dispatch size
         let Some(frustrum) = raster_resources.frustrum_config else {
@@ -165,6 +159,7 @@ impl Node for StrandRasterizerNode {
             render_device,
             binning_pipeline,
             view_binding.clone(),
+            view_uniform_offset,
             raster_resources,
             binning_buffers,
         ) else {
@@ -180,6 +175,7 @@ impl Node for StrandRasterizerNode {
             &binning_buffers,
             view_binding.clone(),
             light_binding,
+            view_uniform_offset,
             view_light_uniform_offset,
         ) else {
             warn!("Failed to create strand shading bind group.");
@@ -187,13 +183,14 @@ impl Node for StrandRasterizerNode {
         };
 
         // Raster bind group
-        let Ok(raster_bind_group) = create_strand_raster_bind_group(
+        let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
             render_device,
             &raster_pipeline,
             &raster_resources,
             &binning_buffers,
             &shading_resources,
             view_binding.clone(),
+            &view_uniform_offset
         ) else {
             warn!("Failed to create strand raster bind group.");
             return Ok(());
@@ -227,6 +224,7 @@ impl Node for StrandRasterizerNode {
             raster_resources,
             shading_resources,
             &raster_bind_group,
+            &raster_group_offsets,
         );
 
         Ok(())

@@ -13,7 +13,7 @@ use bevy::{
             TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
-        view::ViewUniform,
+        view::{ViewUniform, ViewUniformOffset},
     },
 };
 
@@ -139,7 +139,7 @@ impl StrandRasterizerPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -211,7 +211,8 @@ pub fn create_strand_raster_bind_group(
     buffers: &StrandBinningBuffers,
     shading_resources: &StrandShadingResources,
     view_buffer: BindingResource,
-) -> Result<BindGroup, ()> {
+    view_offsets: &ViewUniformOffset,
+) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
@@ -223,51 +224,54 @@ pub fn create_strand_raster_bind_group(
     let froxel_config_buffer = resources.froxel_config_buffer.as_ref().ok_or(())?;
     let shading_buffer = shading_resources.output_texture.as_ref().ok_or(())?;
 
-    Ok(device.create_bind_group(
-        Some("strand_rasterizer_bind_group"),
-        layout,
-        &[
-            BindGroupEntry {
-                binding: layouts::rasterizer::VERTEX_BUFFER,
-                resource: vertex_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::INDEX_BUFFER,
-                resource: index_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::META_BUFFER,
-                resource: meta_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
-                resource: tile_offsets_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
-                resource: tile_counts_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
-                resource: packed_segments.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::OUTPUT_TEXTURE,
-                resource: BindingResource::TextureView(output_texture),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::FROXEL_CONFIG,
-                resource: froxel_config_buffer.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::VIEW_UNIFORM,
-                resource: view_buffer.clone(),
-            },
-            BindGroupEntry {
-                binding: layouts::rasterizer::SHADING_BUFFER,
-                resource: BindingResource::TextureView(shading_buffer),
-            },
-        ],
+    Ok((
+        device.create_bind_group(
+            Some("strand_rasterizer_bind_group"),
+            layout,
+            &[
+                BindGroupEntry {
+                    binding: layouts::rasterizer::VERTEX_BUFFER,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::INDEX_BUFFER,
+                    resource: index_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::META_BUFFER,
+                    resource: meta_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
+                    resource: tile_offsets_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
+                    resource: tile_counts_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
+                    resource: packed_segments.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::OUTPUT_TEXTURE,
+                    resource: BindingResource::TextureView(output_texture),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FROXEL_CONFIG,
+                    resource: froxel_config_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
+                    resource: view_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    resource: BindingResource::TextureView(shading_buffer),
+                },
+            ],
+        ),
+        vec![view_offsets.offset],
     ))
 }
 
@@ -302,22 +306,9 @@ pub fn run_raster_pass(
     resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
+    uniform_offsets: &[u32],
 ) {
-    let Some(render_target) = &resources.output_texture else {
-        warn!("Output texture not found");
-        return;
-    };
-    let Some(packed_buffer) = &resources.froxel_buffer else {
-        warn!("Froxel buffer not found");
-        return;
-    };
-    let Some(config_buffer) = &resources.froxel_config_buffer else {
-        warn!("Froxel config buffer not found");
-        return;
-    };
-
     let encoder = render_context.command_encoder(); // Get CommandEncoder
-
     // --- Rasterize ---
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -334,7 +325,7 @@ pub fn run_raster_pass(
         pass.set_bind_group(
             0,
             bind_group, // Assume correctly populated bind group
-            &[],
+            uniform_offsets,
         );
         // Set push constants if needed
         let pushconstants = PushConstants {
