@@ -191,7 +191,7 @@ impl FromWorld for StrandRasterizerPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
-        info!(
+        debug!(
             "Created strand raster compute pipelines: rasterize={:?}",
             rasterize_pipeline
         );

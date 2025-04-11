@@ -280,7 +280,7 @@ impl FromWorld for StrandBinningPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
-        info!("Created strand binning pipelines");
+        debug!("Created strand binning pipelines");
 
         StrandBinningPipeline {
             count_pipeline,
@@ -569,7 +569,7 @@ pub fn run_binning_pass(
     let max_compute_workgroups_per_dimension =
         render_device.limits().max_compute_workgroups_per_dimension;
 
-    info!(
+    debug!(
         "max_compute_workgroups_per_dimension: {:?}",
         max_compute_workgroups_per_dimension
     );
@@ -644,7 +644,7 @@ pub fn run_binning_pass(
             load_base = save_base;
             save_base += number_of_workgroups;
         }
-        info!("Scan rounds: {:?}", rounds);
+        debug!("Scan rounds: {:?}", rounds);
 
         // Scan Sums (Hierarchical reduction)
         pass.set_pipeline(scan_sums_pipeline);
@@ -662,7 +662,7 @@ pub fn run_binning_pass(
 
         // Scan Last (Scan the final reduced block)
         pass.set_pipeline(scan_last_pipeline);
-        // info!("Scan last: load_base: {}, save_base: {}", load_base, save_base);
+        // debug!("Scan last: load_base: {}, save_base: {}", load_base, save_base);
         pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(&load_base));
         pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(&save_base));
         // Set push constant for total count offset if separate buffer not used
@@ -672,7 +672,7 @@ pub fn run_binning_pass(
         // Scan Prefix (Propagate scan results back down)
         pass.set_pipeline(scan_prfx_pipeline);
         for (load_base, save_base, number_of_workgroups) in rounds.iter().rev() {
-            // info!("Scan prefix: load_base: {}, save_base: {}", save_base, load_base);
+            // debug!("Scan prefix: load_base: {}, save_base: {}", save_base, load_base);
             pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(save_base));
             pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(load_base));
             dispatch_workgroup_ext(

@@ -279,7 +279,7 @@ fn set_strand_geometry(
             })
             .collect();
         let vertex_buffer = ShaderStorageBuffer::from(vertices);
-        // info!("Vertex buffer: {:?}", vertex_buffer);
+        debug!("Vertex buffer: {:?}", vertex_buffer);
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
 
         // Extract indices from polyline_list
@@ -330,7 +330,7 @@ fn set_strand_geometry(
         let index_buffer = ShaderStorageBuffer::from(strand_indices);
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
         let geo_buffer = ShaderStorageBuffer::from(geos_data);
-        // info!("Index buffer: {:?}", index_buffer);
+        // debug!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
         let geo_buffer_handle = storage_buffers.add(geo_buffer);
@@ -393,7 +393,7 @@ fn use_froxel_buffer(
             Some(current_tile_write_indices_buffer);
         binning_resources.packed_segments_buffer = Some(packed_segments_buffer);
 
-        info!("Added froxel buffers to resource");
+        debug!("Added froxel buffers to resource");
     }
 }
 
@@ -414,12 +414,12 @@ fn use_strand_geometry(
         // }
 
         // --- Raster resources ---
-        info!("Using strand geometry for entity: {:?}", entity);
+        debug!("Using strand geometry for entity: {:?}", entity);
         let Some(index_storage_buffer) = storage_buffers.get(&geometry.indices) else {
             warn!("Index storage buffer not found for entity: {:?}", entity);
             continue;
         };
-        info!("[{:?}] Index storage buffer found.", entity);
+        debug!("[{:?}] Index storage buffer found.", entity);
         let Some(vertex_storage_buffer) = storage_buffers.get(&geometry.vertices) else {
             warn!("Vertex storage buffer not found for entity: {:?}", entity);
             continue;
@@ -433,7 +433,7 @@ fn use_strand_geometry(
             continue;
         };
 
-        info!(
+        debug!(
             "[{:?}] Vertex storage buffer found: {:?}",
             entity, vertex_storage_buffer.buffer
         );
@@ -470,6 +470,6 @@ fn use_strand_geometry(
         shading_resources.strand_count = Some(geometry.strand_count);
         shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);
 
-        info!("Created bind group for strand rasterizer");
+        debug!("Created bind group for strand rasterizer");
     }
 }

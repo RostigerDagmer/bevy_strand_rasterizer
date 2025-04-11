@@ -134,7 +134,7 @@ impl FromWorld for StrandShadingPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
-        info!(
+        debug!(
             "Created strand shading compute pipelines: shading={:?}",
             shading_pipeline
         );
