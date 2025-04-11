@@ -10,6 +10,7 @@ use plugin::StrandRasterizerPlugin;
 mod pipelines;
 mod plugin;
 mod shader_types;
+mod perf;
 
 fn setup(
     mut commands: Commands,
@@ -82,6 +83,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(StrandRasterizerPlugin)
         .add_plugins(PanOrbitCameraPlugin)
+        .add_plugins(perf::FpsDisplayPlugin)
         .init_asset::<DsonAsset>()
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
