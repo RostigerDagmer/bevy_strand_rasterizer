@@ -69,7 +69,12 @@ pub mod shading {
     pub const META_BUFFER: u32 = 2;
     pub const VIEW_UNIFORM: u32 = 3;
     pub const LIGHT_UNIFORM: u32 = 4;
-    pub const OUTPUT_TEXTURE: u32 = 5;
+    pub const CLUSTER_INDICES: u32 = 5;
+    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 6;
+    pub const CLUSTERABLE_OBJECTS: u32 = 7;
+    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 8;
+    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 9;
+    pub const OUTPUT_TEXTURE: u32 = 10;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -78,6 +83,20 @@ pub mod shading {
             ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
+            ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
+            ShaderDefVal::UInt(
+                "CLUSTER_OFFSETS_AND_COUNTS".into(),
+                CLUSTER_OFFSETS_AND_COUNTS,
+            ),
+            ShaderDefVal::UInt("CLUSTERABLE_OBJECTS".into(), CLUSTERABLE_OBJECTS),
+            ShaderDefVal::UInt(
+                "POINT_LIGHT_DEPTH_TEXTURE".into(),
+                POINT_LIGHT_DEPTH_TEXTURE,
+            ),
+            ShaderDefVal::UInt(
+                "DIRECTIONAL_LIGHT_DEPTH_TEXTURE".into(),
+                DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+            ),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
         ]
     }

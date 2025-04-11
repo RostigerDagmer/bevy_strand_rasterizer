@@ -44,6 +44,11 @@ const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
 @group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
 @group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+@group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
+@group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
+@group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
+@group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
+@group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 // For reference because VsCode wgsl analyzer is broken.
@@ -493,15 +498,13 @@ fn shade_strands(
         for (var j = 0u; j < light_count; j = j+1) {
             let light: types::DirectionalLight = lights.directional_lights[j];
             let light_flags = light.flags;
-            let L = light.direction_to_light; // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
+            let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
             
             let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color, ao_intensity);
-            // let bcsdf = marschnerShading(vertex.xyz, L, V, U, strand_absorption_color.xyz, strand_specular_color);
 
-            var c = bcsdf;// * light.color.xyz * 0.0001; //* (1.0 - ao_intensity) * vec3<f32>(1.0, 1.0, 1.0); // * (light.color.xyz / 2000.0); // * ao_intensity;
+            var c = bcsdf * (light.color.xyz * 0.001); // * dot(V, L);
             c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
 
-            // diffuse * light.lightColor * light.lightIntensity * NdotL + ambient;
             strand_absorption_color =  vec4<f32>(c.xyz, strand_absorption_color.w);
 
         }

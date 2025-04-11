@@ -1,4 +1,4 @@
-use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{LightMeta, ViewLightsUniformOffset}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
+use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
 
 use crate::{components::*, dson::DsonAsset, pipelines::{binning::*, composite::*, raster::*, shading::*}, resources::*, shader_types::*};
 
@@ -107,6 +107,8 @@ impl Node for StrandRasterizerNode {
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
+        let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
+        let shadow_samplers = world.resource::<ShadowSamplers>();
 
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
@@ -126,7 +128,13 @@ impl Node for StrandRasterizerNode {
             );
             return Ok(());
         };
-
+        
+        // --- Check Prerequisites ---
+        let Some(view_binding) = view_uniforms.uniforms.binding() else {
+            warn!("ViewUniforms binding not available.");
+            return Ok(());
+        };
+        
         let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
@@ -135,12 +143,33 @@ impl Node for StrandRasterizerNode {
             );
             return Ok(());
         };
-
-        // --- Check Prerequisites ---
-        let Some(view_binding) = view_uniforms.uniforms.binding() else {
-            warn!("ViewUniforms binding not available.");
+        let Some(clusterable_objects) = global_clusterable_object_meta.gpu_clusterable_objects.binding() else {
+            warn!("GlobalClusterableObjectMeta binding not available.");
             return Ok(());
         };
+
+        let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
+            warn!("Node running on view {:?} without ViewClusterBindings", view_entity);
+            // This might be expected if clustering isn't enabled/used for this view?
+            return Ok(()); // Adjust handling if necessary
+        };
+
+        let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
+             warn!("Node running on view {:?} without ViewShadowBindings", view_entity);
+             // This is expected for views rendering shadow maps, but required for views sampling them.
+             // If your node ONLY samples shadows, this might be an error.
+             // If your node might run on shadow views, handle appropriately.
+             return Ok(()); // Adjust handling if necessary
+        };
+        let Some(cluster_indices_binding) = view_cluster_bindings.clusterable_object_index_lists_binding() else {
+            warn!("ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}", view_entity);
+            return Ok(());
+       };
+
+       let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding() else {
+            warn!("ViewClusterBindings offsets_and_counts_binding not available for view {:?}", view_entity);
+            return Ok(());
+       };
 
         // Get the dimensions to calculate dispatch size
         let Some(frustrum) = raster_resources.frustrum_config else {
@@ -177,6 +206,10 @@ impl Node for StrandRasterizerNode {
             light_binding,
             view_uniform_offset,
             view_light_uniform_offset,
+            cluster_indices_binding,
+            cluster_offsets_binding,
+            clusterable_objects,
+            shadow_samplers,
         ) else {
             warn!("Failed to create strand shading bind group.");
             return Ok(());
