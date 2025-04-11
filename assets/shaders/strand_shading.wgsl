@@ -498,15 +498,13 @@ fn shade_strands(
         for (var j = 0u; j < light_count; j = j+1) {
             let light: types::DirectionalLight = lights.directional_lights[j];
             let light_flags = light.flags;
-            let L = light.direction_to_light; // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
+            let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
             
             let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color, ao_intensity);
-            // let bcsdf = marschnerShading(vertex.xyz, L, V, U, strand_absorption_color.xyz, strand_specular_color);
 
-            var c = bcsdf;// * light.color.xyz * 0.0001; //* (1.0 - ao_intensity) * vec3<f32>(1.0, 1.0, 1.0); // * (light.color.xyz / 2000.0); // * ao_intensity;
+            var c = bcsdf * (light.color.xyz * 0.001); // * dot(V, L);
             c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
 
-            // diffuse * light.lightColor * light.lightIntensity * NdotL + ambient;
             strand_absorption_color =  vec4<f32>(c.xyz, strand_absorption_color.w);
 
         }
