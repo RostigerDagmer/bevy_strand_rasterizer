@@ -1,31 +1,27 @@
 use bevy::{
-    pbr::ViewLightsUniformOffset, prelude::*, render::{
+    pbr::{ShadowSamplers, ViewLightsUniformOffset}, prelude::*, render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }
+    }, utils::HashMap
 };
 
-use crate::{pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
+use crate::{components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
 
-use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources};
+use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources, shading::StrandShadingResources};
 
-const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
 
 #[derive(Resource, Default)]
-pub struct StrandShadingResources {
-    pub output_texture: Option<TextureView>,
-    pub strand_count: Option<u32>,
-    pub max_segments_in_strand: Option<u32>,
+pub struct StrandShadowResources {
+    pub dom_targets: HashMap<Entity, TextureView>,
 }
-
 
 #[derive(Resource)]
 pub struct StrandShadowPipeline {
     pub bind_group_layout: BindGroupLayout,
-    pub shading_pipeline: CachedComputePipelineId,
+    pub shadow_pipeline: CachedComputePipelineId,
 }
 
 impl StrandShadowPipeline {
@@ -37,7 +33,7 @@ impl StrandShadowPipeline {
             &[
                 // Vertex buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::VERTEX_BUFFER,
+                    binding: layouts::rasterizer::VERTEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -48,7 +44,7 @@ impl StrandShadowPipeline {
                 },
                 // Index Buffer
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::INDEX_BUFFER,
+                    binding: layouts::rasterizer::INDEX_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -59,7 +55,7 @@ impl StrandShadowPipeline {
                 },
                 // Meta buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::META_BUFFER,
+                    binding: layouts::rasterizer::META_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -70,7 +66,7 @@ impl StrandShadowPipeline {
                 },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::VIEW_UNIFORM,
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -81,7 +77,7 @@ impl StrandShadowPipeline {
                 },
                 // Light Uniform Buffer
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::LIGHT_UNIFORM,
+                    binding: layouts::rasterizer::LIGHT_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
@@ -90,19 +86,273 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
+                 // Cluster Indices
+                 BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::CLUSTER_INDICES,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Cluster Offsets and Counts
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::CLUSTER_OFFSETS_AND_COUNTS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Clusterable Objects
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::CLUSTERABLE_OBJECTS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Point Light Depth Texture
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // Directional Light Depth Texture
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    count: None,
+                },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::OUTPUT_TEXTURE,
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::Rgba8Unorm,
-                        view_dimension: TextureViewDimension::D2,
+                        format: TextureFormat::Rg32Float, // TODO: compact
+                        view_dimension: TextureViewDimension::D2Array,
                     },
                     count: None,
                 },
                 // NOTE: Additional textures here if necessary for more accurate blending during rasterization
             ],
         )
+    }
+}
+
+impl FromWorld for StrandShadowPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        let bind_group_layout = Self::create_bind_group_layout(device);
+
+        let shader_loader = world.resource::<AssetServer>();
+        let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let cdefs = [
+            vec![ShaderDefVal::UInt(
+                "MAX_TEXTURE_EXTENT".into(),
+                MAX_TEXTURE_EXTENT,
+            )],
+            layouts::rasterizer::shader_defs(),
+        ]
+        .concat();
+
+        let shadow_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_shadow_rasterize_pipeline".into()),
+            layout: vec![bind_group_layout.clone()],
+            shader: rasterize_shader,
+            shader_defs: [cdefs.as_slice(), &["SHADOWS".into()]].concat(),
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: "rasterize_strands".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        debug!(
+            "Created strand raster compute pipelines: rasterize={:?}",
+            shadow_pipeline
+        );
+
+        StrandShadowPipeline {
+            bind_group_layout,
+            shadow_pipeline,
+        }
+    }
+}
+
+
+pub fn create_strand_shadow_bind_group(
+    entity: &Entity,
+    device: &RenderDevice,
+    pipeline: &StrandShadowPipeline,
+    shading_resources: &StrandShadowResources,
+    buffers: &StrandBinningBuffers,
+    view_buffer: &BindingResource,
+    light_buffer: &BindingResource,
+    view_uniform_offset: &ViewUniformOffset,
+    view_light_uniform_offset: &ViewLightsUniformOffset,
+    cluster_indices: &BindingResource,
+    cluster_offsets_and_counts: &BindingResource,
+    clusterable_objects: &BindingResource,
+    shadows: &ShadowSamplers,
+) -> Result<(BindGroup, Vec<u32>), ()> {
+
+    let layout = &pipeline.bind_group_layout;
+    let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
+    let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
+    let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    let output_texture = shading_resources.dom_targets.get(entity).ok_or(())?;
+
+    Ok((
+        device.create_bind_group(
+            Some(&*format!("strand_shadows_{:?}_bind_group", entity)),
+            layout,
+            &[
+                BindGroupEntry {
+                    binding: layouts::rasterizer::VERTEX_BUFFER,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::INDEX_BUFFER,
+                    resource: index_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::META_BUFFER,
+                    resource: meta_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
+                    resource: view_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::LIGHT_UNIFORM,
+                    resource: light_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::CLUSTER_INDICES,
+                    resource: cluster_indices.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::CLUSTER_OFFSETS_AND_COUNTS,
+                    resource: cluster_offsets_and_counts.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::CLUSTERABLE_OBJECTS,
+                    resource: clusterable_objects.clone(),
+                },
+                // Bind the shadow map texture
+                BindGroupEntry {
+                    binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE,
+                    resource: BindingResource::Sampler(&shadows.point_light_comparison_sampler),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    resource: BindingResource::Sampler(&shadows.directional_light_comparison_sampler),
+                },
+                // Render target array
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
+                    resource: BindingResource::TextureView(output_texture),
+                },
+            ],
+        ),
+        vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
+    ))
+}
+
+
+pub fn create_strand_shadow_texture(
+    device: &RenderDevice,
+    width: u32,
+    height: u32,
+    slices: u32,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_shadow_texture"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: slices,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rg32Float, // TODO: compact
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[TextureFormat::Rg32Float],
+    });
+
+    let texture_view = texture.create_view(&TextureViewDescriptor {
+        label: Some("strand_shadow_texture_view"),
+        format: Some(TextureFormat::Rg32Float),
+        dimension: Some(TextureViewDimension::D2Array),
+        aspect: TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: Some(slices),
+        
+    });
+
+    (texture, texture_view)
+}
+
+pub fn run_shadow_pass(
+    render_context: &mut RenderContext,
+    pipeline_cache: &PipelineCache,
+    pipeline: &StrandShadowPipeline,
+    froxel_config: &FroxelConfig,
+    resources: &StrandRasterizerResources,
+    shading_resources: &StrandShadingResources,
+    bind_group: &BindGroup,
+    offsets: &[u32],
+) {
+    let encoder = render_context.command_encoder(); // Get CommandEncoder
+    // --- Rasterize ---
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("Strand Rasterize"),
+            ..default()
+        });
+        let Some(raster_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipeline.shadow_pipeline)
+        else {
+            warn!("Shadow pipeline not found");
+            return;
+        };
+        pass.set_pipeline(raster_pipeline);
+        pass.set_bind_group(
+            0,
+            bind_group, // Assume correctly populated bind group
+            offsets,
+        );
+        // Set push constants if needed
+        let pushconstants = PushConstants {
+            num_elements: resources.strand_count.unwrap_or(0),
+            workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
+            scan_load_base: 0,
+            scan_save_base: 0,
+        };
+        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+
+        // Dispatch based on number of strands or segments
+        let workgroup_size_x = froxel_config.froxel_size_x;
+        let workgroup_size_y = froxel_config.froxel_size_y;
+        let workgroups_x = froxel_config.screen_width / workgroup_size_x;
+        let workgroups_y = froxel_config.screen_height / workgroup_size_y;
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 }

@@ -140,8 +140,8 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 
 // #define DEBUG
 
-#ifdef STAGE_SHADOWS 
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_2d_array<rg32float, write>; // TODO: maybe find a more compact format
+#ifdef SHADOWS 
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_storage_2d_array<rg32float, write>; // TODO: maybe find a more compact format
 @group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
 @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
@@ -149,7 +149,19 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 @group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 
-#endif // STAGE_SHADOWS
+@compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
+fn rasterize_strands(
+    @builtin(global_invocation_id) global_id: vec3<u32>,    // Represents the pixel coordinate (x, y, 0)
+    @builtin(workgroup_id) workgroup_id: vec3u,             // Represents the tile index (tx, ty, 0)
+    @builtin(local_invocation_id) local_id: vec3u           // Represents pixel within tile (lx, ly, 0)
+) {
+    let pixel_coord_int = vec2<i32>(global_id.xy);
+    for (var i: u32; i < 8; i = i+1) {
+        textureStore(deep_opacity_maps, pixel_coord_int, i, vec4<f32>(0.6, 0.0, 0.0, 0.0)); // Debug color
+    }
+}
+
+#else
 
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(
@@ -273,3 +285,5 @@ fn rasterize_strands(
     // Write the final accumulated color to the render target
     textureStore(render_target, pixel_coord_int, final_color);
 }
+
+#endif // SHADOWS vs camera

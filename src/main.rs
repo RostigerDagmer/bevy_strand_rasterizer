@@ -22,7 +22,6 @@ fn setup(
     commands.spawn((StrandAsset { handle }));
 
     commands.spawn((
-        // Camera3d::default(),
         FroxelConfig::default(),
         Transform::from_xyz(-1.0, 7., 1.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
         PanOrbitCamera::default(),
@@ -54,13 +53,13 @@ fn setup(
             rotation: Quat::from_rotation_x(-3.141592 / 4.),
             ..default()
         },
-        // FroxelConfig { // TODO: move into plugin
-        //     screen_width: 1024, // shadow map size in this context
-        //     screen_height: 1024,
-        //     froxel_size_x: 8,
-        //     froxel_size_y: 8,
-        //     depth_slices: 16,
-        // },
+        FroxelConfig { // TODO: move into plugin
+            screen_width: 1024, // shadow map size in this context
+            screen_height: 1024,
+            froxel_size_x: 8,
+            froxel_size_y: 8,
+            depth_slices: 16,
+        },
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow
         // bounds for better visual quality.

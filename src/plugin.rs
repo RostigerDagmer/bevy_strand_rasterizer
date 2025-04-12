@@ -3,31 +3,25 @@ use bevy::{
     ecs::entity,
     math::bounding::Aabb3d,
     pbr::{
-        GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings,
-        ViewLightsUniformOffset, ViewShadowBindings,
+        ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings
     },
     prelude::*,
     render::{
-        Render, RenderApp, RenderSet,
-        extract_component::ExtractComponentPlugin,
-        render_asset::RenderAssets,
-        render_graph::{
+        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
             Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
-        },
-        render_resource::{
+        }, render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        },
-        renderer::{RenderContext, RenderDevice},
-        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
-        view::{self, ViewUniform, ViewUniformOffset, ViewUniforms, prepare_view_uniforms},
+        }, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet
     },
 };
 
 use crate::{
     components::*,
     dson::DsonAsset,
-    pipelines::{binning::*, composite::*, raster::*, shading::*},
+    pipelines::{
+        binning::*, composite::*, raster::*, shading::*, shadows::*,
+    },
     resources::*,
     shader_types::*,
 };
@@ -56,6 +50,8 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<StrandShadingPipeline>();
         render_app.init_resource::<StrandShadingResources>();
+        render_app.init_resource::<StrandShadowPipeline>();
+        render_app.init_resource::<StrandShadowResources>();
         render_app.init_resource::<StrandBinningPipeline>();
         render_app.init_resource::<StrandBinningBuffers>();
         render_app.init_resource::<CompositionPipeline>();
@@ -63,6 +59,7 @@ impl Plugin for StrandRasterizerPlugin {
             Render,
             ((
                 use_froxel_buffer,
+                use_deep_opacity_maps,
                 use_strand_geometry.after(prepare_view_uniforms),
             )
                 .chain()
@@ -131,9 +128,11 @@ impl Node for StrandRasterizerNode {
         let render_device = world.resource::<RenderDevice>();
         let binning_pipeline = world.resource::<StrandBinningPipeline>();
         let shading_pipeline = world.resource::<StrandShadingPipeline>();
+        let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>(); // Get the buffers
+        let binning_buffers = world.resource::<StrandBinningBuffers>();
         let shading_resources = world.resource::<StrandShadingResources>();
+        let shadow_resources = world.resource::<StrandShadowResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
@@ -219,6 +218,34 @@ impl Node for StrandRasterizerNode {
             return Ok(());
         };
 
+        // Shading bind group
+        let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
+            render_device,
+            &shading_pipeline,
+            &shading_resources,
+            &binning_buffers,
+            &view_binding,
+            &light_binding,
+            view_uniform_offset,
+            view_light_uniform_offset,
+            &cluster_indices_binding,
+            &cluster_offsets_binding,
+            &clusterable_objects,
+            shadow_samplers,
+        ) else {
+            warn!("Failed to create strand shading bind group.");
+            return Ok(());
+        };
+
+        run_shading_pass(
+            render_context,
+            pipeline_cache,
+            shading_pipeline,
+            shading_resources,
+            &shading_bind_group,
+            &shading_group_offsets,
+        );
+
         for entity in raster_resources.froxel_config_buffer.keys() {
             debug!("Dispatching for entity: {:?}", entity);
             // Get the dimensions to calculate dispatch size
@@ -234,91 +261,131 @@ impl Node for StrandRasterizerNode {
             };
 
             if *entity != view_entity {
-                // light entity
-            }
+                debug!("light entity: {:?}", entity);
+                let Ok((shadows_bindgroup, dynamic_offsets)) = &create_strand_shadow_bind_group(
+                    entity,
+                    render_device,
+                    shadow_pipeline,
+                    shadow_resources,
+                    binning_buffers,
+                    &view_binding,
+                    &light_binding,
+                    view_uniform_offset,
+                    view_light_uniform_offset,
+                    &cluster_indices_binding,
+                    &cluster_offsets_binding,
+                    &clusterable_objects,
+                    shadow_samplers,
+                ) else {
+                    warn!("Failed to create strand shadow bind group.");
+                    continue;
+                };
+                // Binning bind group (shadow pass)
+                let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
+                    &entity,
+                    render_device,
+                    binning_pipeline,
+                    view_binding.clone(),
+                    view_uniform_offset,
+                    light_binding.clone(),
+                    view_light_uniform_offset,
+                    raster_resources,
+                    binning_buffers,
+                ) else {
+                    warn!("Failed to create strand binning bind group for shadows .");
+                    return Ok(());
+                };
 
-            // Binning bind group
-            let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
-                entity,
-                render_device,
-                binning_pipeline,
-                view_binding.clone(),
-                view_uniform_offset,
-                light_binding.clone(),
-                view_light_uniform_offset,
-                raster_resources,
-                binning_buffers,
-            ) else {
-                warn!("Failed to create strand binning bind group.");
-                continue;
-            };
+                run_binning_pass(
+                    &entity,
+                    render_device,
+                    render_context,
+                    pipeline_cache,
+                    strand_binning_bind_groups,
+                    binning_buffers,
+                    binning_pipeline,
+                    &frustrum,
+                    strand_count,
+                );
 
-            // Shading bind group
-            let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
-                render_device,
-                &shading_pipeline,
-                &shading_resources,
-                &binning_buffers,
-                &view_binding,
-                &light_binding,
-                view_uniform_offset,
-                view_light_uniform_offset,
-                &cluster_indices_binding,
-                &cluster_offsets_binding,
-                &clusterable_objects,
-                shadow_samplers,
-            ) else {
-                warn!("Failed to create strand shading bind group.");
-                continue;
-            };
-
-            // Raster bind group
-            let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
-                entity,
-                render_device,
-                &raster_pipeline,
-                &raster_resources,
-                &binning_buffers,
-                &shading_resources,
-                view_binding.clone(),
-                &view_uniform_offset,
-            ) else {
-                warn!("Failed to create strand raster bind group.");
-                continue;
-            };
-
-            run_binning_pass(
-                entity,
-                render_device,
-                render_context,
-                pipeline_cache,
-                strand_binning_bind_groups,
-                binning_buffers,
-                binning_pipeline,
-                &frustrum,
-                strand_count,
-            );
-
-            run_shading_pass(
-                render_context,
-                pipeline_cache,
-                shading_pipeline,
-                shading_resources,
-                &shading_bind_group,
-                &shading_group_offsets,
-            );
-
-            run_raster_pass(
-                render_context,
-                pipeline_cache,
-                raster_pipeline,
-                &frustrum,
-                raster_resources,
-                shading_resources,
-                &raster_bind_group,
-                &raster_group_offsets,
-            );
+                run_shadow_pass(
+                    render_context,
+                    pipeline_cache,
+                    shadow_pipeline,
+                    frustrum,
+                    &raster_resources,
+                    &shading_resources,
+                    &shadows_bindgroup,
+                    &dynamic_offsets,
+                );
+            }    
         }
+
+        // Get the dimensions to calculate dispatch size
+        let Some(frustrum) = raster_resources.frustrum_config.get(&view_entity) else {
+            warn!("No frustum size defined.");
+            return Ok(());
+        };
+
+        // Get the strand count for dispatch dimensions
+        let Some(strand_count) = raster_resources.strand_count else {
+            warn!("No strand count set.");
+            return Ok(());
+        };
+        
+        // Binning bind group
+        let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
+            &view_entity,
+            render_device,
+            binning_pipeline,
+            view_binding.clone(),
+            view_uniform_offset,
+            light_binding.clone(),
+            view_light_uniform_offset,
+            raster_resources,
+            binning_buffers,
+        ) else {
+            warn!("Failed to create strand binning bind group.");
+            return Ok(());
+        };
+
+        // Raster bind group
+        let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
+            &view_entity,
+            render_device,
+            &raster_pipeline,
+            &raster_resources,
+            &binning_buffers,
+            &shading_resources,
+            view_binding.clone(),
+            &view_uniform_offset,
+        ) else {
+            warn!("Failed to create strand raster bind group.");
+            return Ok(());
+        };
+
+        run_binning_pass(
+            &view_entity,
+            render_device,
+            render_context,
+            pipeline_cache,
+            strand_binning_bind_groups,
+            binning_buffers,
+            binning_pipeline,
+            &frustrum,
+            strand_count,
+        );
+
+        run_raster_pass(
+            render_context,
+            pipeline_cache,
+            raster_pipeline,
+            &frustrum,
+            raster_resources,
+            shading_resources,
+            &raster_bind_group,
+            &raster_group_offsets,
+        );
 
         Ok(())
     }
@@ -494,6 +561,24 @@ fn use_froxel_buffer(
 
         debug!("Added froxel buffers to resource");
     }
+}
+
+fn use_deep_opacity_maps(
+    query: Query<(Entity, &FroxelConfig), With<ExtractedDirectionalLight>>,
+    device: Res<RenderDevice>,
+    mut shadow_resources: ResMut<StrandShadowResources>,
+) {
+    for (entity, config) in query.iter() {
+        if shadow_resources.dom_targets.contains_key(&entity) {
+            continue;
+        }
+        let (texture, view) = create_strand_shadow_texture(&device, config.screen_width, config.screen_height, config.depth_slices);
+        shadow_resources
+            .dom_targets
+            .insert(entity, view.clone());
+
+        info!("Added deep opacity maps to resource");
+    }   
 }
 
 // render world buffer retrieval
