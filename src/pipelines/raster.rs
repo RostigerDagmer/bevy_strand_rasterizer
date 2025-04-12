@@ -14,7 +14,7 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    },
+    }, utils::HashMap,
 };
 
 use crate::{
@@ -27,11 +27,11 @@ use super::{binning::StrandBinningBuffers, shading::StrandShadingResources};
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
     pub pipeline: Option<ComputePipeline>,
-    pub froxel_buffer: Option<Buffer>,
-    pub froxel_config_buffer: Option<Buffer>,
+    pub froxel_buffer: HashMap<Entity, Buffer>,
+    pub froxel_config_buffer: HashMap<Entity, Buffer>,
     pub output_texture: Option<TextureView>,
     pub strand_count: Option<u32>,
-    pub frustrum_config: Option<FroxelConfig>,
+    pub frustrum_config: HashMap<Entity, FroxelConfig>,
 }
 
 #[derive(Resource)]
@@ -205,6 +205,7 @@ impl FromWorld for StrandRasterizerPipeline {
 
 // Create the bind group for the strand rasterizer
 pub fn create_strand_raster_bind_group(
+    entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
@@ -216,12 +217,15 @@ pub fn create_strand_raster_bind_group(
     let layout = &pipeline.bind_group_layout;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
-    let tile_offsets_buffer = buffers.tile_offsets_buffer.as_ref().ok_or(())?;
-    let tile_counts_buffer = buffers.tile_counts_buffer.as_ref().ok_or(())?;
+
+    let artifacts= buffers.artifacts.get(entity).ok_or(())?;
+
+    let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
+    let tile_counts_buffer = &artifacts.tile_counts_buffer;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    let packed_segments = resources.froxel_buffer.as_ref().ok_or(())?;
+    let packed_segments = resources.froxel_buffer.get(entity).ok_or(())?;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
-    let froxel_config_buffer = resources.froxel_config_buffer.as_ref().ok_or(())?;
+    let froxel_config_buffer = resources.froxel_config_buffer.get(entity).ok_or(())?;
     let shading_buffer = shading_resources.output_texture.as_ref().ok_or(())?;
 
     Ok((

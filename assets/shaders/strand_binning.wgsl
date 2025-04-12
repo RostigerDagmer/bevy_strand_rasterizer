@@ -1,7 +1,10 @@
 #import bevy_render::view::View
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
+#import bevy_pbr::mesh_view_types as types
 // #import NUMBER_OF_THREADS_PER_WORKGROUP
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
+
+const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
 
 // --- Structures ---
 
@@ -69,9 +72,9 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
     return froxels_x * froxels_y * config.depth_slices;
 }
 
-fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_height: f32, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec3<f32> {
+fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec3<f32> {
     // Transform from world to clip space using the view-projection matrix
-    let clip_pos = view.unjittered_clip_from_world * position;
+    let clip_pos = clip_from_world * position;
 
     if clip_pos.w <= 0.0 {
         // Handle point behind camera
@@ -85,22 +88,13 @@ fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_he
     let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
     let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
     
-    // Custom depth mapping based on world space AABB
-    // First, transform the AABB to view space
-    let view_mat = mat4x4<f32>(
-        view.unjittered_clip_from_world.x,
-        view.unjittered_clip_from_world.y,
-        view.unjittered_clip_from_world.z,
-        view.unjittered_clip_from_world.w
-    );
-    
     // Extract view-space Z of the position
-    let view_pos = view_mat * position;
+    let view_pos = clip_from_world * position;
     let view_z = -view_pos.z; // Negate because view space typically has -Z forward
     
     // Transform AABB min and max to view space and get Z values
-    let aabb_min_view = view_mat * vec4<f32>(world_aabb_min, 1.0);
-    let aabb_max_view = view_mat * vec4<f32>(world_aabb_max, 1.0);
+    let aabb_min_view = clip_from_world * vec4<f32>(world_aabb_min, 1.0);
+    let aabb_max_view = clip_from_world * vec4<f32>(world_aabb_max, 1.0);
     
     // Get min and max Z values in view space (negate because -Z is forward)
     let aabb_min_z = -aabb_min_view.z / aabb_min_view.w;
@@ -128,6 +122,7 @@ fn world_to_screen(position: vec4<f32>, view: View, screen_width: f32, screen_he
 @group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
 @group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
 @group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View; // Or ViewUniform
+@group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
 @group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
 
@@ -293,18 +288,26 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let aabb = geos[0].aabb;
     // Process segments for this strand
     var prev_vtx = vertices[indices[start_vertex_offset]];
-    var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+
+    #ifdef SHADOWS
+        let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
+        let cascade = light.cascades[0]; // TODO: select cascade based on distance
+        let clip_from_world = cascade.clip_from_world;
+    #else
+        let clip_from_world = view.unjittered_clip_from_world;
+    #endif
+
+    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = indices[start_vertex_offset + i];
         if current_vtx_idx >= arrayLength(&vertices) { break; } // Bounds check
 
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
 
         // Trace this segment using the *correct* traversal logic
         trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
-
         prev_screen_pos = current_screen_pos;
     }
 }
@@ -622,6 +625,7 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(#FROXEL_TILE_BUFFER) var<storage, read_write> packed_segments_buffer: array<SegmentRef>; // Write-only effectively
 @group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
 @group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View;
+@group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
 @group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
 fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, segment_ref: SegmentRef, cfg: FroxelConfig) -> bool {
@@ -798,12 +802,22 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     // let aabb = geos[pc.geo_id].aabb; // TODO: pc modification
     let aabb = geos[0].aabb;
     var prev_vtx = vertices[indices[start_vertex_offset]];
-    var prev_screen_pos = world_to_screen(prev_vtx, view, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+
+
+    #ifdef SHADOWS
+        let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
+        let cascade = light.cascades[0]; // TODO: select cascade based on distance
+        let clip_from_world = cascade.clip_from_world;
+    #else
+        let clip_from_world = view.unjittered_clip_from_world;
+    #endif
+
+    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = indices[start_vertex_offset + i];
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, view, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
 
         // Define SegmentRef - How is segment_start_idx used?
         // Option 1: Index into index buffer

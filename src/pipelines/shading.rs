@@ -199,13 +199,13 @@ pub fn create_strand_shading_bind_group(
     pipeline: &StrandShadingPipeline,
     shading_resources: &StrandShadingResources,
     buffers: &StrandBinningBuffers,
-    view_buffer: BindingResource,
-    light_buffer: BindingResource,
+    view_buffer: &BindingResource,
+    light_buffer: &BindingResource,
     view_uniform_offset: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
-    cluster_indices: BindingResource,
-    cluster_offsets_and_counts: BindingResource,
-    clusterable_objects: BindingResource,
+    cluster_indices: &BindingResource,
+    cluster_offsets_and_counts: &BindingResource,
+    clusterable_objects: &BindingResource,
     shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
 

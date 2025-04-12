@@ -41,6 +41,7 @@ pub mod binning {
     pub const FROXEL_CONFIG: u32 = 7;
     pub const VIEW_UNIFORM: u32 = 8;
     pub const GEO_BUFFER: u32 = 9;
+    pub const LIGHT_UNIFORM: u32 = 10;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -57,6 +58,7 @@ pub mod binning {
             ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
+            ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
         ]
     }
 }

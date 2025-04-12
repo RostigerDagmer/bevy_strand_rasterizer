@@ -1,19 +1,14 @@
 use bevy::{
-    prelude::*,
-    render::{
+    pbr::ViewLightsUniformOffset, prelude::*, render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferSize,
-            BufferUsages, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState,
-            ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
-            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
-            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
-            TextureFormat, TextureSampleType, TextureView, TextureViewDimension,
+            BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+            PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, ShaderType,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    },
+    }, utils::HashMap
 };
 use bevy_radix_sort::dispatch_workgroup_ext;
 
@@ -41,13 +36,22 @@ pub struct StrandBinningBindGroup {
     pub offsets: Vec<u32>,           // Uniform dynamic offsets
 }
 
+pub struct StrandBinningArtifactBuffers {
+    pub tile_counts_buffer: Buffer,
+    pub tile_offsets_buffer: Buffer,
+    pub current_tile_write_indices_buffer: Buffer,
+    pub packed_segments_buffer: Buffer,
+}
+
 #[derive(Resource, Default)]
 pub struct StrandBinningBuffers {
     // Keep Option<Buffer> for tile_counts, offsets, etc.
-    pub tile_counts_buffer: Option<Buffer>,
-    pub tile_offsets_buffer: Option<Buffer>,
-    pub current_tile_write_indices_buffer: Option<Buffer>,
-    pub packed_segments_buffer: Option<Buffer>,
+    // pub tile_counts_buffer: HashMap<Entity, Buffer>,
+    // pub tile_offsets_buffer: HashMap<Entity, Buffer>,
+    // pub current_tile_write_indices_buffer: HashMap<Entity, Buffer>,
+    // pub packed_segments_buffer: HashMap<Entity, Buffer>,
+    pub artifacts: HashMap<Entity, StrandBinningArtifactBuffers>, // For storing artifacts per entity
+
     // Add handles/references needed from StrandGeometry
     pub vertex_buffer: Option<Buffer>,
     pub index_buffer: Option<Buffer>,
@@ -58,11 +62,13 @@ pub struct StrandBinningBuffers {
 #[derive(Resource)]
 pub struct StrandBinningPipeline {
     pub count_pipeline: CachedComputePipelineId,
+    pub count_pipeline_shadows: CachedComputePipelineId,
     pub scan_sums_pipeline: CachedComputePipelineId,
     pub scan_last_pipeline: CachedComputePipelineId,
     pub scan_prfx_pipeline: CachedComputePipelineId,
     pub init_placement_idx_pipeline: CachedComputePipelineId,
     pub place_pipeline: CachedComputePipelineId,
+    pub place_pipeline_shadows: CachedComputePipelineId,
 
     // Separate layouts for each stage requiring distinct bindings
     pub count_layout: BindGroupLayout,
@@ -131,6 +137,11 @@ impl FromWorld for StrandBinningPipeline {
                     true,
                     Some(ViewUniform::min_size()),
                 ), // view
+                Self::uniform_buffer_entry(
+                    layouts::binning::LIGHT_UNIFORM,
+                    true,
+                    None,
+                ),
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
@@ -180,6 +191,11 @@ impl FromWorld for StrandBinningPipeline {
                     true,
                     Some(ViewUniform::min_size()),
                 ), // view
+                Self::uniform_buffer_entry(
+                    layouts::binning::LIGHT_UNIFORM,
+                    true,
+                    None,
+                ),
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
@@ -221,7 +237,17 @@ impl FromWorld for StrandBinningPipeline {
             label: Some("strand_binning_count_pipeline".into()),
             layout: vec![count_layout.clone()], // Use specific layout
             shader: binning_shader.clone(),
-            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into()]].concat(), // Only define STAGE_COUNT
+            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into()]].concat(),
+            push_constant_ranges: vec![push_constant_range.clone()],
+            entry_point: "count_strands".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let count_pipeline_shadows = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_binning_count_pipeline_shadows".into()),
+            layout: vec![count_layout.clone()], // Use specific layout
+            shader: binning_shader.clone(),
+            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into(), "SHADOWS".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "count_strands".into(),
             zero_initialize_workgroup_memory: false,
@@ -280,15 +306,29 @@ impl FromWorld for StrandBinningPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
+        let place_pipeline_shadows =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("strand_binning_place_pipeline_shadows".into()),
+                layout: vec![place_layout.clone()], // Use place layout
+                shader: binning_shader.clone(),
+                // shader_defs: vec!["STAGE_PLACE".into()],
+                shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into(), "SHADOWS".into()]].concat(),
+                push_constant_ranges: vec![push_constant_range.clone()],
+                entry_point: "place_strands".into(),
+                zero_initialize_workgroup_memory: false,
+            });
+
         debug!("Created strand binning pipelines");
 
         StrandBinningPipeline {
             count_pipeline,
+            count_pipeline_shadows,
             scan_sums_pipeline,
             scan_last_pipeline,
             scan_prfx_pipeline,
             init_placement_idx_pipeline,
             place_pipeline,
+            place_pipeline_shadows,
             count_layout,
             scan_layout,
             init_place_layout,
@@ -374,16 +414,27 @@ pub fn prepare_binning_buffers(
 }
 
 pub fn create_strand_binning_bind_group(
+    entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandBinningPipeline,
     view_uniforms: BindingResource,
     view_uniform_offset: &ViewUniformOffset,
+    light_uniform: BindingResource,
+    light_uniform_offset: &ViewLightsUniformOffset,
     raster_resources: &StrandRasterizerResources,
     binning_resources: &StrandBinningBuffers,
 ) -> Result<StrandBinningBindGroup, ()> {
     let strand_points_buffer = binning_resources.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = binning_resources.index_buffer.as_ref().ok_or(())?;
     let strand_metadata_buffer = binning_resources.meta_buffer.as_ref().ok_or(())?;
+
+    let artifacts = binning_resources
+        .artifacts
+        .get(entity)
+        .ok_or(())?;
+
+    let froxel_config_buffer = raster_resources.froxel_config_buffer.get(entity).ok_or(())?;
+
     // Count Bind Group
     let count_bind_group = device.create_bind_group(
         Some("strand_count_bind_group"),
@@ -403,23 +454,22 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: layouts::binning::TILE_COUNTS_BUFFER,
-                resource: binning_resources
+                resource: artifacts
                     .tile_counts_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_CONFIG,
-                resource: raster_resources
-                    .froxel_config_buffer
-                    .as_ref()
-                    .unwrap()
+                resource: froxel_config_buffer
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
+            },
+            BindGroupEntry {
+                binding: layouts::binning::LIGHT_UNIFORM,
+                resource: light_uniform.clone(),
             },
             BindGroupEntry {
                 binding: layouts::binning::GEO_BUFFER,
@@ -439,18 +489,14 @@ pub fn create_strand_binning_bind_group(
         &[
             BindGroupEntry {
                 binding: layouts::binning::TILE_COUNTS_BUFFER,
-                resource: binning_resources
+                resource: artifacts
                     .tile_counts_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::TILE_OFFSETS_BUFFER,
-                resource: binning_resources
+                resource: artifacts
                     .tile_offsets_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             // Implicitly handles total count via buffer structure
@@ -464,18 +510,14 @@ pub fn create_strand_binning_bind_group(
         &[
             BindGroupEntry {
                 binding: layouts::binning::TILE_OFFSETS_BUFFER,
-                resource: binning_resources
+                resource: artifacts
                     .tile_offsets_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::CURRENT_TILE_WRITE_INDICES,
-                resource: binning_resources
+                resource: artifacts
                     .current_tile_write_indices_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
         ],
@@ -500,31 +542,28 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: layouts::binning::CURRENT_TILE_WRITE_INDICES,
-                resource: binning_resources
+                resource: artifacts
                     .current_tile_write_indices_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_TILE_BUFFER,
-                resource: binning_resources
+                resource: artifacts
                     .packed_segments_buffer
-                    .as_ref()
-                    .unwrap()
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_CONFIG,
-                resource: raster_resources
-                    .froxel_config_buffer
-                    .as_ref()
-                    .unwrap()
+                resource: froxel_config_buffer
                     .as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::VIEW_UNIFORM,
                 resource: view_uniforms.clone(),
+            },
+            BindGroupEntry {
+                binding: layouts::binning::LIGHT_UNIFORM,
+                resource: light_uniform.clone(),
             },
             BindGroupEntry {
                 binding: layouts::binning::GEO_BUFFER,
@@ -541,11 +580,12 @@ pub fn create_strand_binning_bind_group(
         scan_bind_group,
         init_placement_idx_bind_group,
         place_bind_group,
-        offsets: vec![view_uniform_offset.offset],
+        offsets: vec![view_uniform_offset.offset, light_uniform_offset.offset],
     });
 }
 
 pub fn run_binning_pass(
+    entity: &Entity,
     render_device: &RenderDevice,
     render_context: &mut RenderContext,
     pipeline_cache: &PipelineCache,
@@ -555,6 +595,14 @@ pub fn run_binning_pass(
     froxel_config: &FroxelConfig,
     num_strands_or_segments: u32,
 ) {
+
+    let Some(artifacts) = buffers
+        .artifacts
+        .get(entity) else {
+        warn!("No artifacts for entity: {:?}", entity);
+        return;
+    };
+
     let encoder = render_context.command_encoder(); // Get CommandEncoder
 
     let tile_size_x = froxel_config.froxel_size_x;
@@ -577,7 +625,7 @@ pub fn run_binning_pass(
 
     // --- Clear count buffer (important!) ---
     // Use encoder.clear_buffer(...) or a small compute shader pass
-    encoder.clear_buffer(buffers.tile_counts_buffer.as_ref().unwrap(), 0, None); // Clear whole buffer
+    encoder.clear_buffer(&artifacts.tile_counts_buffer, 0, None); // Clear whole buffer
 
     // --- Pass 1: Count ---
     {

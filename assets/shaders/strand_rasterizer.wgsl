@@ -1,5 +1,6 @@
 #import bevy_render::view::View
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
+#import bevy_pbr::mesh_view_types as types
 
 // --- Structures ---
 
@@ -141,12 +142,12 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 
 #ifdef STAGE_SHADOWS 
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_2d_array<rg32float, write>; // TODO: maybe find a more compact format
-// @group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
-// @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
-// @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
-// @group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
-// @group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
-// @group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
+@group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+@group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
+@group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
+@group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
+@group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
+@group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 
 #endif // STAGE_SHADOWS
 

@@ -1,6 +1,36 @@
-use bevy::{core_pipeline::core_3d::graph::Core3d, math::bounding::Aabb3d, pbr::{GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings}, prelude::*, render::{extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError}, render_resource::{BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache, ShaderType}, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet}};
+use bevy::{
+    core_pipeline::core_3d::graph::Core3d,
+    ecs::entity,
+    math::bounding::Aabb3d,
+    pbr::{
+        GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings,
+        ViewLightsUniformOffset, ViewShadowBindings,
+    },
+    prelude::*,
+    render::{
+        Render, RenderApp, RenderSet,
+        extract_component::ExtractComponentPlugin,
+        render_asset::RenderAssets,
+        render_graph::{
+            Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
+        },
+        render_resource::{
+            BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
+            ShaderType,
+        },
+        renderer::{RenderContext, RenderDevice},
+        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        view::{self, ViewUniform, ViewUniformOffset, ViewUniforms, prepare_view_uniforms},
+    },
+};
 
-use crate::{components::*, dson::DsonAsset, pipelines::{binning::*, composite::*, raster::*, shading::*}, resources::*, shader_types::*};
+use crate::{
+    components::*,
+    dson::DsonAsset,
+    pipelines::{binning::*, composite::*, raster::*, shading::*},
+    resources::*,
+    shader_types::*,
+};
 
 const MAX_NUMBER_OF_STRANDS: u32 = 1024 * 1024; // for physics
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
@@ -128,13 +158,13 @@ impl Node for StrandRasterizerNode {
             );
             return Ok(());
         };
-        
+
         // --- Check Prerequisites ---
         let Some(view_binding) = view_uniforms.uniforms.binding() else {
             warn!("ViewUniforms binding not available.");
             return Ok(());
         };
-        
+
         let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
@@ -143,129 +173,156 @@ impl Node for StrandRasterizerNode {
             );
             return Ok(());
         };
-        let Some(clusterable_objects) = global_clusterable_object_meta.gpu_clusterable_objects.binding() else {
+        let Some(clusterable_objects) = global_clusterable_object_meta
+            .gpu_clusterable_objects
+            .binding()
+        else {
             warn!("GlobalClusterableObjectMeta binding not available.");
             return Ok(());
         };
 
         let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
-            warn!("Node running on view {:?} without ViewClusterBindings", view_entity);
+            warn!(
+                "Node running on view {:?} without ViewClusterBindings",
+                view_entity
+            );
             // This might be expected if clustering isn't enabled/used for this view?
             return Ok(()); // Adjust handling if necessary
         };
 
         let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
-             warn!("Node running on view {:?} without ViewShadowBindings", view_entity);
-             // This is expected for views rendering shadow maps, but required for views sampling them.
-             // If your node ONLY samples shadows, this might be an error.
-             // If your node might run on shadow views, handle appropriately.
-             return Ok(()); // Adjust handling if necessary
+            warn!(
+                "Node running on view {:?} without ViewShadowBindings",
+                view_entity
+            );
+            // This is expected for views rendering shadow maps, but required for views sampling them.
+            // If your node ONLY samples shadows, this might be an error.
+            // If your node might run on shadow views, handle appropriately.
+            return Ok(()); // Adjust handling if necessary
         };
-        let Some(cluster_indices_binding) = view_cluster_bindings.clusterable_object_index_lists_binding() else {
-            warn!("ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}", view_entity);
-            return Ok(());
-       };
-
-       let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding() else {
-            warn!("ViewClusterBindings offsets_and_counts_binding not available for view {:?}", view_entity);
-            return Ok(());
-       };
-
-        // Get the dimensions to calculate dispatch size
-        let Some(frustrum) = raster_resources.frustrum_config else {
-            warn!("No frustum size defined.");
+        let Some(cluster_indices_binding) =
+            view_cluster_bindings.clusterable_object_index_lists_binding()
+        else {
+            warn!(
+                "ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}",
+                view_entity
+            );
             return Ok(());
         };
 
-        // Get the strand count for dispatch dimensions
-        let Some(strand_count) = raster_resources.strand_count else {
-            warn!("No strand count set.");
+        let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding()
+        else {
+            warn!(
+                "ViewClusterBindings offsets_and_counts_binding not available for view {:?}",
+                view_entity
+            );
             return Ok(());
         };
 
-        // Binning bind group
-        let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
-            render_device,
-            binning_pipeline,
-            view_binding.clone(),
-            view_uniform_offset,
-            raster_resources,
-            binning_buffers,
-        ) else {
-            warn!("Failed to create strand binning bind group.");
-            return Ok(());
-        };
+        for entity in raster_resources.froxel_config_buffer.keys() {
+            debug!("Dispatching for entity: {:?}", entity);
+            // Get the dimensions to calculate dispatch size
+            let Some(frustrum) = raster_resources.frustrum_config.get(entity) else {
+                warn!("No frustum size defined.");
+                return Ok(());
+            };
 
-        // Shading bind group
-        let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
-            render_device,
-            &shading_pipeline,
-            &shading_resources,
-            &binning_buffers,
-            view_binding.clone(),
-            light_binding,
-            view_uniform_offset,
-            view_light_uniform_offset,
-            cluster_indices_binding,
-            cluster_offsets_binding,
-            clusterable_objects,
-            shadow_samplers,
-        ) else {
-            warn!("Failed to create strand shading bind group.");
-            return Ok(());
-        };
+            // Get the strand count for dispatch dimensions
+            let Some(strand_count) = raster_resources.strand_count else {
+                warn!("No strand count set.");
+                return Ok(());
+            };
 
-        // Raster bind group
-        let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
-            render_device,
-            &raster_pipeline,
-            &raster_resources,
-            &binning_buffers,
-            &shading_resources,
-            view_binding.clone(),
-            &view_uniform_offset
-        ) else {
-            warn!("Failed to create strand raster bind group.");
-            return Ok(());
-        };
+            if *entity != view_entity {
+                // light entity
+            }
 
-        run_binning_pass(
-            render_device,
-            render_context,
-            pipeline_cache,
-            strand_binning_bind_groups,
-            binning_buffers,
-            binning_pipeline,
-            &frustrum,
-            strand_count,
-        );
+            // Binning bind group
+            let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
+                entity,
+                render_device,
+                binning_pipeline,
+                view_binding.clone(),
+                view_uniform_offset,
+                light_binding.clone(),
+                view_light_uniform_offset,
+                raster_resources,
+                binning_buffers,
+            ) else {
+                warn!("Failed to create strand binning bind group.");
+                continue;
+            };
 
-        run_shading_pass(
-            render_context,
-            pipeline_cache,
-            shading_pipeline,
-            shading_resources,
-            &shading_bind_group,
-            &shading_group_offsets,
-        );
-    
-        run_raster_pass(
-            render_context,
-            pipeline_cache,
-            raster_pipeline,
-            &frustrum,
-            raster_resources,
-            shading_resources,
-            &raster_bind_group,
-            &raster_group_offsets,
-        );
+            // Shading bind group
+            let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
+                render_device,
+                &shading_pipeline,
+                &shading_resources,
+                &binning_buffers,
+                &view_binding,
+                &light_binding,
+                view_uniform_offset,
+                view_light_uniform_offset,
+                &cluster_indices_binding,
+                &cluster_offsets_binding,
+                &clusterable_objects,
+                shadow_samplers,
+            ) else {
+                warn!("Failed to create strand shading bind group.");
+                continue;
+            };
+
+            // Raster bind group
+            let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
+                entity,
+                render_device,
+                &raster_pipeline,
+                &raster_resources,
+                &binning_buffers,
+                &shading_resources,
+                view_binding.clone(),
+                &view_uniform_offset,
+            ) else {
+                warn!("Failed to create strand raster bind group.");
+                continue;
+            };
+
+            run_binning_pass(
+                entity,
+                render_device,
+                render_context,
+                pipeline_cache,
+                strand_binning_bind_groups,
+                binning_buffers,
+                binning_pipeline,
+                &frustrum,
+                strand_count,
+            );
+
+            run_shading_pass(
+                render_context,
+                pipeline_cache,
+                shading_pipeline,
+                shading_resources,
+                &shading_bind_group,
+                &shading_group_offsets,
+            );
+
+            run_raster_pass(
+                render_context,
+                pipeline_cache,
+                raster_pipeline,
+                &frustrum,
+                raster_resources,
+                shading_resources,
+                &raster_bind_group,
+                &raster_group_offsets,
+            );
+        }
 
         Ok(())
     }
 }
-
-
-
 
 // main world buffer initialization
 // packs StrandGeometry
@@ -416,15 +473,24 @@ fn use_froxel_buffer(
         let (texture, view) = create_render_target_texture(&device, config);
         raster_resources.output_texture = Some(view);
         // modify the resource
-        raster_resources.froxel_buffer = Some(packed_segments_buffer.clone());
-        raster_resources.froxel_config_buffer = Some(config_buffer);
-        raster_resources.frustrum_config = Some(config.clone());
+        raster_resources
+            .froxel_buffer
+            .insert(entity, packed_segments_buffer.clone());
+        raster_resources
+            .froxel_config_buffer
+            .insert(entity, config_buffer);
+        raster_resources
+            .frustrum_config
+            .insert(entity, config.clone());
 
-        binning_resources.tile_counts_buffer = Some(tile_counts_buffer);
-        binning_resources.tile_offsets_buffer = Some(tile_offsets_buffer);
-        binning_resources.current_tile_write_indices_buffer =
-            Some(current_tile_write_indices_buffer);
-        binning_resources.packed_segments_buffer = Some(packed_segments_buffer);
+        let artifact_buffers = StrandBinningArtifactBuffers {
+            tile_counts_buffer,
+            tile_offsets_buffer,
+            current_tile_write_indices_buffer,
+            packed_segments_buffer,
+        };
+
+        binning_resources.artifacts.insert(entity, artifact_buffers);
 
         debug!("Added froxel buffers to resource");
     }
@@ -470,23 +536,6 @@ fn use_strand_geometry(
             "[{:?}] Vertex storage buffer found: {:?}",
             entity, vertex_storage_buffer.buffer
         );
-        let Some(froxel_buffer) = raster_resources.froxel_buffer.as_ref() else {
-            warn!("Froxel buffer not found");
-            continue;
-        };
-        let Some(output_texture) = raster_resources.output_texture.as_ref() else {
-            warn!("Output texture not found");
-            continue;
-        };
-        let Some(froxel_config_buffer) = raster_resources.froxel_config_buffer.as_ref() else {
-            warn!("Froxel config buffer not found");
-            continue;
-        };
-
-        let Some(tile_counts_buffer) = binning_resources.tile_counts_buffer.as_ref() else {
-            warn!("Tile counts buffer not found");
-            continue;
-        };
 
         binning_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
         binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
