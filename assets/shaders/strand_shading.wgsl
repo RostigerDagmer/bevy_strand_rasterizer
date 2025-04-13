@@ -458,7 +458,7 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 1.0);
+    var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
     // var strand_absorption_color = vec4<f32>(0.6, 0.1, 0.05, 0.5);
     var strand_specular_color = vec4<f32>(0.93, 0.48, 0.375, 2.0);
 

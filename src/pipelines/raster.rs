@@ -1,6 +1,5 @@
 use bevy::{
-    prelude::*,
-    render::{
+    pbr::ViewLightsUniformOffset, prelude::*, render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
@@ -14,7 +13,7 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, utils::HashMap,
+    }, utils::HashMap
 };
 
 use crate::{
@@ -22,7 +21,9 @@ use crate::{
     shader_types::PushConstants,
 };
 
-use super::{binning::StrandBinningBuffers, shading::StrandShadingResources};
+use super::{
+    binning::StrandBinningBuffers, shading::StrandShadingResources, shadows::StrandShadowResources,
+};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -144,6 +145,17 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                // Light Uniform Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::LIGHT_UNIFORM,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::VIEW_UNIFORM,
@@ -163,6 +175,24 @@ impl StrandRasterizerPipeline {
                         access: StorageTextureAccess::ReadOnly,
                         format: TextureFormat::Rgba8Unorm,
                         view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                // Deep Opacity Texture Array
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Deep Opacity Texture View
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -193,7 +223,14 @@ impl FromWorld for StrandRasterizerPipeline {
             label: Some("strand_rasterize_pipeline".into()),
             layout: vec![bind_group_layout.clone()],
             shader: rasterize_shader,
-            shader_defs: cdefs,
+            shader_defs: [
+                cdefs.as_slice(),
+                &[ShaderDefVal::UInt(
+                    "DEEP_OPACITY_TEXTURE_VIEW".into(),
+                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
+                )],
+            ]
+            .concat(),
             push_constant_ranges: vec![PushConstantRange {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
@@ -222,14 +259,28 @@ pub fn create_strand_raster_bind_group(
     resources: &StrandRasterizerResources,
     buffers: &StrandBinningBuffers,
     shading_resources: &StrandShadingResources,
-    view_buffer: BindingResource,
+    shadow_resources: &StrandShadowResources,
+    view_buffer: &BindingResource,
+    light_buffer: &BindingResource,
     view_offsets: &ViewUniformOffset,
+    view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
 
-    let artifacts= buffers.artifacts.get(entity).ok_or(())?;
+    // TODO: we have to bind all maps created for lights.
+    let light_entities = resources
+        .froxel_config_buffer
+        .keys()
+        .find(|k| *k != entity)
+        .ok_or(())?;
+    let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
+    let dom_sampler = shadow_resources
+        .dom_samplers
+        .get(light_entities)
+        .ok_or(())?;
+    let artifacts = buffers.artifacts.get(entity).ok_or(())?;
 
     let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
     let tile_counts_buffer = &artifacts.tile_counts_buffer;
@@ -278,20 +329,32 @@ pub fn create_strand_raster_bind_group(
                     resource: BindingResource::TextureView(output_texture),
                 },
                 BindGroupEntry {
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
+                    resource: view_buffer.clone(),
+                },
+                BindGroupEntry {
                     binding: layouts::rasterizer::FROXEL_CONFIG,
                     resource: froxel_config_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::VIEW_UNIFORM,
-                    resource: view_buffer.clone(),
+                    binding: layouts::rasterizer::LIGHT_UNIFORM,
+                    resource: light_buffer.clone(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::SHADING_BUFFER,
                     resource: BindingResource::TextureView(shading_buffer),
                 },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
+                    resource: BindingResource::Sampler(&dom_sampler),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
+                    resource: BindingResource::TextureView(dom_texture),
+                },
             ],
         ),
-        vec![view_offsets.offset],
+        vec![view_offsets.offset, view_light_uniform_offset.offset],
     ))
 }
 

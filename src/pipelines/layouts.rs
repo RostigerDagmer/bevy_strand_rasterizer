@@ -19,6 +19,7 @@ pub mod rasterizer {
     pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 15;
     pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 16;
     pub const GEO_BUFFER: u32 = 17;
+    pub const DEEP_OPACITY_TEXTURE_VIEW: u32 = 18;
 
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {

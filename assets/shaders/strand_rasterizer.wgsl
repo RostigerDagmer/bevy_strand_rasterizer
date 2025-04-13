@@ -64,6 +64,7 @@ const MAX_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
 @group(0) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
 @group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(0) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
+@group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
@@ -193,7 +194,6 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 
 #ifdef SHADOWS 
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_storage_2d_array<rg32float, write>; // TODO: maybe find a more compact format
-@group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
 @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
 @group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
@@ -220,6 +220,16 @@ fn rasterize_strands(
     let geo = geos[0]; // Assuming only one strand geo for now
     let aabb_znear_zfar = find_znear_zfar(clip_from_world, geo.aabb.min, geo.aabb.max);
 
+    // DEBUG
+    // for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) { 
+    //     let frag_count = tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
+    //     let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
+    //     textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(debug_color.xy, 0.0, 0.0));
+    // }
+    // Debug: Output the tile_count of this tile divided by num_elements
+
+    var opacity_acc = 0.0;
+
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
         let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
@@ -231,7 +241,7 @@ fn rasterize_strands(
         let segment_count_in_froxel = tile_counts_buffer[froxel_idx];
 
         // first component is the depth, second is the opacity
-        var froxel_opacity = vec2<f32>(1e6, 0.0); // Initialize to a large depth and zero opacity
+        var froxel_depth = 1e6; // Initialize to a large depth
 
         // Process all segments within this froxel
         for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
@@ -245,7 +255,7 @@ fn rasterize_strands(
             // Get strand metadata
             let strand_idx = segment_ref.strand_idx;
             if (strand_idx >= arrayLength(&strand_metadata)) { 
-                froxel_opacity = vec2<f32>(0.0, 1.0); // Debug color
+                froxel_depth = 1.0; // Debug color
                 continue;
             } // Safety check
             let strand_meta = strand_metadata[strand_idx];
@@ -262,46 +272,48 @@ fn rasterize_strands(
             let v0_world = vertices[v0_strand_idx];
             let v1_world = vertices[v1_strand_idx];
 
-            // Project to screen space (pixels)
+            // Project to light space (pixels)
             let p0_screen = world_to_screen(v0_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             let p1_screen = world_to_screen(v1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
-            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
-                // let debug_color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Debug color
-                // textureStore(deep_opacity_maps, pixel_coord_int, dz, debug_color);
-                continue;
-             } // Basic culling
+            // if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
+            //     // let debug_color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Debug color
+            //     // textureStore(deep_opacity_maps, pixel_coord_int, dz, debug_color);
+            //     continue;
+            //  } // Basic culling
 
             // Calculate analytical coverage
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
             let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
 
             // blend hair radius from MIN to MAX based on distance to camera
-            let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
+            let r = 1.0; //mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0); // TODO: this needs special scaling for lights.
 
             // Simple linear falloff based on distance
             let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
 
             if (coverage > 0.0) {
                 // Calculate color/alpha contribution of this hair segment fragment
-                // sample the shading buffer (maybe a sampler here, maybe not if we'll use spline interpolation in the rasterizer directly)
+                opacity_acc = opacity_acc + (1.0 - opacity_acc) * coverage * 0.5; // Accumulate opacity TODO: use hair opacity instead of 0.5
                 let depth = mix(p0_screen.z, p1_screen.z, clamp(t, 0.0, 1.0));
-                froxel_opacity = vec2<f32>(min(depth, froxel_opacity.x), froxel_opacity.y + coverage); // Store depth and opacity in a vec2
+                froxel_depth = min(depth, froxel_depth); // Update depth
             }
         } // End loop over segments in froxel
 
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(froxel_opacity, 0.0, 0.0));
+        textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(opacity_acc, froxel_depth, 0.0, 0.0));
         // --- Optional Early Exit ---
-        if (froxel_opacity.y > 0.9999) {
-            break; // Stop Z loop
-        }
-
+        // if (opacity_acc.y > 0.9999) {
+        //     break; // Stop Z loop
+        // }
     }
 }
 
 #else
+
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_VIEW}) var deep_opacity_maps: texture_2d_array<f32>;
 
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(
@@ -330,6 +342,13 @@ fn rasterize_strands(
     
     let geo = geos[0]; // Assuming only one strand geo for now
     let aabb_znear_zfar = find_znear_zfar(view.clip_from_world, geo.aabb.min, geo.aabb.max);
+
+    // light relative data
+    let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
+    let cascade = light.cascades[0]; // TODO: select cascade based on distance
+    let light_aabb_znear_zfar = find_znear_zfar(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let shadow_map_dims = vec2<f32>(textureDimensions(deep_opacity_maps).xy);
+
 
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
@@ -402,7 +421,16 @@ fn rasterize_strands(
                 let shading1 = textureLoad(shading_buffer, vec2<u32>(x1_coord, y_coord));
 
                 let hair_color = mix(shading0, shading1, clamp(t, 0.0, 1.0));
-                let hair_fragment = vec4<f32>(hair_color.xyz, hair_color.w * coverage);
+
+                // transform the fragment into light space
+                let p0_light = world_to_screen(v0_world, cascade.clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
+                let p1_light = world_to_screen(v1_world, cascade.clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
+
+                // Calculate the light space coordinates
+                let fragment_light = mix(p0_light, p1_light, clamp(t, 0.0, 1.0));
+                let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, fragment_light.xy / shadow_map_dims.xy, u32(16.0 * (1.0 - fragment_light.z)), 0.0);
+
+                let hair_fragment = vec4<f32>(hair_color.xyz * (dom_val.x), hair_color.w * coverage);
 
                 // transmittance accumulation
                 froxel_color += hair_fragment;

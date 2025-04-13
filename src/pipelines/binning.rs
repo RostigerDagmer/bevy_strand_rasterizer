@@ -288,7 +288,6 @@ impl FromWorld for StrandBinningPipeline {
                 label: Some("strand_binning_init_placement_idx_pipeline".into()),
                 layout: vec![init_place_layout.clone()], // Use init_place layout
                 shader: binning_shader.clone(),
-                // shader_defs: vec!["STAGE_INIT_PLACE".into()],
                 shader_defs: [cdefs.as_slice(), &["STAGE_INIT_PLACE".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()], // Might not need push constants?
                 entry_point: "init_placement_idx".into(),
@@ -299,7 +298,6 @@ impl FromWorld for StrandBinningPipeline {
             label: Some("strand_binning_place_pipeline".into()),
             layout: vec![place_layout.clone()], // Use place layout
             shader: binning_shader.clone(),
-            // shader_defs: vec!["STAGE_PLACE".into()],
             shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
             entry_point: "place_strands".into(),
@@ -311,7 +309,6 @@ impl FromWorld for StrandBinningPipeline {
                 label: Some("strand_binning_place_pipeline_shadows".into()),
                 layout: vec![place_layout.clone()], // Use place layout
                 shader: binning_shader.clone(),
-                // shader_defs: vec!["STAGE_PLACE".into()],
                 shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into(), "SHADOWS".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()],
                 entry_point: "place_strands".into(),
@@ -594,6 +591,7 @@ pub fn run_binning_pass(
     pipelines: &StrandBinningPipeline,
     froxel_config: &FroxelConfig,
     num_strands_or_segments: u32,
+    is_light_entity: bool,
 ) {
 
     let Some(artifacts) = buffers
@@ -633,7 +631,12 @@ pub fn run_binning_pass(
             label: Some("Strand Count"),
             ..default()
         });
-        let Some(count_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.count_pipeline)
+        let pipeline_id = if is_light_entity {
+            pipelines.count_pipeline_shadows
+        } else {
+            pipelines.count_pipeline
+        };
+        let Some(count_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id)
         else {
             warn!("Count pipeline not found");
             return;
@@ -763,7 +766,12 @@ pub fn run_binning_pass(
             label: Some("Strand Place"),
             ..default()
         });
-        let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.place_pipeline)
+        let pipeline_id = if is_light_entity {
+            pipelines.place_pipeline_shadows
+        } else {
+            pipelines.place_pipeline
+        };
+        let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id)
         else {
             warn!("Place pipeline not found");
             return;

@@ -3,25 +3,31 @@ use bevy::{
     ecs::entity,
     math::bounding::Aabb3d,
     pbr::{
-        ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings
+        ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers,
+        ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings,
     },
     prelude::*,
     render::{
-        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
+        Render, RenderApp, RenderSet,
+        extract_component::ExtractComponentPlugin,
+        render_asset::RenderAssets,
+        render_graph::{
             Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
-        }, render_resource::{
+        },
+        render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        }, renderer::{RenderContext, RenderDevice}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet
+        },
+        renderer::{RenderContext, RenderDevice},
+        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        view::{self, ViewUniform, ViewUniformOffset, ViewUniforms, prepare_view_uniforms},
     },
 };
 
 use crate::{
     components::*,
     dson::DsonAsset,
-    pipelines::{
-        binning::*, composite::*, raster::*, shading::*, shadows::*,
-    },
+    pipelines::{binning::*, composite::*, raster::*, shading::*, shadows::*},
     resources::*,
     shader_types::*,
 };
@@ -307,6 +313,7 @@ impl Node for StrandRasterizerNode {
                     binning_pipeline,
                     &frustrum,
                     strand_count,
+                    true,
                 );
 
                 run_shadow_pass(
@@ -319,7 +326,7 @@ impl Node for StrandRasterizerNode {
                     &shadows_bindgroup,
                     &dynamic_offsets,
                 );
-            }    
+            }
         }
 
         // Get the dimensions to calculate dispatch size
@@ -333,7 +340,7 @@ impl Node for StrandRasterizerNode {
             warn!("No strand count set.");
             return Ok(());
         };
-        
+
         // Binning bind group
         let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
             &view_entity,
@@ -358,8 +365,11 @@ impl Node for StrandRasterizerNode {
             &raster_resources,
             &binning_buffers,
             &shading_resources,
-            view_binding.clone(),
+            &shadow_resources,
+            &view_binding,
+            &light_binding,
             &view_uniform_offset,
+            &view_light_uniform_offset,
         ) else {
             warn!("Failed to create strand raster bind group.");
             return Ok(());
@@ -375,6 +385,7 @@ impl Node for StrandRasterizerNode {
             binning_pipeline,
             &frustrum,
             strand_count,
+            false,
         );
 
         run_raster_pass(
@@ -575,13 +586,18 @@ fn use_deep_opacity_maps(
         if shadow_resources.dom_targets.contains_key(&entity) {
             continue;
         }
-        let (texture, view) = create_strand_shadow_texture(&device, config.screen_width, config.screen_height, config.depth_slices);
+        let (texture, view, sampler) = create_strand_shadow_texture(
+            &device,
+            config.screen_width,
+            config.screen_height,
+            config.depth_slices,
+        );
+        shadow_resources.dom_targets.insert(entity, view.clone());
         shadow_resources
-            .dom_targets
-            .insert(entity, view.clone());
-
+            .dom_samplers
+            .insert(entity, sampler.clone());
         info!("Added deep opacity maps to resource");
-    }   
+    }
 }
 
 // render world buffer retrieval

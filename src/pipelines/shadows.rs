@@ -16,6 +16,7 @@ use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources, sh
 #[derive(Resource, Default)]
 pub struct StrandShadowResources {
     pub dom_targets: HashMap<Entity, TextureView>,
+    pub dom_samplers: HashMap<Entity, Sampler>,
 }
 
 #[derive(Resource)]
@@ -362,7 +363,7 @@ pub fn create_strand_shadow_texture(
     width: u32,
     height: u32,
     slices: u32,
-) -> (Texture, TextureView) {
+) -> (Texture, TextureView, Sampler) {
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("strand_shadow_texture"),
         size: Extent3d {
@@ -390,7 +391,18 @@ pub fn create_strand_shadow_texture(
         
     });
 
-    (texture, texture_view)
+    let sampler = device.create_sampler(&SamplerDescriptor {
+        label: Some("strand_shadow_sampler"),
+        address_mode_u: bevy::render::render_resource::AddressMode::ClampToEdge,
+        address_mode_v: bevy::render::render_resource::AddressMode::ClampToEdge,
+        address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: FilterMode::Linear,
+        ..default()
+    });
+
+    (texture, texture_view, sampler)
 }
 
 pub fn run_shadow_pass(
