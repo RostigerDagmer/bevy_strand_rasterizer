@@ -58,14 +58,14 @@ fn setup(
             screen_height: 2048,
             froxel_size_x: 8,
             froxel_size_y: 8,
-            depth_slices: 16,
+            depth_slices: 32,
         },
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow
         // bounds for better visual quality.
         CascadeShadowConfigBuilder {
             first_cascade_far_bound: 10.0,
-            maximum_distance: 20.0,
+            maximum_distance: 15.0,
             ..default()
         }
         .build(),

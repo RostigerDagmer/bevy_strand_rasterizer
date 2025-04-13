@@ -87,7 +87,6 @@ fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, worl
     for (var i = 0u; i < 8u; i = i + 1u) {
         let clip_pos = clip_from_world * corners[i];
         // For orthographic projections, w will usually be 1.0;
-        // for perspective, do division if needed:
         let view_pos = clip_pos.xyz / clip_pos.w;
         // Update min and max for the z component:
         transformed_z.x = min(transformed_z.x, view_pos.z);
@@ -100,7 +99,7 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     // Transform from world to clip space using the view-projection matrix
     let clip_pos = clip_from_world * position;
 
-    if clip_pos.w <= 0.0 {
+    if clip_pos.w < 0.0 {
         // Handle point behind camera
         return vec3<f32>(-1.0, -1.0, -1.0);
     }

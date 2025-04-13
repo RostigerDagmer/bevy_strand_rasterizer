@@ -414,8 +414,8 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     let sigma_a = 1.0 - hair_color.xyz; // Artist adjustable absorption coefficient
     // let sigma_a = SIGMA_AE * 0.5 + SIGMA_AP * 0.5; // TODO: use hair color to mix between eumelanin and pheomelanin
     let eta = 1.55; // Refractive index of hair
-    let beta = 0.4; // Roughness of hair
-    let alpha = 0.25; // Roughness of hair
+    let beta = 0.5; // Roughness of hair
+    let alpha = 0.35; // Roughness of hair
     let shift = 0.02; // specular shift
 
     let v_long_val = alpha * alpha;
@@ -458,8 +458,8 @@ fn shade_strands(
 
     let light_count = lights.n_directional_lights;
 
-    var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
-    // var strand_absorption_color = vec4<f32>(0.6, 0.1, 0.05, 0.5);
+    // var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
+    var strand_absorption_color = vec4<f32>(0.6, 0.1, 0.05, 0.5);
     var strand_specular_color = vec4<f32>(0.93, 0.48, 0.375, 2.0);
 
     let ambient_factor = 0.05;
@@ -502,7 +502,7 @@ fn shade_strands(
             
             let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color, ao_intensity);
 
-            var c = bcsdf * (light.color.xyz * 0.001); // * dot(V, L);
+            var c = bcsdf * (light.color.xyz * 0.005); // * dot(V, L);
             c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
 
             strand_absorption_color =  vec4<f32>(c.xyz, strand_absorption_color.w);
