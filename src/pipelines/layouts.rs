@@ -18,6 +18,7 @@ pub mod rasterizer {
     pub const CLUSTERABLE_OBJECTS: u32 = 14;
     pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 15;
     pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 16;
+    pub const GEO_BUFFER: u32 = 17;
 
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
@@ -48,6 +49,7 @@ pub mod rasterizer {
                 "DIRECTIONAL_LIGHT_DEPTH_TEXTURE".into(),
                 DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
             ),
+            ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
         ]
     }
 }

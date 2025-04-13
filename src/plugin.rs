@@ -267,6 +267,7 @@ impl Node for StrandRasterizerNode {
                     render_device,
                     shadow_pipeline,
                     shadow_resources,
+                    &raster_resources,
                     binning_buffers,
                     &view_binding,
                     &light_binding,

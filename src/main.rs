@@ -49,7 +49,7 @@ fn setup(
             ..default()
         },
         Transform {
-            translation: Vec3::new(0.0, 2.0, 0.0),
+            translation: Vec3::new(2.0, 6.0, 0.0),
             rotation: Quat::from_rotation_x(-3.141592 / 4.),
             ..default()
         },
@@ -64,8 +64,8 @@ fn setup(
         // As this example has a much smaller world, we can tighten the shadow
         // bounds for better visual quality.
         CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 4.0,
-            maximum_distance: 10.0,
+            first_cascade_far_bound: 10.0,
+            maximum_distance: 20.0,
             ..default()
         }
         .build(),

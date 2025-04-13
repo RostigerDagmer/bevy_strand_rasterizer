@@ -64,6 +64,50 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
+                // Geos buffer (read-only storage buffer)
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::GEO_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Tile Offsets Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Tile Counts Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Froxel Tile Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::VIEW_UNIFORM,
@@ -72,6 +116,17 @@ impl StrandShadowPipeline {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: true,
                         min_binding_size: Some(ViewUniform::min_size()),
+                    },
+                    count: None,
+                },
+                // Froxel Config Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::FROXEL_CONFIG,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -199,6 +254,7 @@ pub fn create_strand_shadow_bind_group(
     device: &RenderDevice,
     pipeline: &StrandShadowPipeline,
     shading_resources: &StrandShadowResources,
+    raster_resources: &StrandRasterizerResources,
     buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -210,11 +266,18 @@ pub fn create_strand_shadow_bind_group(
     shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
 
+    let artifacts= buffers.artifacts.get(entity).ok_or(())?;
     let layout = &pipeline.bind_group_layout;
+    
+    let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
+    let tile_counts_buffer = &artifacts.tile_counts_buffer;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.dom_targets.get(entity).ok_or(())?;
+    let packed_segments = raster_resources.froxel_buffer.get(entity).ok_or(())?;
+    let froxel_config_buffer = raster_resources.froxel_config_buffer.get(entity).ok_or(())?;
+    let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -234,8 +297,28 @@ pub fn create_strand_shadow_bind_group(
                     resource: meta_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
+                    binding: layouts::rasterizer::GEO_BUFFER,
+                    resource: geos_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
+                    resource: tile_offsets_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
+                    resource: tile_counts_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
+                    resource: packed_segments.as_entire_binding(),
+                },
+                BindGroupEntry {
                     binding: layouts::rasterizer::VIEW_UNIFORM,
                     resource: view_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FROXEL_CONFIG,
+                    resource: froxel_config_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::LIGHT_UNIFORM,

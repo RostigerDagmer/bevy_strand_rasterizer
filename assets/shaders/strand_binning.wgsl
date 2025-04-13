@@ -72,7 +72,31 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
     return froxels_x * froxels_y * config.depth_slices;
 }
 
-fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec3<f32> {
+fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec2<f32> {
+    var transformed_z = vec2<f32>(99999.0, -99999.0); // initial min/max placeholders
+    let corners = array<vec4<f32>, 8>(
+        vec4(world_aabb_min, 1.0),
+        vec4(world_aabb_min.x, world_aabb_min.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_max.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_max, 1.0)
+    );
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let clip_pos = clip_from_world * corners[i];
+        // For orthographic projections, w will usually be 1.0;
+        // for perspective, do division if needed:
+        let view_pos = clip_pos.xyz / clip_pos.w;
+        // Update min and max for the z component:
+        transformed_z.x = min(transformed_z.x, view_pos.z);
+        transformed_z.y = max(transformed_z.y, view_pos.z);
+    }
+    return transformed_z;
+}
+
+fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_znear_zfar: vec2<f32>) -> vec3<f32> {
     // Transform from world to clip space using the view-projection matrix
     let clip_pos = clip_from_world * position;
 
@@ -92,17 +116,9 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     let view_pos = clip_from_world * position;
     let view_z = -view_pos.z; // Negate because view space typically has -Z forward
     
-    // Transform AABB min and max to view space and get Z values
-    let aabb_min_view = clip_from_world * vec4<f32>(world_aabb_min, 1.0);
-    let aabb_max_view = clip_from_world * vec4<f32>(world_aabb_max, 1.0);
-    
-    // Get min and max Z values in view space (negate because -Z is forward)
-    let aabb_min_z = -aabb_min_view.z / aabb_min_view.w;
-    let aabb_max_z = -aabb_max_view.z / aabb_max_view.w;
-    
     // Ensure proper ordering (min should be closer to camera)
-    let z_near = min(aabb_min_z, aabb_max_z);
-    let z_far = max(aabb_min_z, aabb_max_z);
+    let z_near = aabb_znear_zfar.x;
+    let z_far = aabb_znear_zfar.y;
     
     // Normalize the depth within the AABB Z range
     let normalized_depth = (view_z - z_near) / max(z_far - z_near, 0.0001);
@@ -297,16 +313,16 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let clip_from_world = view.unjittered_clip_from_world;
     #endif
 
-    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+    let aabb_znear_zfar = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = indices[start_vertex_offset + i];
         if current_vtx_idx >= arrayLength(&vertices) { break; } // Bounds check
 
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
-        // Trace this segment using the *correct* traversal logic
         trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
         prev_screen_pos = current_screen_pos;
     }
@@ -812,12 +828,13 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let clip_from_world = view.unjittered_clip_from_world;
     #endif
 
-    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+    let aabb_znear_zfar = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+    var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
         let current_vtx_idx = indices[start_vertex_offset + i];
         let current_vtx = vertices[current_vtx_idx];
-        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb.min, aabb.max);
+        let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
         // Define SegmentRef - How is segment_start_idx used?
         // Option 1: Index into index buffer

@@ -2,7 +2,15 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 
+const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
+
 // --- Structures ---
+struct Aabb {
+    min: vec3<f32>,
+    pad1: f32,
+    max: vec3<f32>,
+    pad2: f32,
+} // align(16)
 
 struct FroxelConfig { // Ensure this matches Rust exactly
     screen_width: u32,
@@ -16,6 +24,14 @@ struct SegmentRef { // Ensure this matches Rust if defined there
     strand_idx: u32,
     segment_start_idx: u32, // Index into index buffer
 }
+
+struct StrandGeo {
+    strand_count: u32,
+    max_segments_in_strand: u32,
+    pad1: u32,
+    pad2: u32,
+    aabb: Aabb,
+} // align(16)
 
 struct StrandMeta { // Ensure this matches Rust exactly
     count: u32,     // Number of vertices in strand
@@ -40,6 +56,7 @@ const MAX_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
 @group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(#{GEO_BUFFER}) var<storage, read> geos: array<StrandGeo>;
 @group(0) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read> tile_offsets_buffer: array<u32>;
 @group(0) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
 @group(0) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
@@ -70,25 +87,59 @@ fn heatmap_precise(value: f32) -> vec3<f32> {
     }
 }
 
-fn world_to_screen(position: vec3<f32>, view: View, screen_width: f32, screen_height: f32) -> vec3<f32> {
-    // Transform from world to clip space using the view-projection matrix
-    let clip_pos = view.unjittered_clip_from_world * vec4<f32>(position, 1.0);
-
-    if (clip_pos.w <= 0.0) {
-        // Handle point behind camera
-        return vec3<f32>(-1.0, -1.0, -1.0); // Indicate invalid screen pos
+fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec2<f32> {
+    var transformed_z = vec2<f32>(99999.0, -99999.0); // initial min/max placeholders
+    let corners = array<vec4<f32>, 8>(
+        vec4(world_aabb_min, 1.0),
+        vec4(world_aabb_min.x, world_aabb_min.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_max.z, 1.0),
+        vec4(world_aabb_max.x, world_aabb_max.y, world_aabb_min.z, 1.0),
+        vec4(world_aabb_max, 1.0)
+    );
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let clip_pos = clip_from_world * corners[i];
+        // For orthographic projections, w will usually be 1.0;
+        // for perspective, do division if needed:
+        let view_pos = clip_pos.xyz / clip_pos.w;
+        // Update min and max for the z component:
+        transformed_z.x = min(transformed_z.x, view_pos.z);
+        transformed_z.y = max(transformed_z.y, view_pos.z);
     }
+    return transformed_z;
+}
 
+fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_znear_zfar: vec2<f32>) -> vec3<f32> {
+    // Transform from world to clip space using the view-projection matrix
+    let clip_pos = clip_from_world * position;
+
+    if clip_pos.w <= 0.0 {
+        // Handle point behind camera
+        return vec3<f32>(-1.0, -1.0, -1.0);
+    }
+    
     // Perform perspective division to get NDC coordinates
     let ndc = clip_pos.xyz / clip_pos.w;
-
-    // Convert NDC to screen coordinates (pixel centers)
-    // NDC is [-1,1] for x,y and [0,1] for z in Vulkan/WebGPU convention
+    
+    // Convert NDC to screen coordinates for X and Y
     let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
     let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
-
-    // Depth is already in [0,1] range
-    let screen_z = ndc.z;
+    
+    // Extract view-space Z of the position
+    let view_pos = clip_from_world * position;
+    let view_z = -view_pos.z; // Negate because view space typically has -Z forward
+    
+    // Ensure proper ordering (min should be closer to camera)
+    let z_near = aabb_znear_zfar.x;
+    let z_far = aabb_znear_zfar.y;
+    
+    // Normalize the depth within the AABB Z range
+    let normalized_depth = (view_z - z_near) / max(z_far - z_near, 0.0001);
+    
+    // Clamp to ensure we stay in the [0,1] range even if point is outside AABB
+    let screen_z = clamp(normalized_depth, 0.0, 1.0);
 
     return vec3<f32>(screen_x, screen_y, screen_z);
 }
@@ -156,8 +207,93 @@ fn rasterize_strands(
     @builtin(local_invocation_id) local_id: vec3u           // Represents pixel within tile (lx, ly, 0)
 ) {
     let pixel_coord_int = vec2<i32>(global_id.xy);
-    for (var i: u32; i < 8; i = i+1) {
-        textureStore(deep_opacity_maps, pixel_coord_int, i, vec4<f32>(0.6, 0.0, 0.0, 0.0)); // Debug color
+
+    let pixel_center = vec2<f32>(global_id.xy) + vec2<f32>(0.5, 0.5); // Center of the pixel
+
+    let tile_coord_x = workgroup_id.x;
+    let tile_coord_y = workgroup_id.y;
+
+    let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
+    let cascade = light.cascades[0]; // TODO: select cascade based on distance
+    let clip_from_world = cascade.clip_from_world;
+
+    let geo = geos[0]; // Assuming only one strand geo for now
+    let aabb_znear_zfar = find_znear_zfar(clip_from_world, geo.aabb.min, geo.aabb.max);
+
+    for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
+
+        let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
+
+        // bounds check
+        if (froxel_idx >= arrayLength(&tile_offsets_buffer)) { continue; }
+
+        let start_segment_offset = tile_offsets_buffer[froxel_idx];
+        let segment_count_in_froxel = tile_counts_buffer[froxel_idx];
+
+        // first component is the depth, second is the opacity
+        var froxel_opacity = vec2<f32>(1e6, 0.0); // Initialize to a large depth and zero opacity
+
+        // Process all segments within this froxel
+        for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
+            if s >= 300 { break; } // Limit number of segments processed per froxel
+            let packed_buffer_idx = start_segment_offset + s;
+             // Safety check packed buffer bounds
+            if (packed_buffer_idx >= arrayLength(&packed_segments_buffer)) { continue; }
+
+            let segment_ref = packed_segments_buffer[packed_buffer_idx];
+
+            // Get strand metadata
+            let strand_idx = segment_ref.strand_idx;
+            if (strand_idx >= arrayLength(&strand_metadata)) { 
+                froxel_opacity = vec2<f32>(0.0, 1.0); // Debug color
+                continue;
+            } // Safety check
+            let strand_meta = strand_metadata[strand_idx];
+
+            let v0_idx = segment_ref.segment_start_idx;
+            let v1_idx = segment_ref.segment_start_idx + 1u;
+            if ((v1_idx - strand_meta.offset) >= strand_meta.count - 1) { continue; } // Safety check
+
+            // Get segment vertex indices within the strand
+            let v0_strand_idx = indices[v0_idx];
+            let v1_strand_idx = indices[v1_idx];
+
+            // Get world-space vertex positions
+            let v0_world = vertices[v0_strand_idx];
+            let v1_world = vertices[v1_strand_idx];
+
+            // Project to screen space (pixels)
+            let p0_screen = world_to_screen(v0_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p1_screen = world_to_screen(v1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+
+            // Skip if segment is fully behind camera or off-screen after projection
+            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
+
+            // Calculate analytical coverage
+            let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
+            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
+
+            // blend hair radius from MIN to MAX based on distance to camera
+            let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
+
+            // Simple linear falloff based on distance
+            let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
+
+            if (coverage > 0.0) {
+                // Calculate color/alpha contribution of this hair segment fragment
+                // sample the shading buffer (maybe a sampler here, maybe not if we'll use spline interpolation in the rasterizer directly)
+                let depth = mix(p0_screen.z, p1_screen.z, clamp(t, 0.0, 1.0));
+                froxel_opacity = vec2<f32>(min(depth, froxel_opacity.x), froxel_opacity.y + coverage); // Store depth and opacity in a vec2
+            }
+        } // End loop over segments in froxel
+
+        // If pixel becomes nearly opaque, we can stop processing deeper Z slices
+        textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(froxel_opacity, 0.0, 0.0));
+        // --- Optional Early Exit ---
+        if (froxel_opacity.y > 0.9999) {
+            break; // Stop Z loop
+        }
+
     }
 }
 
@@ -187,6 +323,9 @@ fn rasterize_strands(
         // Debug: Output the tile_count of this tile divided by num_elements
         let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
     # endif // DEBUG
+    
+    let geo = geos[0]; // Assuming only one strand geo for now
+    let aabb_znear_zfar = find_znear_zfar(view.clip_from_world, geo.aabb.min, geo.aabb.max);
 
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
@@ -226,12 +365,12 @@ fn rasterize_strands(
             let v1_strand_idx = indices[v1_idx];
 
             // Get world-space vertex positions
-            let v0_world = vertices[v0_strand_idx].xyz;
-            let v1_world = vertices[v1_strand_idx].xyz;
+            let v0_world = vertices[v0_strand_idx];
+            let v1_world = vertices[v1_strand_idx];
 
             // Project to screen space (pixels)
-            let p0_screen = world_to_screen(v0_world, view, f32(config.screen_width), f32(config.screen_height));
-            let p1_screen = world_to_screen(v1_world, view, f32(config.screen_width), f32(config.screen_height));
+            let p0_screen = world_to_screen(v0_world, view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p1_screen = world_to_screen(v1_world, view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
             if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
