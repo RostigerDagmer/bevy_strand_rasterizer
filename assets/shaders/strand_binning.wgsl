@@ -114,7 +114,7 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     
     // Extract view-space Z of the position
     let view_pos = clip_from_world * position;
-    let view_z = -view_pos.z; // Negate because view space typically has -Z forward
+    let view_z = view_pos.z / view_pos.w;
     
     // Ensure proper ordering (min should be closer to camera)
     let z_near = aabb_znear_zfar.x;
@@ -126,7 +126,7 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     // Clamp to ensure we stay in the [0,1] range even if point is outside AABB
     let screen_z = clamp(normalized_depth, 0.0, 1.0);
 
-    return vec3<f32>(screen_x, screen_y, screen_z);
+    return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
 }
 
 // --- STAGE_COUNT ---

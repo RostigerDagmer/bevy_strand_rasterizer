@@ -129,7 +129,7 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     
     // Extract view-space Z of the position
     let view_pos = clip_from_world * position;
-    let view_z = -view_pos.z; // Negate because view space typically has -Z forward
+    let view_z = view_pos.z / view_pos.w;
     
     // Ensure proper ordering (min should be closer to camera)
     let z_near = aabb_znear_zfar.x;
@@ -141,7 +141,7 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     // Clamp to ensure we stay in the [0,1] range even if point is outside AABB
     let screen_z = clamp(normalized_depth, 0.0, 1.0);
 
-    return vec3<f32>(screen_x, screen_y, screen_z);
+    return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
 }
 
 fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
@@ -267,7 +267,11 @@ fn rasterize_strands(
             let p1_screen = world_to_screen(v1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
-            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
+            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
+                // let debug_color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Debug color
+                // textureStore(deep_opacity_maps, pixel_coord_int, dz, debug_color);
+                continue;
+             } // Basic culling
 
             // Calculate analytical coverage
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);

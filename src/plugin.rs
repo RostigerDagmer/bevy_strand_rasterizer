@@ -418,10 +418,12 @@ fn set_strand_geometry(
         let geometry = &geometry_library[0];
         // Extract vertices
         // TODO: time this. Could also be done in a compute shader
-        let aabb = Aabb3d::from_point_cloud(
+        let mut aabb = Aabb3d::from_point_cloud(
             Isometry3d::IDENTITY,
             geometry.vertices.values.iter().cloned(),
         ); // todo: pass transform
+        aabb.min *= 0.0254; // TODO: pass transform to shaders
+        aabb.max *= 0.0254; // TODO: pass transform to shaders
         let vertices: Vec<[f32; 4]> = geometry
             .vertices
             .values
