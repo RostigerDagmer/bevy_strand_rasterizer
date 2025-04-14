@@ -11,15 +11,17 @@ pub mod rasterizer {
     pub const FROXEL_CONFIG: u32 = 7;
     pub const VIEW_UNIFORM: u32 = 8;
     pub const SHADING_BUFFER: u32 = 9;
-    pub const DEEP_OPACITY_TEXTURE_ARRAY: u32 = 10;
-    pub const LIGHT_UNIFORM: u32 = 11;
-    pub const CLUSTER_INDICES: u32 = 12;
-    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 13;
-    pub const CLUSTERABLE_OBJECTS: u32 = 14;
-    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 15;
-    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 16;
-    pub const GEO_BUFFER: u32 = 17;
-    pub const DEEP_OPACITY_TEXTURE_VIEW: u32 = 18;
+    pub const DEEP_OPACITY_TEXTURE_O: u32 = 10;
+    pub const DEEP_OPACITY_TEXTURE_D: u32 = 11;
+    pub const LIGHT_UNIFORM: u32 = 12;
+    pub const CLUSTER_INDICES: u32 = 13;
+    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 14;
+    pub const CLUSTERABLE_OBJECTS: u32 = 15;
+    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 16;
+    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 17;
+    pub const GEO_BUFFER: u32 = 18;
+    pub const DEEP_OPACITY_TEXTURE_O_VIEW: u32 = 19;
+    pub const DEEP_OPACITY_TEXTURE_D_VIEW: u32 = 20;
 
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
@@ -34,7 +36,8 @@ pub mod rasterizer {
             ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("SHADING_BUFFER".into(), SHADING_BUFFER),
-            ShaderDefVal::UInt("DEEP_OPACITY_TEXTURE_ARRAY".into(), DEEP_OPACITY_TEXTURE_ARRAY),
+            ShaderDefVal::UInt("DEEP_OPACITY_TEXTURE_O".into(), DEEP_OPACITY_TEXTURE_O),
+            ShaderDefVal::UInt("DEEP_OPACITY_TEXTURE_D".into(), DEEP_OPACITY_TEXTURE_D),
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
             ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
             ShaderDefVal::UInt(

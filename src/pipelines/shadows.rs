@@ -1,22 +1,41 @@
 use bevy::{
-    pbr::{ShadowSamplers, ViewLightsUniformOffset}, prelude::*, render::{
+    pbr::{ShadowSamplers, ViewLightsUniformOffset},
+    prelude::*,
+    render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
+            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
+            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, utils::HashMap
+    },
+    utils::HashMap,
 };
 
-use crate::{components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
+use crate::{
+    components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT,
+    shader_types::PushConstants,
+};
 
-use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources, shading::StrandShadingResources};
+use super::{
+    binning::StrandBinningBuffers, raster::StrandRasterizerResources,
+    shading::StrandShadingResources,
+};
 
+const NUM_DOM_SLICES: u32 = 12;
 
 #[derive(Resource, Default)]
 pub struct StrandShadowResources {
-    pub dom_targets: HashMap<Entity, TextureView>,
-    pub dom_samplers: HashMap<Entity, Sampler>,
+    pub dom_targets: HashMap<Entity, (TextureView, TextureView)>,
+    pub dom_samplers: HashMap<Entity, (Sampler, Sampler)>,
 }
 
 #[derive(Resource)]
@@ -142,8 +161,8 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
-                 // Cluster Indices
-                 BindGroupLayoutEntry {
+                // Cluster Indices
+                BindGroupLayoutEntry {
                     binding: layouts::rasterizer::CLUSTER_INDICES,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
@@ -191,12 +210,22 @@ impl StrandShadowPipeline {
                 },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::Rg16Float,
+                        format: TextureFormat::R16Float,
                         view_dimension: TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::R16Float,
+                        view_dimension: TextureViewDimension::D2,
                     },
                     count: None,
                 },
@@ -228,7 +257,14 @@ impl FromWorld for StrandShadowPipeline {
             label: Some("strand_shadow_rasterize_pipeline".into()),
             layout: vec![bind_group_layout.clone()],
             shader: rasterize_shader,
-            shader_defs: [cdefs.as_slice(), &["SHADOWS".into()]].concat(),
+            shader_defs: [
+                cdefs.as_slice(),
+                &[
+                    "SHADOWS".into(),
+                    ShaderDefVal::UInt("NUM_DOM_SLICES".into(), NUM_DOM_SLICES),
+                ],
+            ]
+            .concat(),
             push_constant_ranges: vec![PushConstantRange {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
@@ -249,7 +285,6 @@ impl FromWorld for StrandShadowPipeline {
     }
 }
 
-
 pub fn create_strand_shadow_bind_group(
     entity: &Entity,
     device: &RenderDevice,
@@ -266,10 +301,9 @@ pub fn create_strand_shadow_bind_group(
     clusterable_objects: &BindingResource,
     shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
-
-    let artifacts= buffers.artifacts.get(entity).ok_or(())?;
+    let artifacts = buffers.artifacts.get(entity).ok_or(())?;
     let layout = &pipeline.bind_group_layout;
-    
+
     let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
     let tile_counts_buffer = &artifacts.tile_counts_buffer;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
@@ -277,7 +311,10 @@ pub fn create_strand_shadow_bind_group(
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.dom_targets.get(entity).ok_or(())?;
     let packed_segments = raster_resources.froxel_buffer.get(entity).ok_or(())?;
-    let froxel_config_buffer = raster_resources.froxel_config_buffer.get(entity).ok_or(())?;
+    let froxel_config_buffer = raster_resources
+        .froxel_config_buffer
+        .get(entity)
+        .ok_or(())?;
     let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
 
     Ok((
@@ -344,12 +381,18 @@ pub fn create_strand_shadow_bind_group(
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(&shadows.directional_light_comparison_sampler),
+                    resource: BindingResource::Sampler(
+                        &shadows.directional_light_comparison_sampler,
+                    ),
                 },
                 // Render target array
                 BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
-                    resource: BindingResource::TextureView(output_texture),
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
+                    resource: BindingResource::TextureView(&output_texture.0),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                    resource: BindingResource::TextureView(&output_texture.1),
                 },
             ],
         ),
@@ -357,42 +400,44 @@ pub fn create_strand_shadow_bind_group(
     ))
 }
 
-
-pub fn create_strand_shadow_texture(
+pub fn create_strand_shadow_textures(
     device: &RenderDevice,
     width: u32,
     height: u32,
     slices: u32,
-) -> (Texture, TextureView, Sampler) {
-    let texture = device.create_texture(&TextureDescriptor {
-        label: Some("strand_shadow_texture"),
+) -> (
+    (Texture, TextureView, Sampler),
+    (Texture, TextureView, Sampler),
+) {
+    let depth_texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_shadow_depth_texture"),
         size: Extent3d {
             width,
             height,
-            depth_or_array_layers: slices, // we store two slices per layer (rg) and (ba)
+            depth_or_array_layers: 1, // we store two slices per layer (rg) and (ba)
         },
         mip_level_count: 1,
         sample_count: 1,
-        dimension: TextureDimension::D3,
-        format: TextureFormat::Rg16Float, // TODO: compact
-        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-        view_formats: &[TextureFormat::Rg16Float],
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R16Float, // TODO: compact
+        usage: TextureUsages::STORAGE_BINDING
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST,
+        view_formats: &[TextureFormat::R16Float],
     });
 
-    let texture_view = texture.create_view(&TextureViewDescriptor {
-        label: Some("strand_shadow_texture_view"),
-        format: Some(TextureFormat::Rg16Float),
-        dimension: Some(TextureViewDimension::D3),
+    let depth_texture_view = depth_texture.create_view(&TextureViewDescriptor {
+        label: Some("strand_shadow_depth_view"),
+        format: Some(TextureFormat::R16Float),
+        dimension: Some(TextureViewDimension::D2),
         aspect: TextureAspect::All,
         base_mip_level: 0,
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: None,
-        
     });
-
-    let sampler = device.create_sampler(&SamplerDescriptor {
-        label: Some("strand_shadow_sampler"),
+    let depth_sampler = device.create_sampler(&SamplerDescriptor {
+        label: Some("strand_shadow_depth_sampler"),
         address_mode_u: bevy::render::render_resource::AddressMode::ClampToEdge,
         address_mode_v: bevy::render::render_resource::AddressMode::ClampToEdge,
         address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
@@ -402,7 +447,49 @@ pub fn create_strand_shadow_texture(
         ..default()
     });
 
-    (texture, texture_view, sampler)
+    let opacity_texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_shadow_opacity_layers"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: NUM_DOM_SLICES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::R16Float,
+        usage: TextureUsages::STORAGE_BINDING
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST,
+        view_formats: &[TextureFormat::R16Float],
+    });
+
+    let opacity_texture_view = opacity_texture.create_view(&TextureViewDescriptor {
+        label: Some("strand_shadow_opacity_view"),
+        format: Some(TextureFormat::R16Float),
+        dimension: Some(TextureViewDimension::D3),
+        aspect: TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: None,
+    });
+
+    let opacity_sampler = device.create_sampler(&SamplerDescriptor {
+        label: Some("strand_shadow_layers_sampler"),
+        address_mode_u: bevy::render::render_resource::AddressMode::ClampToEdge,
+        address_mode_v: bevy::render::render_resource::AddressMode::ClampToEdge,
+        address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: FilterMode::Nearest,
+        ..default()
+    });
+
+    (
+        (opacity_texture, opacity_texture_view, opacity_sampler),
+        (depth_texture, depth_texture_view, depth_sampler),
+    )
 }
 
 pub fn run_shadow_pass(
@@ -422,16 +509,14 @@ pub fn run_shadow_pass(
             label: Some("Strand Rasterize"),
             ..default()
         });
-        let Some(raster_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipeline.shadow_pipeline)
+        let Some(raster_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.shadow_pipeline)
         else {
             warn!("Shadow pipeline not found");
             return;
         };
         pass.set_pipeline(raster_pipeline);
         pass.set_bind_group(
-            0,
-            bind_group, // Assume correctly populated bind group
+            0, bind_group, // Assume correctly populated bind group
             offsets,
         );
         // Set push constants if needed

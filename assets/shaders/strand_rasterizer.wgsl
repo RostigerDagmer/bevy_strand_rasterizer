@@ -190,17 +190,37 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(final_rgb, final_alpha);
 }
 
+fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
+    // Get strand metadata
+    let strand_idx = segment_ref.strand_idx;
+    let strand_meta = strand_metadata[strand_idx];
+
+    let v0_idx = segment_ref.segment_start_idx;
+    let v1_idx = segment_ref.segment_start_idx + 1u;
+    if ((v1_idx - strand_meta.offset) >= strand_meta.count - 1) { return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0)); } // Safety check
+
+    // Get segment vertex indices within the strand
+    let v0_strand_idx = indices[v0_idx];
+    let v1_strand_idx = indices[v1_idx];
+
+    // Get world-space vertex positions
+    return mat2x4<f32>(vertices[v0_strand_idx], vertices[v1_strand_idx]);
+}
+
 // #define DEBUG
+const GAMMA: f32 = 0.4; // distribution coefficient for DOM slices.
 
 #ifdef SHADOWS 
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_storage_3d<rg16float, write>; // TODO: maybe find a more compact format
+const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_maps: texture_storage_3d<r16float, write>; // TODO: maybe find a more compact format
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_maps_depth: texture_storage_2d<r16float, write>; // TODO: maybe find a more compact format
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
 @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
 @group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
 @group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 
-@compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
+@compute @workgroup_size(8, 8, 1)
 fn rasterize_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,    // Represents the pixel coordinate (x, y, 0)
     @builtin(workgroup_id) workgroup_id: vec3u,             // Represents the tile index (tx, ty, 0)
@@ -221,16 +241,35 @@ fn rasterize_strands(
     let aabb_znear_zfar = find_znear_zfar(clip_from_world, geo.aabb.min, geo.aabb.max);
 
     // DEBUG
-    // for (var dz: u32 = 0; dz < u32(config.depth_slices); dz = dz + 1) { 
-    //     let frag_count = tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
-    //     let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
-    //     textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(debug_color.xy, 0.0, 0.0));
-    // }
-    // Debug: Output the tile_count of this tile divided by num_elements
+    var frag_counts: u32 = 0;
+    var slice_start: u32 = 0;
+    var slice_end: u32 = 0;
+    let depth_slices = config.depth_slices;
 
-    var opacity_acc = 0.0;
+    for (var dz: u32 = 0; dz < u32(depth_slices); dz = dz + 1) { 
+        let frag_count = tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
+        frag_counts += frag_count;
+        if (frag_count > 0u && slice_start == 0u) {
+            slice_start = dz;
+        }
+        if (frag_count > 0u && dz > slice_end) {
+            slice_end = dz + 1;
+        }
+        // let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
+        // textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(debug_color.xy, 0.0, 0.0));
+    }
+    if frag_counts == 0u {
+        // No segments in this tile, early exit
+        return;
+    }
     
-    for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
+    // slice buffer (constant size array)
+    var slice_opacities: array<f32, DOM_SLICES>; // TODO: fit this to be compiled with number of slices
+    var min_pixel_depth = f32(slice_start) / f32(depth_slices); // Decent first estimate
+    var max_pixel_depth = clamp(f32(slice_end) / f32(depth_slices), 0.0, 1.0); // Decent first estimate
+    var pixel_depth = min_pixel_depth;
+    
+    for (var dz: u32 = slice_start; dz < depth_slices; dz = dz + 1) {
         
         let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
         
@@ -240,48 +279,29 @@ fn rasterize_strands(
         let start_segment_offset = tile_offsets_buffer[froxel_idx];
         let segment_count_in_froxel = tile_counts_buffer[froxel_idx];
         
-        // first component is the depth, second is the opacity
-        var pixel_depth = 0.0; // Initialize to a large depth
-
         // Process all segments within this froxel
         for (var s: u32 = 0; s < segment_count_in_froxel; s = s + 1u) {
-            // if s >= 500 { break; } // Limit number of segments processed per froxel
+            
             let packed_buffer_idx = start_segment_offset + s;
-             // Safety check packed buffer bounds
-            if (packed_buffer_idx >= arrayLength(&packed_segments_buffer)) { continue; }
+            if (packed_buffer_idx >= arrayLength(&packed_segments_buffer)) {
+                continue;
+            }
 
             let segment_ref = packed_segments_buffer[packed_buffer_idx];
-
-            // Get strand metadata
-            let strand_idx = segment_ref.strand_idx;
-            if (strand_idx >= arrayLength(&strand_metadata)) { 
-                // pixel_depth = 1.0; // Debug color
+            if (segment_ref.strand_idx >= arrayLength(&strand_metadata)) { 
                 continue;
             } // Safety check
-            let strand_meta = strand_metadata[strand_idx];
 
-            let v0_idx = segment_ref.segment_start_idx;
-            let v1_idx = segment_ref.segment_start_idx + 1u;
-            if ((v1_idx - strand_meta.offset) >= strand_meta.count - 1) { continue; } // Safety check
-
-            // Get segment vertex indices within the strand
-            let v0_strand_idx = indices[v0_idx];
-            let v1_strand_idx = indices[v1_idx];
-
-            // Get world-space vertex positions
-            let v0_world = vertices[v0_strand_idx];
-            let v1_world = vertices[v1_strand_idx];
+            let verts = get_segment_vertices(segment_ref);
 
             // Project to light space (pixels)
-            let p0_screen = world_to_screen(v0_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p1_screen = world_to_screen(v1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p0_screen = world_to_screen(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p1_screen = world_to_screen(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
-            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
-                // let debug_color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Debug color
-                // textureStore(deep_opacity_maps, pixel_coord_int, dz, debug_color);
-                continue;
-             } // Basic culling
+            // if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
+            //     continue;
+            // } // Basic culling
 
             // Calculate analytical coverage
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
@@ -295,31 +315,35 @@ fn rasterize_strands(
 
             if (coverage > 0.0) {
                 // Calculate color/alpha contribution of this hair segment fragment
-                opacity_acc = opacity_acc + (1.0 - opacity_acc) * coverage * 0.5; // Accumulate opacity TODO: use hair opacity instead of 0.5
                 let depth = mix(p0_screen.z, p1_screen.z, clamp(t, 0.0, 1.0));
-                if (pixel_depth != 0.0) {
-                    pixel_depth = min(depth, pixel_depth); // Update depth
-                } else {
+                if (pixel_depth == min_pixel_depth) {
                     pixel_depth = depth; // Initialize depth
+                } else {
+                    pixel_depth = min(pixel_depth, depth); // Update depth
                 }
-            }
-            if (opacity_acc > 0.9995) {
-                break; // Stop processing this segment
+                let slice_idx = u32(pow(clamp(depth - pixel_depth, 0.0, 1.0), GAMMA) * f32(DOM_SLICES));
+                var slice_opacity = slice_opacities[slice_idx];
+                slice_opacity = slice_opacity + (1.0 - slice_opacity) * coverage * 0.5; // Accumulate opacity TODO: use hair opacity instead of 0.5
+                slice_opacities[slice_idx] = slice_opacity;
             }
         } // End loop over segments in froxel
+    }
+    textureStore(deep_opacity_maps_depth, pixel_coord_int, vec4<f32>(pixel_depth, 0.0, 0.0, 0.0));
 
-        textureStore(deep_opacity_maps, vec3<i32>(pixel_coord_int, i32(dz)), vec4<f32>(opacity_acc, pixel_depth, 0.0, 0.0));
-        // --- Optional Early Exit ---
-        // if (opacity_acc.y > 0.9999) {
-        //     break; // Stop Z loop
-        // }
+    var accum_opacity = 0.0;
+    for (var i = 0u; i < DOM_SLICES; i = i + 1) {
+        let opacity = slice_opacities[i];
+        accum_opacity = accum_opacity + (1.0 - accum_opacity) * opacity;
+        textureStore(deep_opacity_maps, vec3<i32>(pixel_coord_int, i32(i)), vec4<f32>(accum_opacity, 0.0, 0.0, 0.0));
     }
 }
 
 #else
 
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_VIEW}) var deep_opacity_maps: texture_3d<f32>;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_depth_sampler: sampler; // TODO: maybe find a more compact format
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O_VIEW}) var deep_opacity_maps: texture_3d<f32>;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D_VIEW}) var deep_opacity_depth_maps: texture_2d<f32>;
 
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(
@@ -432,25 +456,14 @@ fn rasterize_strands(
 
                 let fragment_world_pos = mix(v0_world, v1_world, clamp(t, 0.0, 1.0));
                 let fragment_light = world_to_screen(fragment_world_pos, cascade.clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
-                let layer_idx = u32(f32(depth_texture_slices) * fragment_light.z);
                 var sample_coord = vec2<f32>(fragment_light.xy / shadow_map_dims.xy);
-
-                // sample_coord.y = 1.0 - sample_coord.y; 
-                var occlusion = 0.0; 
-                if (layer_idx > 0u && layer_idx < depth_texture_slices) {
-                    let dom_val_prev = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, (f32(layer_idx) - 1.0) / f32(depth_texture_slices)), 0.0);
-                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, f32(layer_idx) / f32(depth_texture_slices)), 0.0);
-                    let stop = f32(layer_idx + 1u) * (1.0 / f32(depth_texture_slices)); 
-                    let denominator = max(stop - dom_val.y, 1e-6);
-                    let occlusion_scale = (fragment_light.z - dom_val.y) / denominator;
-                    occlusion = mix(dom_val_prev.x, dom_val.x, clamp(occlusion_scale, 0.0, 1.0));
-                } else if (layer_idx == 0u) {
-                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, 0.0), 0.0);
-                    if (fragment_light.z < dom_val.y) {
-                        occlusion = dom_val.x;
-                    } else {
-                        occlusion = 0.0; 
-                    }
+                
+                let dom_depth = textureSampleLevel(deep_opacity_depth_maps, deep_opacity_depth_sampler, sample_coord, 0.0);
+                let min_depth = dom_depth.x;
+                var occlusion = 0.0;
+                if fragment_light.z > min_depth {
+                    let d = pow((fragment_light.z - min_depth), GAMMA);
+                    occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
                 }
                 
                 // let hair_fragment = vec4<f32>(hair_color.xyz * (1.0 - occlusion), hair_color.w * coverage);

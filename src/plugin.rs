@@ -586,16 +586,16 @@ fn use_deep_opacity_maps(
         if shadow_resources.dom_targets.contains_key(&entity) {
             continue;
         }
-        let (texture, view, sampler) = create_strand_shadow_texture(
+        let ((opacity_texture, opacity_view, opacity_sampler), (depth_texture, depth_view, depth_sampler)) = create_strand_shadow_textures(
             &device,
             config.screen_width,
             config.screen_height,
             config.depth_slices,
         );
-        shadow_resources.dom_targets.insert(entity, view.clone());
+        shadow_resources.dom_targets.insert(entity, (opacity_view, depth_view));
         shadow_resources
             .dom_samplers
-            .insert(entity, sampler.clone());
+            .insert(entity, (opacity_sampler, depth_sampler));
         info!("Added deep opacity maps to resource");
     }
 }

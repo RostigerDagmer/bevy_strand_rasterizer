@@ -178,20 +178,38 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Deep Opacity Texture Array
+                // Deep Opacity Texture Array (Opacity layers)
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
                 // Deep Opacity Texture View
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Deep Opacity Texture Array (Depth)
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Deep Opacity Texture View
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -226,9 +244,14 @@ impl FromWorld for StrandRasterizerPipeline {
             shader_defs: [
                 cdefs.as_slice(),
                 &[ShaderDefVal::UInt(
-                    "DEEP_OPACITY_TEXTURE_VIEW".into(),
-                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
-                )],
+                    "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
+                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                ),
+                ShaderDefVal::UInt(
+                    "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
+                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                )
+                ],
             ]
             .concat(),
             push_constant_ranges: vec![PushConstantRange {
@@ -345,12 +368,20 @@ pub fn create_strand_raster_bind_group(
                     resource: BindingResource::TextureView(shading_buffer),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_ARRAY,
-                    resource: BindingResource::Sampler(&dom_sampler),
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
+                    resource: BindingResource::Sampler(&dom_sampler.0),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_VIEW,
-                    resource: BindingResource::TextureView(dom_texture),
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                    resource: BindingResource::TextureView(&dom_texture.0),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                    resource: BindingResource::Sampler(&dom_sampler.1),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    resource: BindingResource::TextureView(&dom_texture.1),
                 },
             ],
         ),
