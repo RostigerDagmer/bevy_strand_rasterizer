@@ -208,7 +208,7 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
 }
 
 // #define DEBUG
-const GAMMA: f32 = 0.4; // distribution coefficient for DOM slices.
+const GAMMA: f32 = 0.3; // distribution coefficient for DOM slices.
 
 #ifdef SHADOWS 
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
@@ -268,7 +268,7 @@ fn rasterize_strands(
     var min_pixel_depth = f32(slice_start) / f32(depth_slices); // Decent first estimate
     var max_pixel_depth = clamp(f32(slice_end) / f32(depth_slices), 0.0, 1.0); // Decent first estimate
     var pixel_depth = min_pixel_depth;
-    
+
     for (var dz: u32 = slice_start; dz < depth_slices; dz = dz + 1) {
         
         let froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
@@ -323,7 +323,7 @@ fn rasterize_strands(
                 }
                 let slice_idx = u32(pow(clamp(depth - pixel_depth, 0.0, 1.0), GAMMA) * f32(DOM_SLICES));
                 var slice_opacity = slice_opacities[slice_idx];
-                slice_opacity = slice_opacity + (1.0 - slice_opacity) * coverage * 0.5; // Accumulate opacity TODO: use hair opacity instead of 0.5
+                slice_opacity = slice_opacity + (1.0 - slice_opacity) * coverage * 0.2; // Accumulate opacity TODO: use hair opacity instead of 0.5
                 slice_opacities[slice_idx] = slice_opacity;
             }
         } // End loop over segments in froxel
