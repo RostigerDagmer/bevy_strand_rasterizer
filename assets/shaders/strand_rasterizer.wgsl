@@ -357,6 +357,7 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    let ambient_factor = 0.02;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -466,8 +467,9 @@ fn rasterize_strands(
                     occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
                 }
                 
-                // let hair_fragment = vec4<f32>(hair_color.xyz * (1.0 - occlusion), hair_color.w * coverage);
-                let hair_fragment = vec4<f32>(vec3<f32>(0.7, 0.7, 0.7) * (1.0 - occlusion), hair_color.w * coverage);
+                var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * ambient_factor;
+                let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
+                // let hair_fragment = vec4<f32>(vec3<f32>(0.7, 0.7, 0.7) * (1.0 - occlusion), hair_color.w * coverage);
 
                 // transmittance accumulation
                 froxel_color += hair_fragment;
