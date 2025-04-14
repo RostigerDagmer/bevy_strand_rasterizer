@@ -191,7 +191,7 @@ impl StrandRasterizerPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2Array,
+                        view_dimension: TextureViewDimension::D3,
                         multisampled: false,
                     },
                     count: None,

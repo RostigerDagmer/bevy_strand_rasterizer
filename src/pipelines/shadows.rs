@@ -195,8 +195,8 @@ impl StrandShadowPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::Rg32Float, // TODO: compact
-                        view_dimension: TextureViewDimension::D2Array,
+                        format: TextureFormat::Rg16Float,
+                        view_dimension: TextureViewDimension::D3,
                     },
                     count: None,
                 },
@@ -369,25 +369,25 @@ pub fn create_strand_shadow_texture(
         size: Extent3d {
             width,
             height,
-            depth_or_array_layers: slices,
+            depth_or_array_layers: slices, // we store two slices per layer (rg) and (ba)
         },
         mip_level_count: 1,
         sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rg32Float, // TODO: compact
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rg16Float, // TODO: compact
         usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-        view_formats: &[TextureFormat::Rg32Float],
+        view_formats: &[TextureFormat::Rg16Float],
     });
 
     let texture_view = texture.create_view(&TextureViewDescriptor {
         label: Some("strand_shadow_texture_view"),
-        format: Some(TextureFormat::Rg32Float),
-        dimension: Some(TextureViewDimension::D2Array),
+        format: Some(TextureFormat::Rg16Float),
+        dimension: Some(TextureViewDimension::D3),
         aspect: TextureAspect::All,
         base_mip_level: 0,
         mip_level_count: None,
         base_array_layer: 0,
-        array_layer_count: Some(slices),
+        array_layer_count: None,
         
     });
 
@@ -398,7 +398,7 @@ pub fn create_strand_shadow_texture(
         address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Linear,
+        mipmap_filter: FilterMode::Nearest,
         ..default()
     });
 

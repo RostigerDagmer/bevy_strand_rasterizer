@@ -193,7 +193,7 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
 // #define DEBUG
 
 #ifdef SHADOWS 
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_storage_2d_array<rg32float, write>; // TODO: maybe find a more compact format
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_maps: texture_storage_3d<rg16float, write>; // TODO: maybe find a more compact format
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
 @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
 @group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
@@ -308,7 +308,7 @@ fn rasterize_strands(
             }
         } // End loop over segments in froxel
 
-        textureStore(deep_opacity_maps, pixel_coord_int, dz, vec4<f32>(opacity_acc, pixel_depth, 0.0, 0.0));
+        textureStore(deep_opacity_maps, vec3<i32>(pixel_coord_int, i32(dz)), vec4<f32>(opacity_acc, pixel_depth, 0.0, 0.0));
         // --- Optional Early Exit ---
         // if (opacity_acc.y > 0.9999) {
         //     break; // Stop Z loop
@@ -319,7 +319,7 @@ fn rasterize_strands(
 #else
 
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_ARRAY}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_VIEW}) var deep_opacity_maps: texture_2d_array<f32>;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_VIEW}) var deep_opacity_maps: texture_3d<f32>;
 
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(
@@ -353,8 +353,9 @@ fn rasterize_strands(
     let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
     let cascade = light.cascades[0]; // TODO: select cascade based on distance
     let light_aabb_znear_zfar = find_znear_zfar(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
-    let shadow_map_dims = vec2<f32>(textureDimensions(deep_opacity_maps).xy);
-    let depth_texture_slices = textureNumLayers(deep_opacity_maps);
+    let texture_dims = textureDimensions(deep_opacity_maps);
+    let shadow_map_dims = vec2<f32>(texture_dims.xy);
+    let depth_texture_slices = texture_dims.z;
 
 
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
@@ -436,15 +437,15 @@ fn rasterize_strands(
 
                 // sample_coord.y = 1.0 - sample_coord.y; 
                 var occlusion = 0.0; 
-                if (layer_idx > 0u && layer_idx < textureNumLayers(deep_opacity_maps)) {
-                    let dom_val_prev = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, sample_coord, layer_idx - 1u, 0.0);
-                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, sample_coord, layer_idx, 0.0);
+                if (layer_idx > 0u && layer_idx < depth_texture_slices) {
+                    let dom_val_prev = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, (f32(layer_idx) - 1.0) / f32(depth_texture_slices)), 0.0);
+                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, f32(layer_idx) / f32(depth_texture_slices)), 0.0);
                     let stop = f32(layer_idx + 1u) * (1.0 / f32(depth_texture_slices)); 
                     let denominator = max(stop - dom_val.y, 1e-6);
                     let occlusion_scale = (fragment_light.z - dom_val.y) / denominator;
                     occlusion = mix(dom_val_prev.x, dom_val.x, clamp(occlusion_scale, 0.0, 1.0));
                 } else if (layer_idx == 0u) {
-                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, sample_coord, 0u, 0.0);
+                    let dom_val = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, 0.0), 0.0);
                     if (fragment_light.z < dom_val.y) {
                         occlusion = dom_val.x;
                     } else {
@@ -452,8 +453,8 @@ fn rasterize_strands(
                     }
                 }
                 
-                let hair_fragment = vec4<f32>(hair_color.xyz * (1.0 - occlusion), hair_color.w * coverage);
-                // let hair_fragment = vec4<f32>(vec3<f32>(0.7, 0.7, 0.7) * (1.0 - occlusion), hair_color.w * coverage);
+                // let hair_fragment = vec4<f32>(hair_color.xyz * (1.0 - occlusion), hair_color.w * coverage);
+                let hair_fragment = vec4<f32>(vec3<f32>(0.7, 0.7, 0.7) * (1.0 - occlusion), hair_color.w * coverage);
 
                 // transmittance accumulation
                 froxel_color += hair_fragment;
