@@ -21,20 +21,21 @@ fn setup(
     let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
     commands.spawn((
         StrandAsset { handle },
-        StrandMaterial {
-            // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.5),
-            // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
-            absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.3),
-            specular_color: Vec4::new(0.69, 0.6, 0.42, 1.0),
-            ambient_factor: 0.15,
-            ao_factor: 0.1,
-            eta: 1.55,   // index of refraction
-            beta: 0.55,   // higher order path roughness
-            alpha: 0.3, // first order path roughness
-            shift: 0.01, // specular shift
-            pad1: 0,
-            pad2: 0,
-        },
+        // StrandMaterial {
+        //     // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.5),
+        //     // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
+        //     absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.3),
+        //     specular_color: Vec4::new(0.69, 0.6, 0.42, 1.0),
+        //     ambient_factor: 0.15,
+        //     ao_factor: 0.1,
+        //     eta: 1.55,   // index of refraction
+        //     beta: 0.55,   // higher order path roughness
+        //     alpha: 0.3, // first order path roughness
+        //     shift: 0.01, // specular shift
+        //     pad1: 0,
+        //     pad2: 0,
+        // },
+        StrandMaterial::default(),
     ));
 
     commands.spawn((

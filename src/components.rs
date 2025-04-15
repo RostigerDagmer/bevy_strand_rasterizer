@@ -42,7 +42,7 @@ pub struct StrandMaterial {
 impl Default for StrandMaterial {
     fn default() -> Self {
         Self {
-            absorption_color: Vec4::new(0.7, 0.7, 0.7, 1.0),
+            absorption_color: Vec4::new(0.7, 0.7, 0.7, 0.4),
             specular_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             ambient_factor: 0.05,
             ao_factor: 0.1,

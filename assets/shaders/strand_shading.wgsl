@@ -498,7 +498,6 @@ fn shade_strands(
             let light: types::DirectionalLight = lights.directional_lights[j];
             let light_flags = light.flags;
             let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
-            
             let bcsdf = marschner(vertex, L, V, U, material);
 
             var c = bcsdf * (light.color.xyz * 0.005); // * dot(V, L);

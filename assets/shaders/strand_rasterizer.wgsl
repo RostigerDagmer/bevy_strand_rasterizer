@@ -469,10 +469,8 @@ fn rasterize_strands(
                 
                 var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * ambient_factor;
                 let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
-                // let hair_fragment = vec4<f32>(vec3<f32>(0.7, 0.7, 0.7) * (1.0 - occlusion), hair_color.w * coverage);
-
                 // transmittance accumulation
-                froxel_color += hair_fragment;
+                froxel_color = blend_over(froxel_color, hair_fragment);
             }
             if (froxel_color.a > 0.9995) {
                 break; // Stop processing this segment
