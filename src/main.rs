@@ -84,6 +84,17 @@ fn debug_print_geo(query: Query<&StrandAsset>, assets: Res<Assets<DsonAsset>>) {
     }
 }
 
+fn debug_print_camera_distance_to_aabb(query: Query<&StrandGeometry>, camera: Query<(&Camera, &Transform)>) {
+    for strand_geo in query.iter() {
+        let aabb = strand_geo.aabb;
+        let aabb_center = aabb.max - aabb.min;
+        for (c, transform) in camera.iter() {
+            info!("Distance to camera: {:?}", aabb_center.distance(transform.translation.into()));
+        }
+    }
+
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -94,5 +105,6 @@ fn main() {
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
         // .add_systems(Update, debug_print_geo)
+        .add_systems(Update, debug_print_camera_distance_to_aabb)
         .run();
 }

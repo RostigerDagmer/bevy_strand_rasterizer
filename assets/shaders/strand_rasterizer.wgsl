@@ -323,7 +323,7 @@ fn rasterize_strands(
                 }
                 let slice_idx = u32(pow(clamp(depth - pixel_depth, 0.0, 1.0), GAMMA) * f32(DOM_SLICES));
                 var slice_opacity = slice_opacities[slice_idx];
-                slice_opacity = slice_opacity + (1.0 - slice_opacity) * coverage * 0.2; // Accumulate opacity TODO: use hair opacity instead of 0.5
+                slice_opacity = slice_opacity + (1.0 - slice_opacity) * coverage * 0.1; // Accumulate opacity TODO: use hair opacity instead of 0.5
                 slice_opacities[slice_idx] = slice_opacity;
             }
         } // End loop over segments in froxel

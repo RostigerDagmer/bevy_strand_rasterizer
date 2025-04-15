@@ -5,6 +5,8 @@
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
+const CULL_MAX_DIST: f32 = 60.0;
+const CULL_MIN_DIST: f32 = 2.0;
 
 // --- Structures ---
 
@@ -72,8 +74,11 @@ fn get_num_tiles(config: FroxelConfig) -> u32 {
     return froxels_x * froxels_y * config.depth_slices;
 }
 
-fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> vec2<f32> {
-    var transformed_z = vec2<f32>(99999.0, -99999.0); // initial min/max placeholders
+fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> mat2x3<f32> {
+    
+    var min_clip = vec3<f32>(999999.0);
+    var max_clip = vec3<f32>(-999999.0);
+
     let corners = array<vec4<f32>, 8>(
         vec4(world_aabb_min, 1.0),
         vec4(world_aabb_min.x, world_aabb_min.y, world_aabb_max.z, 1.0),
@@ -89,10 +94,10 @@ fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, worl
         // For orthographic projections, w will usually be 1.0;
         let view_pos = clip_pos.xyz / clip_pos.w;
         // Update min and max for the z component:
-        transformed_z.x = min(transformed_z.x, view_pos.z);
-        transformed_z.y = max(transformed_z.y, view_pos.z);
+        min_clip = min(min_clip, view_pos);
+        max_clip = max(max_clip, view_pos);
     }
-    return transformed_z;
+    return mat2x3(min_clip, max_clip);
 }
 
 fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_znear_zfar: vec2<f32>) -> vec3<f32> {
@@ -126,6 +131,21 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     let screen_z = clamp(normalized_depth, 0.0, 1.0);
 
     return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
+}
+
+fn wang_hash(seed: u32) -> u32 {
+    var x = seed;
+    x = (x ^ 61u) ^ (x >> 16u);
+    x = x + (x << 3u);
+    x = x ^ (x >> 4u);
+    x = x * 0x27d4eb2du;
+    x = x ^ (x >> 15u);
+    return x;
+}
+
+fn hash_to_unit_float(x: u32) -> f32 {
+    // Divide by 2^32 to get a float in [0.0, 1.0)
+    return f32(x) / 4294967296.0;
 }
 
 // --- STAGE_COUNT ---
@@ -291,6 +311,37 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     if strand_idx >= num_strands {
         return;
     }
+    let aabb = geos[0].aabb;
+    let aabb_center = aabb.max - aabb.min;
+    let strand_hash = wang_hash(strand_idx);
+    let sample_threshold = hash_to_unit_float(strand_hash);
+    
+    #ifdef SHADOWS
+        let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
+        let cascade = light.cascades[0]; // TODO: select cascade based on distance
+        let clip_from_world = cascade.clip_from_world;
+        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
+        let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
+        let texel_coverage = coverage / cascade.texel_size;
+        let area = texel_coverage.x * texel_coverage.y;
+        let coverage_ratio = area / f32(config.screen_width * config.screen_height);
+        let boost_factor = 2.0;
+        let lod_threshold = clamp(1.0 - coverage_ratio * boost_factor, 0.0, 1.0);
+        if sample_threshold <= lod_threshold {
+            return;
+        }
+    #else
+        let clip_from_world = view.unjittered_clip_from_world;
+        // culling
+        let distance = length(view.world_position - aabb_center);
+        let norm_distance = distance / CULL_MAX_DIST;
+        if sample_threshold <= norm_distance {
+            return;
+        }
+        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
+    #endif
 
     let strand_meta = strand_metadata[strand_idx];
     let num_vertices_in_strand = strand_meta.count;
@@ -299,20 +350,8 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     if num_vertices_in_strand < 2u {
         return;
     }
-    // TODO: use Pushconstant for geo_id
-    let aabb = geos[0].aabb;
-    // Process segments for this strand
+
     var prev_vtx = vertices[indices[start_vertex_offset]];
-
-    #ifdef SHADOWS
-        let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
-        let cascade = light.cascades[0]; // TODO: select cascade based on distance
-        let clip_from_world = cascade.clip_from_world;
-    #else
-        let clip_from_world = view.unjittered_clip_from_world;
-    #endif
-
-    let aabb_znear_zfar = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
     var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
@@ -806,28 +845,47 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     if strand_idx >= num_strands {
         return;
     }
-
-    let strand_meta = strand_metadata[strand_idx];
-    let num_vertices_in_strand = strand_meta.count;
-    let start_vertex_offset = strand_meta.offset;
-
-    if num_vertices_in_strand < 2u {
-        return;
-    }
-    // let aabb = geos[pc.geo_id].aabb; // TODO: pc modification
     let aabb = geos[0].aabb;
-    var prev_vtx = vertices[indices[start_vertex_offset]];
-
-
+    let aabb_center = aabb.max - aabb.min;
+    let strand_hash = wang_hash(strand_idx);
+    let sample_threshold = hash_to_unit_float(strand_hash);
+    
     #ifdef SHADOWS
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
+        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
+        let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
+        let texel_coverage = coverage / cascade.texel_size;
+        let area = texel_coverage.x * texel_coverage.y;
+        let coverage_ratio = area / f32(config.screen_width * config.screen_height);
+        let boost_factor = 2.0;
+        let lod_threshold = clamp(1.0 - coverage_ratio * boost_factor, 0.0, 1.0);
+        if sample_threshold <= lod_threshold {
+            return;
+        }
     #else
         let clip_from_world = view.unjittered_clip_from_world;
+        // culling
+        let distance = length(view.world_position - aabb_center);
+        let norm_distance = distance / CULL_MAX_DIST;
+        if sample_threshold <= norm_distance {
+            return;
+        }
+        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
     #endif
 
-    let aabb_znear_zfar = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+    let strand_meta = strand_metadata[strand_idx];
+    let num_vertices_in_strand = strand_meta.count;
+    let start_vertex_offset = strand_meta.offset; // Offset into vertices buffer
+
+    if num_vertices_in_strand < 2u {
+        return;
+    }
+
+    var prev_vtx = vertices[indices[start_vertex_offset]];
     var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
     for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
