@@ -5,8 +5,9 @@
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const CULL_MAX_DIST: f32 = 60.0;
-const CULL_MIN_DIST: f32 = 2.0;
+const CULL_MAX_DIST: f32 = 90.0;
+const CULL_MIN_DIST: f32 = 4.0;
+const SHADOW_MAP_BOOST_FACTOR: f32 = 10.0;
 
 // --- Structures ---
 
@@ -146,6 +147,26 @@ fn wang_hash(seed: u32) -> u32 {
 fn hash_to_unit_float(x: u32) -> f32 {
     // Divide by 2^32 to get a float in [0.0, 1.0)
     return f32(x) / 4294967296.0;
+}
+
+fn stochastic_cull_camera(view: View, aabb: Aabb, sample_threshold: f32) -> bool {
+    let aabb_center = aabb.max - aabb.min;
+    let distance = length(view.world_position - aabb_center);
+    let norm_distance = max((distance - CULL_MIN_DIST) + 0.0001, 0.0001) / CULL_MAX_DIST;
+    if sample_threshold <= pow(norm_distance, 0.3) {
+        return true;
+    }
+    return false;
+}
+
+fn stochastic_cull_light(aabb_clip: mat2x3<f32>, sample_threshold: f32) -> bool {
+    let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
+    let area = coverage.x * coverage.y;
+    let lod_threshold = clamp((sqrt(area) * SHADOW_MAP_BOOST_FACTOR), 0.0, 1.0);
+    if sample_threshold > lod_threshold {
+        return true;
+    }
+    return false;
 }
 
 // --- STAGE_COUNT ---
@@ -321,22 +342,15 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
         let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
-        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
-        let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
-        let texel_coverage = coverage / cascade.texel_size;
-        let area = texel_coverage.x * texel_coverage.y;
-        let coverage_ratio = area / f32(config.screen_width * config.screen_height);
-        let boost_factor = 2.0;
-        let lod_threshold = clamp(1.0 - coverage_ratio * boost_factor, 0.0, 1.0);
-        if sample_threshold <= lod_threshold {
+        // culling
+        if stochastic_cull_light(aabb_clip, sample_threshold) {
             return;
         }
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
     #else
         let clip_from_world = view.unjittered_clip_from_world;
         // culling
-        let distance = length(view.world_position - aabb_center);
-        let norm_distance = distance / CULL_MAX_DIST;
-        if sample_threshold <= norm_distance {
+        if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
         let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
@@ -846,7 +860,6 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let aabb = geos[0].aabb;
-    let aabb_center = aabb.max - aabb.min;
     let strand_hash = wang_hash(strand_idx);
     let sample_threshold = hash_to_unit_float(strand_hash);
     
@@ -855,22 +868,15 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
         let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
-        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
-        let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
-        let texel_coverage = coverage / cascade.texel_size;
-        let area = texel_coverage.x * texel_coverage.y;
-        let coverage_ratio = area / f32(config.screen_width * config.screen_height);
-        let boost_factor = 2.0;
-        let lod_threshold = clamp(1.0 - coverage_ratio * boost_factor, 0.0, 1.0);
-        if sample_threshold <= lod_threshold {
+        // culling
+        if stochastic_cull_light(aabb_clip, sample_threshold) {
             return;
         }
+        let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
     #else
         let clip_from_world = view.unjittered_clip_from_world;
         // culling
-        let distance = length(view.world_position - aabb_center);
-        let norm_distance = distance / CULL_MAX_DIST;
-        if sample_threshold <= norm_distance {
+        if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
         let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);

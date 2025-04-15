@@ -84,12 +84,21 @@ fn debug_print_geo(query: Query<&StrandAsset>, assets: Res<Assets<DsonAsset>>) {
     }
 }
 
+const CULL_MIN_DIST: f32 = 4.0; // TODO: set this to the distance of the farthest object
+const CULL_MAX_DIST: f32 = 100.0; // TODO: set this to the distance of the closest object
+
+fn percent_culled(distance: f32) -> f32 {
+    let norm_distance = (distance - CULL_MIN_DIST) / CULL_MAX_DIST;
+    norm_distance.powf(0.5)
+}
+
 fn debug_print_camera_distance_to_aabb(query: Query<&StrandGeometry>, camera: Query<(&Camera, &Transform)>) {
     for strand_geo in query.iter() {
         let aabb = strand_geo.aabb;
         let aabb_center = aabb.max - aabb.min;
         for (c, transform) in camera.iter() {
-            info!("Distance to camera: {:?}", aabb_center.distance(transform.translation.into()));
+            let dist = aabb_center.distance(transform.translation.into());
+            info!("Distance to camera: {:?} -> percent after cull: {:?}", dist, percent_culled(dist));
         }
     }
 
@@ -105,6 +114,6 @@ fn main() {
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
         // .add_systems(Update, debug_print_geo)
-        .add_systems(Update, debug_print_camera_distance_to_aabb)
+        // .add_systems(Update, debug_print_camera_distance_to_aabb)
         .run();
 }
