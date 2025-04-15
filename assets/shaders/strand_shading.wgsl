@@ -30,6 +30,20 @@ struct PushConstants { // Ensure this matches Rust and range covers all fields
     // Add other needed constants
 }
 
+struct StrandMaterial {
+    absorption_color: vec4<f32>,
+    specular_color: vec4<f32>,
+    ambient_factor: f32,
+    ao_factor: f32,
+    eta: f32,
+    beta: f32,
+    alpha: f32,
+    shift: f32,
+    pad1: u32,
+    pad2: u32,
+}
+
+
 var<push_constant> pc: PushConstants;
 
 const PI = 3.14159265359;
@@ -37,7 +51,7 @@ const PI_HALF = PI / 2.0;
 const SQRT_2_PI = sqrt(2.0 * PI);
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
-const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
+const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE; // TODO: shaderdef
 
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
@@ -50,6 +64,7 @@ const WORKGROUP_SIZE: u32 = 64; // TODO: shaderdef
 @group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(#{MATERIAL_BUFFER}) var<storage, read> materials: array<StrandMaterial>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -161,12 +176,6 @@ fn bessel_first_approx(x: f32, steps: u32) -> f32 {
 const SIGMA_AE = vec3<f32>(0.419, 0.697, 1.37);
 // σa,p = {0.187,0.4,1.05} // Pheomelanin absorption
 const SIGMA_AP = vec3<f32>(0.187, 0.4, 1.05);
-
-const BETA = 0.4;
-const BETA_SQR = BETA * BETA;
-const BETA_P = 0.3;
-const BETA_P_SQR = BETA_P * BETA_P;
-
 
 const PATH_COUNT = 3u;
 const QUAD_COUNT = 10u;
@@ -398,7 +407,7 @@ fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val:
     return total_reflectance;
 }
 
-fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, hair_color: vec4<f32>, specular_color: vec4<f32>, ao_intensity: f32) -> vec3<f32> {
+fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, material: StrandMaterial) -> vec3<f32> {
 
     let u = direction;
     
@@ -410,18 +419,12 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     let view_projected = normalize(view_normal - dot(view_normal, u) * u);
 
     let phi = signed_angle_between(light_projected, view_projected, u);
+    let sigma_a = 1.0 - material.absorption_color.xyz; // Artist adjustable absorption coefficient
 
-    let sigma_a = 1.0 - hair_color.xyz; // Artist adjustable absorption coefficient
-    // let sigma_a = SIGMA_AE * 0.5 + SIGMA_AP * 0.5; // TODO: use hair color to mix between eumelanin and pheomelanin
-    let eta = 1.55; // Refractive index of hair
-    let beta = 0.5; // Roughness of hair
-    let alpha = 0.35; // Roughness of hair
-    let shift = 0.02; // specular shift
+    let v_long_val = material.alpha * material.alpha;
+    let v_azim_val = material.beta * material.beta;
 
-    let v_long_val = alpha * alpha;
-    let v_azim_val = beta * beta;
-
-    let bcsdf = weta_strand_bsdf(theta_i, phi, theta_r, phi, eta, sigma_a, v_long_val, v_azim_val, shift, specular_color);
+    let bcsdf = weta_strand_bsdf(theta_i, phi, theta_r, phi, material.eta, sigma_a, v_long_val, v_azim_val, material.shift, material.specular_color);
     return bcsdf;
 
     // Debug
@@ -432,7 +435,6 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     // return Np(0u, phi, theta_i, theta_r, eta, sigma_a, v_long_val, sqrt(v_azim_val)) + Np(1u, phi, theta_i, theta_r, eta, sigma_a, v_long_val, sqrt(v_azim_val)); // TODO: remove this debug line
 
 }
-
 
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
@@ -459,11 +461,8 @@ fn shade_strands(
     let light_count = lights.n_directional_lights;
 
     // var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
-    var strand_absorption_color = vec4<f32>(0.6, 0.1, 0.05, 0.5);
-    var strand_specular_color = vec4<f32>(0.93, 0.48, 0.375, 2.0);
-
-    let ambient_factor = 0.05;
-    let ao_factor = 0.3;
+    var material = materials[0]; // TODO: use either strand metadata or strandgeometry for material lookup.
+    var accum_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) { // in case we have more segments than workgroup size
         let segment_offset = segment_id + i;
@@ -500,18 +499,18 @@ fn shade_strands(
             let light_flags = light.flags;
             let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
             
-            let bcsdf = marschner(vertex, L, V, U, strand_absorption_color, strand_specular_color, ao_intensity);
+            let bcsdf = marschner(vertex, L, V, U, material);
 
             var c = bcsdf * (light.color.xyz * 0.005); // * dot(V, L);
-            c = mix(c, strand_absorption_color.xyz * ambient_factor + (lights.ambient_color.xyz / 255.0) * ambient_factor, ambient_factor); // ambient TODO: ambient lighting
+            c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor); // ambient TODO: ambient lighting
 
-            strand_absorption_color =  vec4<f32>(c.xyz, strand_absorption_color.w);
+            accum_color += vec4<f32>(c.xyz, material.absorption_color.w);
 
         }
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;
         let y_coord = out_row;
         let x_coord = out_col * (pc.workgroup_offset + 1) + segment_offset; // remember that workgroup_offset is abused for column width in this context
-        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), strand_absorption_color);
+        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), accum_color);
     }
 }

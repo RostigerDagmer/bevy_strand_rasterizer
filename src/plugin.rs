@@ -406,12 +406,12 @@ impl Node for StrandRasterizerNode {
 // main world buffer initialization
 // packs StrandGeometry
 fn set_strand_geometry(
-    query: Query<(Entity, &StrandAsset), Without<StrandGeometry>>,
+    query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
     assets: Res<Assets<DsonAsset>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut commands: Commands,
 ) {
-    for (entity, strand_asset) in query.iter() {
+    for (entity, strand_asset, material) in query.iter() {
         let Some(asset) = assets.get(&strand_asset.handle) else {
             continue;
         };
@@ -501,16 +501,19 @@ fn set_strand_geometry(
         let index_buffer = ShaderStorageBuffer::from(strand_indices);
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
         let geo_buffer = ShaderStorageBuffer::from(geos_data);
+        let material_buffer = ShaderStorageBuffer::from(vec![material]);
         // debug!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
         let geo_buffer_handle = storage_buffers.add(geo_buffer);
+        let material_buffer_handle = storage_buffers.add(material_buffer);
 
         commands.entity(entity).insert(StrandGeometry {
             vertices: vertex_buffer_handle,
             indices: index_buffer_handle,
             meta: meta_buffer_handle,
             geos: geo_buffer_handle,
+            materials: material_buffer_handle,
             strand_count: polyline_list.values.len() as u32,
             max_segments_in_strand,
             aabb,
@@ -635,6 +638,10 @@ fn use_strand_geometry(
             warn!("Geo storage buffer not found for entity: {:?}", entity);
             continue;
         };
+        let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
+            warn!("Material storage buffer not found for entity: {:?}", entity);
+            continue;
+        };
 
         debug!(
             "[{:?}] Vertex storage buffer found: {:?}",
@@ -654,6 +661,7 @@ fn use_strand_geometry(
         );
         shading_resources.output_texture = Some(shading_buffer_view);
         shading_resources.strand_count = Some(geometry.strand_count);
+        shading_resources.materials = Some(material_buffer.buffer.clone());
         shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);
 
         debug!("Created bind group for strand rasterizer");

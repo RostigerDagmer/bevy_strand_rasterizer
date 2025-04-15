@@ -107,6 +107,7 @@ pub mod shading {
     pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 8;
     pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 9;
     pub const OUTPUT_TEXTURE: u32 = 10;
+    pub const MATERIAL_BUFFER: u32 = 11;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -130,6 +131,7 @@ pub mod shading {
                 DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
             ),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
+            ShaderDefVal::UInt("MATERIAL_BUFFER".into(), MATERIAL_BUFFER),
         ]
     }
 }

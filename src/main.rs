@@ -7,10 +7,10 @@ mod components;
 use components::*;
 mod resources;
 use plugin::StrandRasterizerPlugin;
+mod perf;
 mod pipelines;
 mod plugin;
 mod shader_types;
-mod perf;
 
 fn setup(
     mut commands: Commands,
@@ -19,7 +19,23 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
-    commands.spawn((StrandAsset { handle }));
+    commands.spawn((
+        StrandAsset { handle },
+        StrandMaterial {
+            // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.5),
+            // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
+            absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.3),
+            specular_color: Vec4::new(0.69, 0.6, 0.42, 1.0),
+            ambient_factor: 0.15,
+            ao_factor: 0.1,
+            eta: 1.55,   // index of refraction
+            beta: 0.55,   // higher order path roughness
+            alpha: 0.3, // first order path roughness
+            shift: 0.01, // specular shift
+            pad1: 0,
+            pad2: 0,
+        },
+    ));
 
     commands.spawn((
         FroxelConfig::default(),
@@ -53,7 +69,8 @@ fn setup(
             rotation: Quat::from_rotation_x(-3.141592 / 4.),
             ..default()
         },
-        FroxelConfig { // TODO: move into plugin
+        FroxelConfig {
+            // TODO: move into plugin
             screen_width: 2048, // shadow map size in this context
             screen_height: 2048,
             froxel_size_x: 8,
@@ -92,16 +109,22 @@ fn percent_culled(distance: f32) -> f32 {
     norm_distance.powf(0.5)
 }
 
-fn debug_print_camera_distance_to_aabb(query: Query<&StrandGeometry>, camera: Query<(&Camera, &Transform)>) {
+fn debug_print_camera_distance_to_aabb(
+    query: Query<&StrandGeometry>,
+    camera: Query<(&Camera, &Transform)>,
+) {
     for strand_geo in query.iter() {
         let aabb = strand_geo.aabb;
         let aabb_center = aabb.max - aabb.min;
         for (c, transform) in camera.iter() {
             let dist = aabb_center.distance(transform.translation.into());
-            info!("Distance to camera: {:?} -> percent after cull: {:?}", dist, percent_culled(dist));
+            info!(
+                "Distance to camera: {:?} -> percent after cull: {:?}",
+                dist,
+                percent_culled(dist)
+            );
         }
     }
-
 }
 
 fn main() {

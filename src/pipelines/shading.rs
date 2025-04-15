@@ -13,10 +13,12 @@ use crate::{pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushCo
 use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources};
 
 const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
+const SHADING_WORKGROUP_SIZE: u32 = 64; // for shading
 
 #[derive(Resource, Default)]
 pub struct StrandShadingResources {
     pub output_texture: Option<TextureView>,
+    pub materials: Option<Buffer>,
     pub strand_count: Option<u32>,
     pub max_segments_in_strand: Option<u32>,
 }
@@ -148,6 +150,17 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
+                // Material Buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::MATERIAL_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // NOTE: Additional textures here if necessary for more accurate blending during rasterization
             ],
         )
@@ -166,7 +179,11 @@ impl FromWorld for StrandShadingPipeline {
         let cdefs = [vec![ShaderDefVal::UInt(
             "MAX_TEXTURE_EXTENT".into(),
             crate::plugin::MAX_TEXTURE_EXTENT,
-        )], layouts::shading::shader_defs()].concat();
+        ), ShaderDefVal::UInt(
+            "WORKGROUP_SIZE".into(),
+            SHADING_WORKGROUP_SIZE,
+        )
+        ], layouts::shading::shader_defs()].concat();
 
         let shading_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_shading_pipeline".into()),
@@ -214,6 +231,8 @@ pub fn create_strand_shading_bind_group(
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
+    let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
+
     Ok((
         device.create_bind_group(
             Some("strand_shading_bind_group"),
@@ -264,6 +283,11 @@ pub fn create_strand_shading_bind_group(
                 BindGroupEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
+                },
+                // Bind the material buffer
+                BindGroupEntry {
+                    binding: layouts::shading::MATERIAL_BUFFER,
+                    resource: material_buffer.as_entire_binding(),
                 },
             ],
         ),
