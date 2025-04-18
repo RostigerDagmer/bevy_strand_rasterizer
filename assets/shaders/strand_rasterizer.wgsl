@@ -653,18 +653,16 @@ fn rasterize_strands(
             let p = mix(p0_screen.xyz, p1_screen.xyz, clamp(t, 0.0, 1.0));
             let p_world = screen_to_world(p, view, aabb_znear_zfar);
             
-            // let screen_normal = normalize((vec4<f32>(p0_screen.xy - p1_screen.xy, 0.0, 1.0) * view.world_from_view).xyz);
-            // let N_ = normalize(screen_to_world(vec3<f32>(p0_screen.xy - p1_screen.xy, 0.0), view, aabb_znear_zfar));
             let N_ = normalize(screen_to_world(p0_screen - p1_screen, view, aabb_znear_zfar));
             let U = normalize(view.world_position.xyz - p_world);
             let V = normalize(cross(N_, U));
 
             let plane = mat3x3<f32>(p_world, U, V);
             let intersection_points: mat4x3<f32> = intersect_catmull_rom_spline_3d(v0_world.xyz, v1_world.xyz, v2_world.xyz, v3_world.xyz, plane, spline_alpha);
-            // let mask = intersection_points[3] != vec3<f32>(0.0, 0.0, 0.0);
-            // if all(!mask) {
-            //     continue; // No intersection
-            // }
+            let mask = intersection_points[3] != vec3<f32>(0.0, 0.0, 0.0);
+            if all(!mask) {
+                continue; // No intersection
+            }
             let closest_point: vec3<f32> = closest_point(intersection_points, view.world_position.xyz);
             let point_screen = world_to_screen(vec4<f32>(closest_point, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             let dist = distance(pixel_center, point_screen.xy);

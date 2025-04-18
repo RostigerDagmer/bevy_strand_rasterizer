@@ -79,7 +79,7 @@ fn catmull_rom_spline_point2d(
 }
 
 fn tj3d(ti: f32, pi: vec3<f32>, pj: vec3<f32>, alpha: f32) -> f32 {
-    return ti + pow(length(pi - pj), alpha);
+    return ti + pow(length(pj - pi), alpha);
 }
 
 fn catmull_rom_t(
@@ -120,12 +120,12 @@ fn catmul_rom_spline_roots_3d(
     plane: mat3x3<f32>, // Plane defined by offset P and U x V creating normal N
 ) -> vec3<f32> {
     // returns roots of the cubic equation
-    let N = cross(plane[1], plane[2]);
-    let d = dot(N, plane[0]);
+    let N = normalize(cross(plane[1], plane[2]));
+    let d = dot(-N, plane[0]);
     let a_poly = dot(N, coeffs[0]);
     let b_poly = dot(N, coeffs[1]);
     let c_poly = dot(N, coeffs[2]);
-    let d_poly = dot(N, coeffs[3]) - d;
+    let d_poly = dot(N, coeffs[3]) + d;
     return solve_cubic_3d(a_poly, b_poly, c_poly, d_poly);
 }
 
@@ -143,17 +143,17 @@ fn intersect_catmull_rom_spline_3d(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, 
     var i3 = vec3<f32>(0.0, 0.0, 0.0);
     var mask = vec3<f32>(0.0, 0.0, 0.0);
     // Check if roots are within the range [0, 1]
-    if roots.x >= 0.0 || roots.x <= 1.0 {
+    if roots.x >= 0.0 && roots.x <= 1.0 {
         mask.x = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.x);
         i1 = recover_intersection_point(plane, point);
     }
-    if roots.y >= 0.0 || roots.y <= 1.0 {
+    if roots.y >= 0.0 && roots.y <= 1.0 {
         mask.y = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.y);
         i2 = recover_intersection_point(plane, point);
     }
-    if roots.z >= 0.0 || roots.z <= 1.0 {
+    if roots.z >= 0.0 && roots.z <= 1.0 {
         mask.z = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.z);
         i3 = recover_intersection_point(plane, point);
@@ -169,7 +169,7 @@ fn closest_point(points_with_mask: mat4x3<f32>, p: vec3<f32>) -> vec3<f32> {
     let mask = points_with_mask[3];
     let points = mat3x3<f32>(points_with_mask[0], points_with_mask[1], points_with_mask[2]);
     if length(mask) == 1.0 {
-        return mask * points;
+        return points * mask;
     }
     let dot_products = p * points;
     let distances = abs(dot_products); // absolute dot product
@@ -181,14 +181,14 @@ fn closest_point(points_with_mask: mat4x3<f32>, p: vec3<f32>) -> vec3<f32> {
     // let closest_point = points_with_mask[closest_index];
     ///////////////////////////////////////////////////////////////////////
     // Conditions (using <= helps prioritize lower indices in ties)
-    let x_le_y : bool = distances.x <= distances.y && mask.x > 0.0;
-    let x_le_z : bool = distances.x <= distances.z && mask.x > 0.0;
+    let x_le_y : bool = mask.x > 0.0 && distances.x <= distances.y;
+    let x_le_z : bool = mask.x > 0.0 && distances.x <= distances.z;
     // Need to compare y and z only if x isn't the minimum, prioritize y in case of tie
-    let y_le_z : bool = distances.y <= distances.z && mask.y > 0.0;
+    let y_le_z : bool = mask.y > 0.0 && distances.y <= distances.z;
 
     // Determine the index
     let is_x_min : bool = x_le_y && x_le_z;          // True if x is the minimum (or tied for min with lower index)
-    let is_y_better_than_z : bool = y_le_z;         // True if y <= z
+    let is_y_better_than_z : bool = y_le_z && mask.y > 0.0;         // True if y <= z and y unmasked
 
     // Select between index 1 and 2, assuming x is NOT the minimum
     let index12 : u32 = select(2u, 1u, is_y_better_than_z); // If y<=z pick 1u, else pick 2u
@@ -204,6 +204,7 @@ fn closest_point(points_with_mask: mat4x3<f32>, p: vec3<f32>) -> vec3<f32> {
 
 fn recover_intersection_point(plane: mat3x3<f32>, point: vec3<f32>) -> vec3<f32> {
     // Recover the intersection point on the plane
+    let P0 = plane[0]; // Point on the plane
     let U = plane[1];
     let V = plane[2];
     let Usq = dot(U, U);
@@ -215,10 +216,10 @@ fn recover_intersection_point(plane: mat3x3<f32>, point: vec3<f32>) -> vec3<f32>
     let G_inv = mat2x2<f32>(
         Vsq / det_G, -UV / det_G, -VU / det_G, Usq / det_G
     );
-    let X_ = point - plane[0];
+    let X_ = point - P0;
     let b = vec2<f32>(dot(U, X_), dot(V, X_));
     let y = G_inv * b;
-    return y.x * U + y.y * V;
+    return (y.x * U + y.y * V) + P0; // Recover the point on the plane
 }
 
 

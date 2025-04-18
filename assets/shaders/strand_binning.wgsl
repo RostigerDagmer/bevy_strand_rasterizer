@@ -59,6 +59,13 @@ var<push_constant> pc: PushConstants;
 
 // --- Common Helper Functions ---
 
+fn sgn_i32(f: f32) -> i32 {
+    if f > 1e-6 { return 1; }
+    if f < -1e-6 { return -1; }
+    return 0;
+}
+
+
 fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
     let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
     let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
@@ -169,19 +176,35 @@ fn stochastic_cull_light(aabb_clip: mat2x3<f32>, sample_threshold: f32) -> bool 
     return false;
 }
 
-// --- STAGE_COUNT ---
+#ifdef STAGE_PLACE
+fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, segment_ref: SegmentRef, cfg: FroxelConfig) -> bool {
+    // Optional AABB Check
+    // if (froxel_x < cfg.aabb_min_x || ...) { return false; }
+
+    let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
+    let num_tiles = arrayLength(&current_tile_write_indices_buffer);
+
+    if froxel_idx < num_tiles {
+        // Get the write index for this tile atomically
+        let write_index = atomicAdd(&current_tile_write_indices_buffer[froxel_idx], 1u);
+
+        // Write the segment reference to the packed buffer
+        // Optional: Add bounds check using tile_offsets_buffer if over-allocation is possible
+        // let max_idx_for_tile = tile_offsets_buffer[froxel_idx + 1u];
+        // if write_index < max_idx_for_tile && write_index < arrayLength(&packed_segments_buffer) {
+        if write_index < arrayLength(&packed_segments_buffer) { // Basic check against buffer end
+            packed_segments_buffer[write_index] = segment_ref;
+            return true;
+        } else {
+            // Handle overflow - log error? Skip? Depends on strategy
+            return false;
+        }
+    }
+    return false;
+}
+#endif
+
 #ifdef STAGE_COUNT
-
-@group(0) @binding(#VERTEX_BUFFER) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(#INDEX_BUFFER) var<storage, read> indices: array<u32>;
-@group(0) @binding(#META_BUFFER) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
-@group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
-@group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
-@group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View; // Or ViewUniform
-@group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
-@group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
-
-
 fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
     // Check AABB (example uses screen coords, adjust if AABB is in froxel coords)
     // if (froxel_x < cfg.aabb_min_x || ... ) { return false; }
@@ -194,8 +217,24 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
     }
     return false;
 }
+#endif
 
-fn trace_segment_through_froxels_count(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
+#ifdef STAGE_COUNT
+#define COUNT_OR_PLACE
+#endif
+
+#ifdef STAGE_PLACE
+#define COUNT_OR_PLACE
+#endif
+
+
+#ifdef COUNT_OR_PLACE
+
+#ifdef STAGE_COUNT
+fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
+#else
+fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, seg_ref: SegmentRef, cfg: FroxelConfig) {
+#endif
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
 
@@ -280,15 +319,22 @@ fn trace_segment_through_froxels_count(p0: vec3<f32>, p1: vec3<f32>, cfg: Froxel
 
         // Add segment count to current froxel IF it's within valid bounds
         if fx >= 0 && fx < max_fx && fy >= 0 && fy < max_fy && fz >= 0 && fz < max_fz {
+            #ifdef STAGE_COUNT
             if !add_segment_ref_to_froxel(u32(fx), u32(fy), u32(fz), cfg) {
                  // Optional: handle case where buffer is full, though unlikely for count
                  break;
             }
+            #endif
+            #ifdef STAGE_PLACE
+            if !add_segment_ref_to_froxel(u32(fx), u32(fy), u32(fz), seg_ref, cfg) {
+                 // Optional: handle case where buffer is full
+                 break;
+            }
+            #endif
         } else {
              // Stop if we step out of bounds entirely
              break;
         }
-
 
         // Check if we've reached the end froxel (Manhattan distance check can be faster)
         if fx == fx1 && fy == fy1 && fz == fz1 { break; }
@@ -316,13 +362,21 @@ fn trace_segment_through_froxels_count(p0: vec3<f32>, p1: vec3<f32>, cfg: Froxel
     }
 }
 
-// Helper for integer sign needed in traversal
-fn sgn_i32(f: f32) -> i32 {
-    if f > 1e-6 { return 1; }
-    if f < -1e-6 { return -1; }
-    return 0;
-}
+#endif // COUNT_OR PLACE
 
+
+
+// --- STAGE_COUNT ---
+#ifdef STAGE_COUNT
+
+@group(0) @binding(#VERTEX_BUFFER) var<storage, read> vertices: array<vec4<f32>>;
+@group(0) @binding(#INDEX_BUFFER) var<storage, read> indices: array<u32>;
+@group(0) @binding(#META_BUFFER) var<storage, read> strand_metadata: array<StrandMeta>; // Use meta buffer
+@group(0) @binding(#TILE_COUNTS_BUFFER) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
+@group(0) @binding(#FROXEL_CONFIG) var<uniform> config: FroxelConfig;
+@group(0) @binding(#VIEW_UNIFORM) var<uniform> view: View; // Or ViewUniform
+@group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
+@group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
 @compute @workgroup_size(64, 1, 1) // Match Rust dispatch size if possible
 fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -375,7 +429,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let current_vtx = vertices[current_vtx_idx];
         let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
-        trace_segment_through_froxels_count(prev_screen_pos, current_screen_pos, config);
+        trace_segment_through_froxels(prev_screen_pos, current_screen_pos, config);
         prev_screen_pos = current_screen_pos;
     }
 }
@@ -696,161 +750,6 @@ fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
 @group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
-fn add_segment_ref_to_froxel_place(froxel_x: u32, froxel_y: u32, froxel_z: u32, segment_ref: SegmentRef, cfg: FroxelConfig) -> bool {
-    // Optional AABB Check
-    // if (froxel_x < cfg.aabb_min_x || ...) { return false; }
-
-    let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
-    let num_tiles = arrayLength(&current_tile_write_indices_buffer);
-
-    if froxel_idx < num_tiles {
-        // Get the write index for this tile atomically
-        let write_index = atomicAdd(&current_tile_write_indices_buffer[froxel_idx], 1u);
-
-        // Write the segment reference to the packed buffer
-        // Optional: Add bounds check using tile_offsets_buffer if over-allocation is possible
-        // let max_idx_for_tile = tile_offsets_buffer[froxel_idx + 1u];
-        // if write_index < max_idx_for_tile && write_index < arrayLength(&packed_segments_buffer) {
-        if write_index < arrayLength(&packed_segments_buffer) { // Basic check against buffer end
-            packed_segments_buffer[write_index] = segment_ref;
-            return true;
-        } else {
-            // Handle overflow - log error? Skip? Depends on strategy
-            return false;
-        }
-    }
-    return false;
-}
-
-fn trace_segment_through_froxels_place(p0: vec3<f32>, p1: vec3<f32>, segment_ref: SegmentRef, cfg: FroxelConfig) {
-        // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
-    if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
-
-    // Use i32 for stepping, but ensure non-negative before passing to add_segment_ref_to_froxel
-    let fx0 = i32(floor(p0.x / f32(cfg.froxel_size_x)));
-    let fy0 = i32(floor(p0.y / f32(cfg.froxel_size_y)));
-    // Clamp depth index calculation strictly between 0 and depth_slices-1
-    let fz0 = clamp(i32(floor(p0.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1);
-
-    let fx1 = i32(floor(p1.x / f32(cfg.froxel_size_x)));
-    let fy1 = i32(floor(p1.y / f32(cfg.froxel_size_y)));
-    let fz1 = clamp(i32(floor(p1.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1);
-
-    var fx = fx0;
-    var fy = fy0;
-    var fz = fz0;
-
-    var dir = p1 - p0;
-    // Need step in integer grid space, but derivation needs float dir
-    var step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z)); // Integer step
-
-    // Use screen space sizes for calculations
-    let froxel_dim_x = f32(cfg.froxel_size_x);
-    let froxel_dim_y = f32(cfg.froxel_size_y);
-    let froxel_dim_z = 1.0 / f32(cfg.depth_slices); // Size of a depth slice in [0,1] range
-
-    // Calculate delta distances - how far along the ray (in units of t) we must move
-    // for the coord to change by one froxel size.
-    // Avoid division by zero. Use a large number if dir component is zero.
-    let safe_dir_x = select(dir.x, 1e-6 * f32(step.x), abs(dir.x) < 1e-6);
-    let safe_dir_y = select(dir.y, 1e-6 * f32(step.y), abs(dir.y) < 1e-6);
-    let safe_dir_z = select(dir.z, 1e-6 * f32(step.z), abs(dir.z) < 1e-6);
-
-    var delta_dist = vec3<f32>(
-        abs(froxel_dim_x / safe_dir_x),
-        abs(froxel_dim_y / safe_dir_y),
-        abs(froxel_dim_z / safe_dir_z)
-    );
-
-    // Calculate initial distances (as t values) to the *next* voxel boundary
-    // along the ray's direction from p0.
-    let fract_p0_x = p0.x / froxel_dim_x; // How many froxels p0.x is
-    let fract_p0_y = p0.y / froxel_dim_y;
-    let fract_p0_z = p0.z / froxel_dim_z; // p0.z is already [0,1]
-
-    // Distance to next boundary = (boundary - current_pos) / direction
-    // If moving positive (step>0), next boundary is floor(pos)+1. Distance = ( (floor(pos)+1)*size - pos ) / dir
-    // If moving negative (step<0), next boundary is floor(pos).   Distance = ( floor(pos)*size - pos ) / dir
-    var t_max_x = select(
-        (floor(fract_p0_x) * froxel_dim_x - p0.x) / safe_dir_x,            // step < 0
-        ((floor(fract_p0_x) + 1.0) * froxel_dim_x - p0.x) / safe_dir_x,    // step > 0
-        step.x > 0
-    );
-    var t_max_y = select(
-        (floor(fract_p0_y) * froxel_dim_y - p0.y) / safe_dir_y,
-        ((floor(fract_p0_y) + 1.0) * froxel_dim_y - p0.y) / safe_dir_y,
-        step.y > 0
-    );
-    var t_max_z = select(
-        (floor(fract_p0_z) * froxel_dim_z - p0.z) / safe_dir_z,
-        ((floor(fract_p0_z) + 1.0) * froxel_dim_z - p0.z) / safe_dir_z,
-        step.z > 0
-    );
-
-    // Correct for zero direction components - they should never be the minimum t_max
-    if abs(dir.x) < 1e-6 { t_max_x = 1e38; }
-    if abs(dir.y) < 1e-6 { t_max_y = 1e38; }
-    if abs(dir.z) < 1e-6 { t_max_z = 1e38; }
-
-
-    // Pre-calculate screen/froxel bounds for loop check
-    let max_fx = i32((cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x);
-    let max_fy = i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y);
-    let max_fz = i32(cfg.depth_slices); // Exclusive bound
-
-    var safety = 0u;
-    let max_steps = u32(max_fx + max_fy + max_fz + 3); // Generous upper bound
-
-    loop {
-        safety = safety + 1u;
-        if safety > max_steps { break; } // Safety break
-
-        // Add segment count to current froxel IF it's within valid bounds
-        if fx >= 0 && fx < max_fx && fy >= 0 && fy < max_fy && fz >= 0 && fz < max_fz {
-            if !add_segment_ref_to_froxel_place(u32(fx), u32(fy), u32(fz), segment_ref, cfg) {
-                 // Optional: handle case where buffer is full, though unlikely for count
-                 break;
-            }
-        } else {
-             // Stop if we step out of bounds entirely
-             break;
-        }
-
-
-        // Check if we've reached the end froxel (Manhattan distance check can be faster)
-        if fx == fx1 && fy == fy1 && fz == fz1 { break; }
-
-        // Find axis with minimum t_max value to find the next froxel boundary crossed
-        if t_max_x < t_max_y && t_max_x < t_max_z {
-            // X axis traversal
-            fx += step.x;
-            t_max_x += delta_dist.x;
-        } else if t_max_y < t_max_z {
-            // Y axis traversal
-            fy += step.y;
-            t_max_y += delta_dist.y;
-        } else {
-            // Z axis traversal
-            fz += step.z;
-            t_max_z += delta_dist.z;
-        }
-
-         // Check if we have stepped past the target froxel along any axis where movement occurs
-         // This prevents infinite loops for axis-aligned lines ending exactly on a boundary
-        if (step.x > 0 && fx > fx1) || (step.x < 0 && fx < fx1) || (step.y > 0 && fy > fy1) || (step.y < 0 && fy < fy1) || (step.z > 0 && fz > fz1) || (step.z < 0 && fz < fz1) {
-             break;
-        }
-    }
-}
-
-// Helper for integer sign needed in traversal
-fn sgn_i32(f: f32) -> i32 {
-    if f > 1e-6 { return 1; }
-    if f < -1e-6 { return -1; }
-    return 0;
-}
-
-
 @compute @workgroup_size(64, 1, 1)
 fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let strand_idx = id.x;
@@ -904,7 +803,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let segment_start_vtx_idx = start_vertex_offset + i - 1u;
         let segment_ref = SegmentRef(strand_idx, segment_start_vtx_idx);
 
-        trace_segment_through_froxels_place(prev_screen_pos, current_screen_pos, segment_ref, config);
+        trace_segment_through_froxels(prev_screen_pos, current_screen_pos, segment_ref, config);
 
         prev_screen_pos = current_screen_pos;
     }
