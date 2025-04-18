@@ -2,6 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float }
+#import "shaders/spline.wgsl"::{ solve_cubic_3d, catmull_rom_t, catmull_rom_coefficients_3d, catmull_rom_spline_roots_3d, }
 // #import NUMBER_OF_THREADS_PER_WORKGROUP
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
 
@@ -242,6 +243,70 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
              break;
         }
     }
+}
+
+//////////// SPLINES ////////////////
+/// 
+
+// // 1) Evaluate Catmull–Rom coeffs in *screen* space:
+// let ts    = catmull_rom_t(p0_scr, p1_scr, p2_scr, p3_scr, alpha);
+// let coeff = catmull_rom_coefficients_3d(p0_scr, p1_scr, p2_scr, p3_scr, ts);
+// // coeff[0] = A = d3x/dt3, coeff[1] = B, coeff[2] = C, coeff[3] = D
+
+// // 2) Starting froxel and parameter
+// var t_curr: f32 = 0.0;
+// let start_pt = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, 0.0);
+// var (fx,fy,fz) = froxel_index(start_pt, cfg);
+
+// // direction signs from the *first* derivative at t=0
+// let deriv0 = spline_derivative_at(p0,p1,p2,p3,ts,0.0);
+// let step = vec3<i32>(sgn_i32(deriv0.x), sgn_i32(deriv0.y), sgn_i32(deriv0.z));
+
+// loop {
+//   // 3) For each axis, compute the *next* boundary coordinate
+//   let next_x_plane = (step.x > 0) ? (f32(fx+1) * cfg.froxel_size_x)
+//                                   : (f32(fx)   * cfg.froxel_size_x);
+//   // form cubic for x:  A_x t^3 + B_x t^2 + C_x t + D_x = next_x_plane
+//   let roots_x = solve_cubic_3d(
+//       coeff[0].x, coeff[1].x, coeff[2].x,
+//       coeff[3].x - next_x_plane
+//   );
+//   // filter only { r | r > t_curr && r ≤ 1 }, pick min or +∞ if none
+//   let t_x = min_root_above(roots_x, t_curr);
+
+//   // ... repeat for t_y, t_z using cfg.froxel_size_y and depth_slice_size ...
+
+//   // 4) Which axis boundary comes first?
+//   let t_next = min(t_x, min(t_y, t_z));
+//   if t_next > 1.0 { break; }            // we’ve reached the spline end
+//   if t_next is infinite { break; }      // no more crossings
+
+//   // 5) Step that axis, record the froxel, update parameter
+//   if t_next == t_x {
+//     fx += step.x;
+//   } else if t_next == t_y {
+//     fy += step.y;
+//   } else {
+//     fz += step.z;
+//   }
+
+//   // add into that froxel
+//   if in_bounds(fx,fy,fz, cfg) {
+//     add_segment_ref_to_froxel(u32(fx), u32(fy), u32(fz), seg_ref, cfg);
+//   } else {
+//     break;  // walked off the grid
+//   }
+
+//   t_curr = t_next;
+// }
+
+#ifdef STAGE_COUNT
+fn trace_segment_through_froxels_analytical(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
+#else
+fn trace_segment_through_froxels_analytical(p0: vec3<f32>, p1: vec3<f32>, seg_ref: SegmentRef, cfg: FroxelConfig) {
+#endif
+
+
 }
 
 #endif // COUNT_OR PLACE

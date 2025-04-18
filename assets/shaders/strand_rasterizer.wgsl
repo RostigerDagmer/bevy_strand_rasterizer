@@ -259,7 +259,7 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.02;
+    let ambient_factor = 0.04;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -274,13 +274,14 @@ fn rasterize_strands(
     # endif // DEBUG
     
     let geo = geos[0]; // Assuming only one strand geo for now
-    let aabb_znear_zfar = find_clip_bounds(view.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let clip_bounds = find_clip_bounds(view.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let aabb_znear_zfar = vec2<f32>(clip_bounds[0].z, clip_bounds[1].z);
 
     // light relative data
     let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
     let cascade = light.cascades[0]; // TODO: select cascade based on distance
-    let clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
-    let light_aabb_znear_zfar = vec2<f32>(clip_bounds[0].z, clip_bounds[1].z);
+    let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let light_aabb_znear_zfar = vec2<f32>(light_clip_bounds[0].z, light_clip_bounds[1].z);
     let texture_dims = textureDimensions(deep_opacity_maps);
     let shadow_map_dims = vec2<f32>(texture_dims.xy);
     let depth_texture_slices = texture_dims.z;
@@ -399,6 +400,9 @@ fn rasterize_strands(
     textureStore(render_target, pixel_coord_int, final_color);
 }
 #endif
+
+#define DEBUG
+
 #ifdef SPLINE
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
 fn rasterize_strands(

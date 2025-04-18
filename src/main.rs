@@ -26,12 +26,12 @@ fn setup(
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 1.0),
-            specular_color: Vec4::new(0.82, 0.663, 0.365, 1.0),
+            specular_color: Vec4::new(0.82, 0.663, 0.365, 0.8),
             ambient_factor: 0.1,
             ao_factor: 0.1,
             eta: 1.55,   // index of refraction
             beta: 0.55,   // higher order path roughness
-            alpha: 0.3, // first order path roughness
+            alpha: 0.24, // first order path roughness
             shift: 0.01, // specular shift
             pad1: 0,
             pad2: 0,
@@ -41,8 +41,11 @@ fn setup(
 
     commands.spawn((
         FroxelConfig::default(),
-        Transform::from_xyz(-1.0, 7., 1.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
-        PanOrbitCamera::default(),
+        Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
+        PanOrbitCamera {
+            focus: Vec3::new(0.0, 4.1, 0.0),
+            ..Default::default()
+        },
     ));
 
     commands.spawn((
