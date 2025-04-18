@@ -10,6 +10,7 @@ const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute p
 const CULL_MAX_DIST: f32 = 90.0;
 const CULL_MIN_DIST: f32 = 4.0;
 const SHADOW_MAP_BOOST_FACTOR: f32 = 10.0;
+const MODE: u32 = 3u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
 
 // --- Structures ---
 
@@ -113,9 +114,9 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
 #ifdef COUNT_OR_PLACE
 
 #ifdef STAGE_COUNT
-fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
+fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
 #else
-fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, seg_ref: SegmentRef, cfg: FroxelConfig) {
+fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: SegmentRef, cfg: FroxelConfig) {
 #endif
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
@@ -375,7 +376,15 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let current_vtx = vertices[current_vtx_idx];
         let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
-        trace_segment_through_froxels(prev_screen_pos, current_screen_pos, config);
+        switch MODE {
+            case 2u: { // Analytical splines
+                trace_segment_through_froxels_analytical(prev_screen_pos, current_screen_pos, segment_ref, config);
+            }
+            default: {
+                trace_segment_through_froxels_linear(prev_screen_pos, current_screen_pos, config);
+            }
+        }
+
         prev_screen_pos = current_screen_pos;
     }
 }
@@ -749,7 +758,14 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let segment_start_vtx_idx = start_vertex_offset + i - 1u;
         let segment_ref = SegmentRef(strand_idx, segment_start_vtx_idx);
 
-        trace_segment_through_froxels(prev_screen_pos, current_screen_pos, segment_ref, config);
+        switch MODE {
+            case 2u: { // Analytical splines
+                trace_segment_through_froxels_analytical(prev_screen_pos, current_screen_pos, segment_ref, config);
+            }
+            default: {
+                trace_segment_through_froxels_linear(prev_screen_pos, current_screen_pos, segment_ref, config);
+            }
+        }
 
         prev_screen_pos = current_screen_pos;
     }
