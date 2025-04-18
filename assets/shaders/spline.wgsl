@@ -115,7 +115,7 @@ fn catmull_rom_coefficients_3d(
     return mat4x3<f32>(A, B, C, D);
 }
 
-fn catmul_rom_spline_roots_3d(
+fn catmull_rom_spline_roots_3d(
     coeffs: mat4x3<f32>, // Coefficients from catmull_rom_coefficients_3d
     plane: mat3x3<f32>, // Plane defined by offset P and U x V creating normal N
 ) -> vec3<f32> {
@@ -136,7 +136,7 @@ fn intersect_catmull_rom_spline_3d(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, 
     // find possible values of t
     let ts = catmull_rom_t(p0, p1, p2, p3, alpha);
     let coeffs = catmull_rom_coefficients_3d(p0, p1, p2, p3, ts);
-    let roots = catmul_rom_spline_roots_3d(coeffs, plane);
+    let roots = catmull_rom_spline_roots_3d(coeffs, plane);
 
     var i1 = vec3<f32>(0.0, 0.0, 0.0);
     var i2 = vec3<f32>(0.0, 0.0, 0.0);
@@ -243,4 +243,76 @@ fn catmull_rom_spline_point3d(
     let b2 = ((ts.w - t_remapped) / d_t3_t1) * a2 + ((t_remapped - ts.y) / d_t3_t1) * a3;
     
     return ((ts.z - t_remapped) / d_t2_t1) * b1 + ((t_remapped - ts.y) / d_t2_t1) * b2;
+}
+
+// fn catmull_rom_A(
+//     p0: vec3<f32>,  // Control point 0
+//     p1: vec3<f32>,  // Control point 1 (start of segment)
+//     p2: vec3<f32>,  // Control point 2 (end of segment)
+//     p3: vec3<f32>,  // Control point 3
+//     ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
+//     t: f32,         // Parameter value [0,1]
+// ) -> mat3x3<f32> {
+
+// }
+
+// fn catmull_rom_B(
+//     A: mat3x3<f32>,
+//     ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
+//     t: f32,         // Parameter value [0,1]
+// ) -> mat2x3<f32> {
+
+// }
+
+fn spline_derivative_at(
+    p0: vec3<f32>,  // Control point 0
+    p1: vec3<f32>,  // Control point 1 (start of segment)
+    p2: vec3<f32>,  // Control point 2 (end of segment)
+    p3: vec3<f32>,  // Control point 3
+    A1: vec3<f32>,
+    A2: vec3<f32>,
+    A3: vec3<f32>,
+    B1: vec3<f32>,
+    B2: vec3<f32>,
+    ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
+    t: f32,         // Parameter value [0,1])
+) -> vec3<f32> {
+    // refer to catmull_rom.ipynb for details
+    let T_ = 1.0 / (ts.yzw - ts.xyz);
+    let P = mat3x3<f32>(
+        p1 - p0,
+        p2 - p1,
+        p3 - p2
+    );
+    let A_ = mat3x3<f32>(
+        P[0] * T_.x,
+        P[1] * T_.y,
+        P[2] * T_.z,
+    );
+    let dt1 = vec4<f32>(ts.zw - t, t - ts.xy);
+    let dt2 = ts.zwz - ts.xyy;
+
+    let b1 = vec3<f32>(1.0, dt1.xz) / dt2.x;
+    let b2 = vec3<f32>(1.0, dt1.yw) / dt2.y;
+
+    let A_1 = mat3x3<f32>(
+        A2 - A1,
+        A_[0],
+        A_[1],
+    );
+    let A_2 = mat3x3<f32>(
+        A3 - A2,
+        A_[1],
+        A_[2]
+    );
+    let B_ = mat2x3<f32>(
+        b1 * A_1,
+        b2 * A_2
+    );
+
+    let c = vec3<f32>(1.0, dt1.xw) / dt2.z;
+
+    return c * mat3x3<f32>(B2 - B1, B_[0], B_[1]);
+
+
 }
