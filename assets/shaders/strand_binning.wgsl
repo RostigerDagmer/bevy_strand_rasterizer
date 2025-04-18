@@ -1,6 +1,7 @@
 #import bevy_render::view::View
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
+#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float }
 // #import NUMBER_OF_THREADS_PER_WORKGROUP
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
 
@@ -11,48 +12,13 @@ const SHADOW_MAP_BOOST_FACTOR: f32 = 10.0;
 
 // --- Structures ---
 
-struct Aabb {
-    min: vec3<f32>,
-    pad1: f32,
-    max: vec3<f32>,
-    pad2: f32,
-} // align(16)
-
-struct FroxelConfig { // Ensure this matches Rust exactly
-    screen_width: u32,
-    screen_height: u32,
-    froxel_size_x: u32,
-    froxel_size_y: u32,
-    depth_slices: u32,
-}
-
-struct SegmentRef { // Ensure this matches Rust if defined there
-    strand_idx: u32,
-    segment_start_idx: u32, // Index into the index buffer
-}
-
-struct StrandGeo {
-    strand_count: u32,
-    max_segments_in_strand: u32,
-    pad1: u32,
-    pad2: u32,
-    aabb: Aabb,
-} // align(16)
-
-struct StrandMeta { // Ensure this matches Rust exactly
-    count: u32,     // Number of vertices in strand
-    offset: u32,    // Start index in the original indices buffer (or vertices buffer?)
-    pad1: u32,
-    pad2: u32,
-}
-
-struct PushConstants { // Ensure this matches Rust and range covers all fields
-    workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
-    num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
-    scan_load_base: u32,
-    scan_save_base: u32,
-    // geo_id: u32, // For geo buffers
-    // Add other needed constants
+#import "shaders/types.wgsl"::{
+    Aabb,
+    FroxelConfig,
+    SegmentRef,
+    StrandGeo,
+    StrandMeta,
+    PushConstants,
 }
 
 var<push_constant> pc: PushConstants;
@@ -65,95 +31,10 @@ fn sgn_i32(f: f32) -> i32 {
     return 0;
 }
 
-
-fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
-    let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
-    let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
-    // Clamp coordinates to valid range before calculating index
-    let clamped_x = min(x, froxels_x - 1u);
-    let clamped_y = min(y, froxels_y - 1u);
-    let clamped_z = min(z, config.depth_slices - 1u);
-    return clamped_z * froxels_x * froxels_y + clamped_y * froxels_x + clamped_x;
-}
-
 fn get_num_tiles(config: FroxelConfig) -> u32 {
     let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
     let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
     return froxels_x * froxels_y * config.depth_slices;
-}
-
-fn find_znear_zfar(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> mat2x3<f32> {
-    
-    var min_clip = vec3<f32>(999999.0);
-    var max_clip = vec3<f32>(-999999.0);
-
-    let corners = array<vec4<f32>, 8>(
-        vec4(world_aabb_min, 1.0),
-        vec4(world_aabb_min.x, world_aabb_min.y, world_aabb_max.z, 1.0),
-        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_min.z, 1.0),
-        vec4(world_aabb_min.x, world_aabb_max.y, world_aabb_max.z, 1.0),
-        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_min.z, 1.0),
-        vec4(world_aabb_max.x, world_aabb_min.y, world_aabb_max.z, 1.0),
-        vec4(world_aabb_max.x, world_aabb_max.y, world_aabb_min.z, 1.0),
-        vec4(world_aabb_max, 1.0)
-    );
-    for (var i = 0u; i < 8u; i = i + 1u) {
-        let clip_pos = clip_from_world * corners[i];
-        // For orthographic projections, w will usually be 1.0;
-        let view_pos = clip_pos.xyz / clip_pos.w;
-        // Update min and max for the z component:
-        min_clip = min(min_clip, view_pos);
-        max_clip = max(max_clip, view_pos);
-    }
-    return mat2x3(min_clip, max_clip);
-}
-
-fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_znear_zfar: vec2<f32>) -> vec3<f32> {
-    // Transform from world to clip space using the view-projection matrix
-    let clip_pos = clip_from_world * position;
-
-    if clip_pos.w < 0.0 {
-        // Handle point behind camera
-        return vec3<f32>(-1.0, -1.0, -1.0);
-    }
-    
-    // Perform perspective division to get NDC coordinates
-    let ndc = clip_pos.xyz / clip_pos.w;
-    
-    // Convert NDC to screen coordinates for X and Y
-    let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
-    let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
-    
-    // Extract view-space Z of the position
-    let view_pos = clip_from_world * position;
-    let view_z = view_pos.z / view_pos.w;
-    
-    // Ensure proper ordering (min should be closer to camera)
-    let z_near = aabb_znear_zfar.x;
-    let z_far = aabb_znear_zfar.y;
-    
-    // Normalize the depth within the AABB Z range
-    let normalized_depth = (view_z - z_near) / max(z_far - z_near, 0.0001);
-    
-    // Clamp to ensure we stay in the [0,1] range even if point is outside AABB
-    let screen_z = clamp(normalized_depth, 0.0, 1.0);
-
-    return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
-}
-
-fn wang_hash(seed: u32) -> u32 {
-    var x = seed;
-    x = (x ^ 61u) ^ (x >> 16u);
-    x = x + (x << 3u);
-    x = x ^ (x >> 4u);
-    x = x * 0x27d4eb2du;
-    x = x ^ (x >> 15u);
-    return x;
-}
-
-fn hash_to_unit_float(x: u32) -> f32 {
-    // Divide by 2^32 to get a float in [0.0, 1.0)
-    return f32(x) / 4294967296.0;
 }
 
 fn stochastic_cull_camera(view: View, aabb: Aabb, sample_threshold: f32) -> bool {
@@ -395,7 +276,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
-        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         // culling
         if stochastic_cull_light(aabb_clip, sample_threshold) {
             return;
@@ -407,7 +288,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
-        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
     #endif
 
@@ -766,7 +647,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
-        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         // culling
         if stochastic_cull_light(aabb_clip, sample_threshold) {
             return;
@@ -778,7 +659,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
-        let aabb_clip = find_znear_zfar(clip_from_world, aabb.min, aabb.max);
+        let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
     #endif
 

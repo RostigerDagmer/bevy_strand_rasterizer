@@ -5,50 +5,31 @@
     mesh_view_bindings as view_bindings,
 }
 #import bevy_pbr::mesh_view_types as types
-
-const LEG_ROOTS_5 = array<f32, 5>(-0.906179845938664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906179845938664);
-const LEG_WEIGHTS_5 = array<f32, 5>(0.23692688505618897, 0.4786286704993665, 0.568888888888889, 0.4786286704993665, 0.23692688505618897);
-const LEG_ROOTS_10 = array<f32, 10>(-0.9739065285171717, -0.8650633666889844, -0.6794095682990244, -0.4333953941292472, -0.14887433898163116, 0.14887433898163116, 0.4333953941292472, 0.6794095682990244, 0.8650633666889844, 0.9739065285171717);
-const LEG_WEIGHTS_10 = array<f32, 10>(0.06667134430868714, 0.14945134915058053, 0.21908636251598224, 0.26926671930999674, 0.2955242247147533, 0.2955242247147533, 0.26926671930999674, 0.21908636251598224, 0.14945134915058053, 0.06667134430868714);
-const LEG_ROOTS_15 = array<f32, 15>(-0.9879925180204854, -0.937273392400706, -0.8482065834104272, -0.7244177313601701, -0.5709721726085388, -0.3941513470775634, -0.20119409399743454, 0.0, 0.20119409399743454, 0.3941513470775634, 0.5709721726085388, 0.7244177313601701, 0.8482065834104272, 0.937273392400706, 0.9879925180204854);
-const LEG_WEIGHTS_15 = array<f32, 15>(0.030753241996118154, 0.07036604748810715, 0.10715922046717176, 0.13957067792615432, 0.16626920581699411, 0.18616100001556224, 0.19843148532711163, 0.20257824192556137, 0.19843148532711163, 0.18616100001556224, 0.16626920581699411, 0.13957067792615432, 0.10715922046717176, 0.07036604748810715, 0.030753241996118154);
-
-// --- Structures ---
-
-struct StrandMeta { // Ensure this matches Rust exactly
-    count: u32,     // Number of vertices in strand
-    offset: u32,    // Start index in the original indices buffer
-    pad1: u32,      // Padding to align to 16 bytes
-    pad2: u32,      // Padding to align to 16 bytes
+#import "shaders/shading_LUTs.wgsl"::{
+    LEG_ROOTS_5,
+    LEG_WEIGHTS_5,
+    LEG_ROOTS_10,
+    LEG_WEIGHTS_10,
+    LEG_ROOTS_15,
+    LEG_WEIGHTS_15,
 }
-
-struct PushConstants { // Ensure this matches Rust and range covers all fields
-    workgroup_offset: u32, // Abused for column width in this case
-    num_elements: u32,    // Generic count (in this case num_strands)
-    scan_load_base: u32,
-    scan_save_base: u32,
-    // Add other needed constants
+#import "shaders/types.wgsl"::{
+    Aabb,
+    FroxelConfig,
+    SegmentRef,
+    StrandGeo,
+    StrandMeta,
+    StrandMaterial,
+    PushConstants,
 }
-
-struct StrandMaterial {
-    absorption_color: vec4<f32>,
-    specular_color: vec4<f32>,
-    ambient_factor: f32,
-    ao_factor: f32,
-    eta: f32,
-    beta: f32,
-    alpha: f32,
-    shift: f32,
-    pad1: u32,
-    pad2: u32,
-}
-
 
 var<push_constant> pc: PushConstants;
 
-const PI = 3.14159265359;
-const PI_HALF = PI / 2.0;
-const SQRT_2_PI = sqrt(2.0 * PI);
+#import "shaders/common.wgsl"::{
+    PI,
+    PI_HALF,
+    SQRT_2_PI,
+}
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE; // TODO: shaderdef
@@ -177,8 +158,8 @@ const SIGMA_AE = vec3<f32>(0.419, 0.697, 1.37);
 // σa,p = {0.187,0.4,1.05} // Pheomelanin absorption
 const SIGMA_AP = vec3<f32>(0.187, 0.4, 1.05);
 
-const PATH_COUNT = 3u;
-const QUAD_COUNT = 10u;
+const PATH_COUNT = 3u; // 3 paths for integration (R, TRT, TRRT etc.)
+const QUAD_COUNT = 10u; // 10 quadrature points for integration
 const LEG_ROOTS = LEG_ROOTS_10;
 const LEG_WEIGHTS = LEG_WEIGHTS_10;
 

@@ -173,13 +173,6 @@ fn closest_point(points_with_mask: mat4x3<f32>, p: vec3<f32>) -> vec3<f32> {
     }
     let dot_products = p * points;
     let distances = abs(dot_products); // absolute dot product
-    ////// maybe revisit this if comparisons become bottleneck ////////////
-    // let min_distance = min(distances)
-    // let mask = distances == min_distances;
-    // let selects = mask * clamp(ceil(distances), 0.0, 1.0) * sign(dot_products);
-    // let closest_index = select(0, 1, mask.x) + select(0, 2, mask.y) + select(0, 3, mask.z);
-    // let closest_point = points_with_mask[closest_index];
-    ///////////////////////////////////////////////////////////////////////
     // Conditions (using <= helps prioritize lower indices in ties)
     let x_le_y : bool = mask.x > 0.0 && distances.x <= distances.y;
     let x_le_z : bool = mask.x > 0.0 && distances.x <= distances.z;
