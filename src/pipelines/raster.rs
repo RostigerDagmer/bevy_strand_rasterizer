@@ -223,12 +223,13 @@ impl FromWorld for StrandRasterizerPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        let use_spline = true;
 
         let shader_loader = world.resource::<AssetServer>();
         let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
-        let cdefs = [
+        let mut cdefs = [
             vec![ShaderDefVal::UInt(
                 "MAX_TEXTURE_EXTENT".into(),
                 MAX_TEXTURE_EXTENT,
@@ -236,6 +237,9 @@ impl FromWorld for StrandRasterizerPipeline {
             layouts::rasterizer::shader_defs(),
         ]
         .concat();
+        if use_spline {
+            cdefs.push("SPLINE".into());
+        }
 
         let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_rasterize_pipeline".into()),
