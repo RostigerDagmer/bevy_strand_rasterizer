@@ -238,7 +238,10 @@ impl FromWorld for StrandRasterizerPipeline {
         ]
         .concat();
         if use_spline {
+            // TODO: fix spline shader (also optimize spline shader)
             cdefs.push("SPLINE".into());
+        } else {
+            cdefs.push("LINEAR".into());
         }
 
         let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {

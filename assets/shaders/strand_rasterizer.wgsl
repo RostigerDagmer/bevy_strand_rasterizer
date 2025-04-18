@@ -152,7 +152,7 @@ fn screen_to_world(
     screen_pos: vec3<f32>,           // (x, y, packed_depth)
     view: View,
     aabb_znear_zfar: vec2<f32>,      // (z_near, z_far)
-) -> vec4<f32> {
+) -> vec3<f32> {
     // 1) Unpack viewport & near/far
     let screen_width  = view.viewport.z;
     let screen_height = view.viewport.w;
@@ -556,8 +556,8 @@ fn rasterize_strands(
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     let ambient_factor = 0.02;
-    let hair_root_factor = 0.0015;
-    let spline_alpha = 0.2;
+    let hair_root_factor = 0.015;
+    let spline_alpha = 1.0;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -623,17 +623,17 @@ fn rasterize_strands(
             let v1_world = v0_world;
             let v2_world = vertices[v2_strand_idx].xyz;
             var v3_world = v2_world;
-            let N_world = normalize(v2_world - v1_world);
+            let N = normalize(v2_world - v1_world);
             if start_segment_offset == 0 {
                 // we use a start point offset by hair_root_factor in the direction of the segment
-                v0_world = v0_world - N_world * hair_root_factor;
+                v0_world = v0_world - N * hair_root_factor;
             } else {
-                let v0_strand_idx = indices[v0_idx - 1u];
-                v0_world = vertices[v0_strand_idx].xyz;
+                let vprev_idx = indices[v0_idx - 1u];
+                v0_world = vertices[vprev_idx].xyz;
             }
-            if ((v1_idx - strand_meta.offset + 1) >= strand_meta.count - 1) { 
+            if (((v1_idx + 1) - strand_meta.offset) >= strand_meta.count - 1) { 
                 // we use the end point offset by hair_root_factor in the direction of the segment
-                v3_world = v2_world + N_world * hair_root_factor;
+                v3_world = v2_world + N * hair_root_factor;
             } else {
                 let vnext_idx = indices[v1_idx + 1u];
                 v3_world = vertices[vnext_idx].xyz;
@@ -652,23 +652,20 @@ fn rasterize_strands(
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
             let p = mix(p0_screen.xyz, p1_screen.xyz, clamp(t, 0.0, 1.0));
             let p_world = screen_to_world(p, view, aabb_znear_zfar);
-            let U_world = normalize(view.world_position.xyz - p_world);
+            
+            // let screen_normal = normalize((vec4<f32>(p0_screen.xy - p1_screen.xy, 0.0, 1.0) * view.world_from_view).xyz);
+            // let N_ = normalize(screen_to_world(vec3<f32>(p0_screen.xy - p1_screen.xy, 0.0), view, aabb_znear_zfar));
+            let N_ = normalize(screen_to_world(p0_screen - p1_screen, view, aabb_znear_zfar));
+            let U = normalize(view.world_position.xyz - p_world);
+            let V = normalize(cross(N_, U));
 
-            let N_screen = normalize(p1_screen - p0_screen);
-            let U_screen = normalize(world_to_screen(vec4<f32>(U_world, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar).xyz);
-            let V_screen = normalize(cross(N_screen, U_screen));
-
-            let N = N_world.xyz;
-            let U = U_world; //screen_to_world(U_screen, view, aabb_znear_zfar);
-            let V = screen_to_world(V_screen, view, aabb_znear_zfar);
-
-            let plane = mat3x3<f32>(N, U, V);
+            let plane = mat3x3<f32>(p_world, U, V);
             let intersection_points: mat4x3<f32> = intersect_catmull_rom_spline_3d(v0_world.xyz, v1_world.xyz, v2_world.xyz, v3_world.xyz, plane, spline_alpha);
-            let mask = intersection_points[3] != vec3<f32>(0.0, 0.0, 0.0);
-            if all(!mask) {
-                continue; // No intersection
-            }
-            let closest_point: vec3<f32> = closest_point(intersection_points, screen_to_world(pixel_ndc, view, aabb_znear_zfar));
+            // let mask = intersection_points[3] != vec3<f32>(0.0, 0.0, 0.0);
+            // if all(!mask) {
+            //     continue; // No intersection
+            // }
+            let closest_point: vec3<f32> = closest_point(intersection_points, view.world_position.xyz);
             let point_screen = world_to_screen(vec4<f32>(closest_point, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             let dist = distance(pixel_center, point_screen.xy);
 
