@@ -160,7 +160,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
     // let froxel_dim_z = 1.0 / f32(cfg.depth_slices); // Size of a depth slice in [0,1] range
     let froxel_dim = vec3<f32>(
         f32(cfg.froxel_size_x),
-        f32(cfg.froxel_size_y), 
+        f32(cfg.froxel_size_y),
         1.0 / f32(cfg.depth_slices)
     );
 
@@ -172,7 +172,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
     // let safe_dir_z = select(dir.z, 1e-6 * f32(step.z), abs(dir.z) < 1e-6);
     let safe_dir = select(
         dir,
-        vec3<f32>(1e-6, 1e-6, 1e-6),
+        vec3<f32>(1e-6, 1e-6, 1e-6) * vec3<f32>(step),
         abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
     );
 
@@ -181,7 +181,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
     //     abs(froxel_dim_y / safe_dir_y),
     //     abs(froxel_dim_z / safe_dir_z)
     // );
-    var delta_dist = froxel_dim / safe_dir;
+    var delta_dist = abs(froxel_dim / safe_dir);
 
     // Calculate initial distances (as t values) to the *next* voxel boundary
     // along the ray's direction from p0.
@@ -210,7 +210,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
     // );
 
     var t_max = select(
-        floor(fract_p0 * froxel_dim - p0) / safe_dir,
+        (floor(fract_p0) * froxel_dim - p0) / safe_dir,
         ((floor(fract_p0) + 1.0) * froxel_dim - p0) / safe_dir,
         step > vec3(0)
     );

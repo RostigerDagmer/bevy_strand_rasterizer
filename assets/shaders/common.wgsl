@@ -173,12 +173,10 @@ fn canonical_min_mask(v: vec3<f32>) -> vec3<bool> {
     //    Comparison operators on vectors return boolean vectors in WGSL.
     let is_min: vec3<bool> = (v == vec3(min_val)); // e.g., (false, true, true)
   
-    var prev_cum_mask = vec3<bool>(false);
-    var current_cum = is_min.x;     // Start with cum up to x
-    prev_cum_mask.y = current_cum;  // Set prev for y
-    current_cum = current_cum | is_min.y; // Update cum up to y
-    prev_cum_mask.z = current_cum;  // Set prev for z
-    let final_mask = is_min & !prev_cum_mask; // Same final step
-  
-    return final_mask; // e.g., (false, true, false) for input (3.0, 1.0, 1.0)
+    return select(
+        select(vec3(false, false, true), vec3(false, true, false), is_min.y),
+        vec3(true, false, false),
+        is_min.x
+    );
+
   }

@@ -241,7 +241,7 @@ fn rasterize_strands(
 
 #else
 
-#define DEBUG
+// #define DEBUG
 
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_depth_sampler: sampler; // TODO: maybe find a more compact format
