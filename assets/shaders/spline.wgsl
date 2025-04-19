@@ -245,35 +245,97 @@ fn catmull_rom_spline_point3d(
     return ((ts.z - t_remapped) / d_t2_t1) * b1 + ((t_remapped - ts.y) / d_t2_t1) * b2;
 }
 
-// fn catmull_rom_A(
-//     p0: vec3<f32>,  // Control point 0
-//     p1: vec3<f32>,  // Control point 1 (start of segment)
-//     p2: vec3<f32>,  // Control point 2 (end of segment)
-//     p3: vec3<f32>,  // Control point 3
-//     ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
-//     t: f32,         // Parameter value [0,1]
-// ) -> mat3x3<f32> {
+fn catmull_rom_C_short(B: mat2x3<f32>, t_l: vec3<f32>, t_r: vec3<f32>) -> vec3<f32> {
+    // this is equivalent to catmull_rom_spline_point3d
+    let C = B * vec2<f32>(t_l.y, t_r.y);
+    return C;
+}
 
-// }
+fn catmull_rom_T_a(ts: vec4<f32>) -> vec3<f32> {
+    return 1.0 / (ts.yzw - ts.xyz);
+}
 
-// fn catmull_rom_B(
-//     A: mat3x3<f32>,
-//     ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
-//     t: f32,         // Parameter value [0,1]
-// ) -> mat2x3<f32> {
+fn catmull_rom_t_l(ts: vec4<f32>, t_remapped: f32) -> vec3<f32> {
+    return ts.yzw - t_remapped;
+}
 
-// }
+fn catmull_rom_t_r(ts: vec4<f32>, t_remapped: f32) -> vec3<f32> {
+    return t_remapped - ts.xyz;
+}
+
+fn catmull_rom_A(
+    p0: vec3<f32>,  // Control point 0
+    p1: vec3<f32>,  // Control point 1 (start of segment)
+    p2: vec3<f32>,  // Control point 2 (end of segment)
+    p3: vec3<f32>,  // Control point 3
+    ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
+    t: f32,         // Parameter value [0,1]
+) -> mat3x3<f32> {
+
+    let t_remapped = t * (ts.z - ts.y) + ts.y;
+
+    let T_a = catmull_rom_T_a(ts);
+    let t_l = catmull_rom_t_l(ts, t_remapped);
+    let t_r = catmull_rom_t_r(ts, t_remapped);
+    let P_l = mat3x3<f32>(
+        p0, p1, p2
+    );
+    let P_r = mat3x3<f32>(
+        p1, p2, p3
+    );
+    let A = P_l * (t_l * T_a) + P_r * (t_r * T_a);
+    return A;
+}
+
+fn catmull_rom_A_short(
+    p0: vec3<f32>,  // Control point 0
+    p1: vec3<f32>,  // Control point 1 (start of segment)
+    p2: vec3<f32>,  // Control point 2 (end of segment)
+    p3: vec3<f32>,  // Control point 3
+    T_a: vec3<f32>, // output T_a(ts)
+    t_l: vec3<f32>, // output t_l(ts, t_remapped)
+    t_r: vec3<f32>, // output t_r(ts, t_remapped)
+) -> mat3x3<f32> {
+    let P_l = mat3x3<f32>(
+        p0, p1, p2
+    );
+    let P_r = mat3x3<f32>(
+        p1, p2, p3
+    );
+    let A = P_l * (t_l * T_a) + P_r * (t_r * T_a);
+    return A;
+}
+
+fn catmull_rom_B(
+    A: mat3x3<f32>,
+    ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
+    t: f32,         // Parameter value [0,1]
+) -> mat2x3<f32> {
+    let t_remapped = t * (ts.z - ts.y) + ts.y;
+    let t_l = catmull_rom_t_l(ts, t_remapped);
+    let t_r = catmull_rom_t_r(ts, t_remapped);
+    let T_b = 1.0 / (t_l.zw - t_l.xy);
+    let B = mat2x3<f32>(A[0], A[1]) * (t_l.yz * T_b) + mat2x3<f32>(A[1], A[2]) * (t_r.xy * T_b);
+    return B;
+}
+
+fn catmull_rom_B_short(
+    A: mat3x3<f32>,
+    t_l: vec4<f32>,
+    t_r: vec4<f32>,
+) -> mat2x3<f32> {
+    let T_b = 1.0 / (t_l.zw - t_l.xy);
+    let B = mat2x3<f32>(A[0], A[1]) * (t_l.yz * T_b) + mat2x3<f32>(A[1], A[2]) * (t_r.xy * T_b);
+    return B;
+}
 
 fn spline_derivative_at(
     p0: vec3<f32>,  // Control point 0
     p1: vec3<f32>,  // Control point 1 (start of segment)
     p2: vec3<f32>,  // Control point 2 (end of segment)
     p3: vec3<f32>,  // Control point 3
-    A1: vec3<f32>,
-    A2: vec3<f32>,
-    A3: vec3<f32>,
-    B1: vec3<f32>,
-    B2: vec3<f32>,
+    A: mat3x3<f32>,
+    B: mat2x3<f32>,
     ts: vec4<f32>, // Times (should be obtained from tj3d -> catmull_rom_t)
     t: f32,         // Parameter value [0,1])
 ) -> vec3<f32> {
@@ -296,12 +358,12 @@ fn spline_derivative_at(
     let b2 = vec3<f32>(1.0, dt1.yw) / dt2.y;
 
     let A_1 = mat3x3<f32>(
-        A2 - A1,
+        A[1] - A[0],
         A_[0],
         A_[1],
     );
     let A_2 = mat3x3<f32>(
-        A3 - A2,
+        A[2] - A[1],
         A_[1],
         A_[2]
     );
@@ -311,8 +373,19 @@ fn spline_derivative_at(
     );
 
     let c = vec3<f32>(1.0, dt1.xw) / dt2.z;
+    return c * mat3x3<f32>(B[1] - B[0], B_[0], B_[1]);
 
-    return c * mat3x3<f32>(B2 - B1, B_[0], B_[1]);
+}
 
 
+// helper
+fn min_root_above(roots: vec3<f32>, t: f32) -> vec3<f32> {
+    // all roots below t or 0.0 become 1e38
+    // Find the minimum root above t
+    let sentinel = 1e38;
+    let larger = roots > vec3(t);
+    let limit = roots < vec3(1.0);
+    let mask = larger && limit;
+    let maxxed = select(roots, vec3(sentinel), mask);
+    return maxxed;
 }

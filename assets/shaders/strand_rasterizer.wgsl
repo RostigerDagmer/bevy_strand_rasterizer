@@ -241,6 +241,8 @@ fn rasterize_strands(
 
 #else
 
+#define DEBUG
+
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_sampler: sampler; // TODO: maybe find a more compact format
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_depth_sampler: sampler; // TODO: maybe find a more compact format
 @group(0) @binding(#{DEEP_OPACITY_TEXTURE_O_VIEW}) var deep_opacity_maps: texture_3d<f32>;
@@ -400,8 +402,6 @@ fn rasterize_strands(
     textureStore(render_target, pixel_coord_int, final_color);
 }
 #endif
-
-#define DEBUG
 
 #ifdef SPLINE
 @compute @workgroup_size(8, 8, 1) // TODO: Should match froxel_size_x, froxel_size_y
