@@ -467,7 +467,7 @@ fn shade_strands(
         }
 
         // view direction
-        let tangent = normalize(next_vertex.xyz - vertex.xyz);
+        let tangent = U;
         let camera_dir = normalize(view.world_position - (vertex.xyz + next_vertex.xyz) / 2.0);
         let binormal = normalize(cross(tangent, camera_dir));
         let V = normalize(cross(binormal, tangent));

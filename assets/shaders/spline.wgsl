@@ -36,7 +36,9 @@ fn solve_cubic_3d(a: f32, b: f32, c: f32, d: f32) -> vec3<f32> {
     } else {
         // Three distinct real roots
         let r = 2.0 * sqrt(-third_p);
-        let theta = acos(-half_q / sqrt(-third_p * third_p * third_p));
+        let acos_arg = -half_q / sqrt(-third_p * third_p * third_p);
+        let theta = acos(acos_arg);
+        // let theta = acos(clamp(acos_arg, -0.9999999, 0.999999));
         let y0 = r * cos(theta / 3.0);
         let y1 = r * cos((theta + 2.0 * PI) / 3.0);
         let y2 = r * cos((theta + 4.0 * PI) / 3.0);
@@ -146,17 +148,20 @@ fn intersect_catmull_rom_spline_3d(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, 
     if roots.x >= 0.0 && roots.x <= 1.0 {
         mask.x = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.x);
-        i1 = recover_intersection_point(plane, point);
+        // i1 = recover_intersection_point(plane, point);
+        i1 = point;
     }
     if roots.y >= 0.0 && roots.y <= 1.0 {
         mask.y = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.y);
-        i2 = recover_intersection_point(plane, point);
+        // i2 = recover_intersection_point(plane, point);
+        i2 = point;
     }
     if roots.z >= 0.0 && roots.z <= 1.0 {
         mask.z = 1.0;
         let point = catmull_rom_spline_point3d(p0, p1, p2, p3, ts, roots.z);
-        i3 = recover_intersection_point(plane, point);
+        // i3 = recover_intersection_point(plane, point);
+        i3 = point;
     }
 
     // Return the intersection points and the mask
@@ -171,7 +176,8 @@ fn closest_point(points_with_mask: mat4x3<f32>, p: vec3<f32>) -> vec3<f32> {
     if length(mask) == 1.0 {
         return points * mask;
     }
-    let dot_products = p * points;
+    let diff = points - mat3x3(p, p, p);
+    let dot_products = vec3<f32>(dot(diff[0], diff[0]), dot(diff[1], diff[1]), dot(diff[2], diff[2])); // squared distance
     let distances = abs(dot_products); // absolute dot product
     // Conditions (using <= helps prioritize lower indices in ties)
     let x_le_y : bool = mask.x > 0.0 && distances.x <= distances.y;
@@ -283,7 +289,9 @@ fn catmull_rom_A(
     let P_r = mat3x3<f32>(
         p1, p2, p3
     );
-    let A = P_l * (t_l * T_a) + P_r * (t_r * T_a);
+    let tl = t_l * T_a;
+    let tr = t_r * T_a;
+    let A = P_l * mat3x3<f32>(tl, tl, tl) + P_r * mat3x3<f32>(tr, tr, tr);
     return A;
 }
 
@@ -302,7 +310,9 @@ fn catmull_rom_A_short(
     let P_r = mat3x3<f32>(
         p1, p2, p3
     );
-    let A = P_l * (t_l * T_a) + P_r * (t_r * T_a);
+    let tl = t_l * T_a;
+    let tr = t_r * T_a;
+    let A = P_l * mat3x3<f32>(tl, tl, tl) + P_r * mat3x3<f32>(tr, tr, tr);
     return A;
 }
 
@@ -314,18 +324,23 @@ fn catmull_rom_B(
     let t_remapped = t * (ts.z - ts.y) + ts.y;
     let t_l = catmull_rom_t_l(ts, t_remapped);
     let t_r = catmull_rom_t_r(ts, t_remapped);
-    let T_b = 1.0 / (t_l.zw - t_l.xy);
-    let B = mat2x3<f32>(A[0], A[1]) * (t_l.yz * T_b) + mat2x3<f32>(A[1], A[2]) * (t_r.xy * T_b);
+    let T_b = 1.0 / (ts.zw - ts.xy);
+    let tl = t_l.yz * T_b;
+    let tr = t_r.xy * T_b;
+    let B = mat2x3<f32>(A[0], A[1]) *  mat2x2<f32>(tl, tl) + mat2x3<f32>(A[1], A[2]) *  mat2x2<f32>(tr, tr);
     return B;
 }
 
 fn catmull_rom_B_short(
     A: mat3x3<f32>,
-    t_l: vec4<f32>,
-    t_r: vec4<f32>,
+    ts: vec4<f32>,
+    t_l: vec3<f32>,
+    t_r: vec3<f32>,
 ) -> mat2x3<f32> {
-    let T_b = 1.0 / (t_l.zw - t_l.xy);
-    let B = mat2x3<f32>(A[0], A[1]) * (t_l.yz * T_b) + mat2x3<f32>(A[1], A[2]) * (t_r.xy * T_b);
+    let T_b = 1.0 / (ts.zw - ts.xy);
+    let tl = t_l.yz * T_b;
+    let tr = t_r.xy * T_b;
+    let B = mat2x3<f32>(A[0], A[1]) * mat2x2<f32>(tl, tl) + mat2x3<f32>(A[1], A[2]) * mat2x2<f32>(tr, tr);
     return B;
 }
 

@@ -2,15 +2,26 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float, canonical_min, canonical_min_mask}
-#import "shaders/spline.wgsl"::{ solve_cubic_3d, catmull_rom_t, catmull_rom_coefficients_3d, catmull_rom_spline_roots_3d, min_root_above }
+#import "shaders/spline.wgsl"::{ 
+    solve_cubic_3d,
+    catmull_rom_t,
+    catmull_rom_T_a,
+    catmull_rom_t_l,
+    catmull_rom_t_r,
+    catmull_rom_A_short,
+    catmull_rom_B_short,
+    catmull_rom_coefficients_3d,
+    catmull_rom_spline_roots_3d,
+    spline_derivative_at,
+    min_root_above }
 // #import NUMBER_OF_THREADS_PER_WORKGROUP
 // #import NUMBER_OF_THREADS_PER_SUBGROUP
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
 const CULL_MAX_DIST: f32 = 100.0;
-const CULL_MIN_DIST: f32 = 4.0;
+const CULL_MIN_DIST: f32 = 8.0;
 const SHADOW_MAP_BOOST_FACTOR: f32 = 10.0;
-const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
+const MODE: u32 = 3u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
 
 // --- Structures ---
 
@@ -378,11 +389,11 @@ fn trace_segment_through_froxels_analytical(p0: vec3<f32>, p1: vec3<f32>, p2: ve
         i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y),
         i32(cfg.depth_slices)
     );
-    // let T_a = catmull_rom_T_a(ts);
-    // let t_l = catmull_rom_t_l(ts, 0.0);
-    // let t_r = catmull_rom_t_r(ts, 0.0);
-    // let A = catmull_rom_A_short(p0, p1, p2, p3, T_a, t_l, t_r);
-    // let B = catmull_rom_B_short(A, t_l, t_r);
+    let T_a = catmull_rom_T_a(ts);
+    let t_l = catmull_rom_t_l(ts, 0.0);
+    let t_r = catmull_rom_t_r(ts, 0.0);
+    let A = catmull_rom_A_short(p0, p1, p2, p3, T_a, t_l, t_r);
+    let B = catmull_rom_B_short(A, ts, t_l, t_r);
     // let C = catmull_rom_C_short(B, t_l, t_r);
     // let start_pt = C;
     // the above is equivalent to:
@@ -395,10 +406,11 @@ fn trace_segment_through_froxels_analytical(p0: vec3<f32>, p1: vec3<f32>, p2: ve
         clamp(i32(floor(start_pt.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
     );
 
-    let deriv0 = coeff[2];
+    // let deriv0 = coeff[2];
     // ^^^^^^^^ this is equivalent to:
-    // let deriv0 = spline_derivative_at(p0, p1, p2, p3, A, B, ts, 0.0);
+    let deriv0 = spline_derivative_at(p0, p1, p2, p3, A, B, ts, 0.0);
     let step = vec3<i32>(sgn_i32(deriv0.x), sgn_i32(deriv0.y), sgn_i32(deriv0.z));
+    // let root_eps = 1e-6;
 
     loop {
         // 3) For each axis, compute the *next* boundary coordinate
@@ -487,8 +499,10 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let aabb_center = aabb.max - aabb.min;
     let strand_hash = wang_hash(strand_idx);
     let sample_threshold = hash_to_unit_float(strand_hash);
+    var mode = MODE;
     
     #ifdef SHADOWS
+        mode = 0u; // TODO: use analytical splines for shadows
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
@@ -516,7 +530,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    switch MODE {
+    switch mode {
         case 2u: { // Analytical splines
             let p1_world = vertices[indices[start_vertex_offset]];
             var p1 = world_to_screen(p1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
@@ -896,8 +910,10 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let aabb = geos[0].aabb;
     let strand_hash = wang_hash(strand_idx);
     let sample_threshold = hash_to_unit_float(strand_hash);
+    var mode = MODE;
     
     #ifdef SHADOWS
+        mode = 0u; // TODO: use analytical splines for shadows
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
         let cascade = light.cascades[0]; // TODO: select cascade based on distance
         let clip_from_world = cascade.clip_from_world;
@@ -925,7 +941,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    switch MODE {
+    switch mode {
         case 2u: { // Analytical splines
             let p1_world = vertices[indices[start_vertex_offset]];
             var p1 = world_to_screen(p1_world, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);

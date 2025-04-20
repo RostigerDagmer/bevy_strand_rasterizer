@@ -223,7 +223,7 @@ impl FromWorld for StrandRasterizerPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
-        let use_spline = false;
+        let use_spline = true;
 
         let shader_loader = world.resource::<AssetServer>();
         let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");

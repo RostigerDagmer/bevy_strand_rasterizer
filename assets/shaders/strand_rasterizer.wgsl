@@ -206,7 +206,9 @@ fn rasterize_strands(
 
             // Calculate analytical coverage
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
-            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
+            if (t < 0.0 || t > 1.0) { continue; } // Skip if outside segment
+            let p_frag = mix(p0_screen, p1_screen, t);
+            let dist = distance(pixel_center, p_frag.xy);
 
             // blend hair radius from MIN to MAX based on distance to camera
             let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0); // TODO: this needs special scaling for lights.
@@ -276,7 +278,7 @@ fn rasterize_strands(
     # endif // DEBUG
     
     let geo = geos[0]; // Assuming only one strand geo for now
-    let clip_bounds = find_clip_bounds(view.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let clip_bounds = find_clip_bounds(view.unjittered_clip_from_world, geo.aabb.min, geo.aabb.max);
     let aabb_znear_zfar = vec2<f32>(clip_bounds[0].z, clip_bounds[1].z);
 
     // light relative data
@@ -330,15 +332,17 @@ fn rasterize_strands(
             let v1_world = vertices[v1_strand_idx];
 
             // Project to screen space (pixels)
-            let p0_screen = world_to_screen(v0_world, view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p1_screen = world_to_screen(v1_world, view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p0_screen = world_to_screen(v0_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p1_screen = world_to_screen(v1_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
             if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
 
             // Calculate analytical coverage
             let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
-            let dist = point_segment_distance(pixel_center, p0_screen.xy, p1_screen.xy, t);
+            if (t < 0.0 || t > 1.0) { continue; } // Skip if outside segment
+            let p_frag = mix(p0_screen, p1_screen, t);
+            let dist = distance(pixel_center, p_frag.xy);
 
             // blend hair radius from MIN to MAX based on distance to camera
             let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
@@ -360,7 +364,8 @@ fn rasterize_strands(
 
                 let hair_color = mix(shading0, shading1, clamp(t, 0.0, 1.0));
 
-                let fragment_world_pos = mix(v0_world, v1_world, clamp(t, 0.0, 1.0));
+                // let fragment_world_pos = mix(v0_world, v1_world, clamp(t, 0.0, 1.0));
+                let fragment_world_pos = vec4<f32>(screen_to_world(p_frag.xyz, view, aabb_znear_zfar), 1.0);
                 let fragment_light = world_to_screen(fragment_world_pos, cascade.clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
                 var sample_coord = vec2<f32>(fragment_light.xy / shadow_map_dims.xy);
                 
@@ -430,7 +435,7 @@ fn rasterize_strands(
             frag_count += tile_counts_buffer[calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config)];
         }
         // Debug: Output the tile_count of this tile divided by num_elements
-        let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) / f32(pc.num_elements)), 0.2);
+        let debug_color = vec4<f32>(heatmap_precise(f32(frag_count) * 10.0 / f32(pc.num_elements)), 0.2);
     # endif // DEBUG
     
     let geo = geos[0]; // Assuming only one strand geo for now
@@ -506,33 +511,39 @@ fn rasterize_strands(
             // Get world-space vertex positions
 
             // Project to screen space (pixels)
-            let p0_screen = world_to_screen(vec4<f32>(v1_world, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p1_screen = world_to_screen(vec4<f32>(v2_world, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p0_screen = world_to_screen(vec4<f32>(v0_world, 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p1_screen = world_to_screen(vec4<f32>(v1_world, 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p2_screen = world_to_screen(vec4<f32>(v2_world, 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p3_screen = world_to_screen(vec4<f32>(v3_world, 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
 
             // Skip if segment is fully behind camera or off-screen after projection
-            if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
+            if (p1_screen.x < 0.0 && p2_screen.x < 0.0) { continue; } // Basic culling
 
             // Calculate analytical coverage
-            let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
-            let p = mix(p0_screen.xyz, p1_screen.xyz, clamp(t, 0.0, 1.0));
+            let t = fragment_position_line_relative(pixel_center, p1_screen.xy, p2_screen.xy);
+            if (t < 0.0 || t > 1.0) { continue; } // Skip if outside segment
+            let p = mix(p1_screen, p2_screen, t).xyz;
             let p_world = screen_to_world(p, view, aabb_znear_zfar);
             
-            let N_ = normalize(screen_to_world(p0_screen - p1_screen, view, aabb_znear_zfar));
-            let U = normalize(view.world_position.xyz - p_world);
+            let N_ = normalize(vec3<f32>((p1_screen - p2_screen).xy, 0.0));
+            let tangent = N_;
+            let camera_dir = normalize(view.world_position - p_world);
+            let binormal = normalize(cross(tangent, camera_dir));
+            let U = world_to_screen(vec4(normalize(cross(binormal, tangent)), 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             let V = normalize(cross(N_, U));
 
-            let plane = mat3x3<f32>(p_world, U, V);
-            let intersection_points: mat4x3<f32> = intersect_catmull_rom_spline_3d(v0_world.xyz, v1_world.xyz, v2_world.xyz, v3_world.xyz, plane, spline_alpha);
+            let plane = mat3x3<f32>(p, U, V);
+            let intersection_points: mat4x3<f32> = intersect_catmull_rom_spline_3d(p0_screen.xyz, p1_screen.xyz, p2_screen.xyz, p3_screen.xyz, plane, spline_alpha);
             let mask = intersection_points[3] != vec3<f32>(0.0, 0.0, 0.0);
             if all(!mask) {
                 continue; // No intersection
             }
             let closest_point: vec3<f32> = closest_point(intersection_points, view.world_position.xyz);
-            let point_screen = world_to_screen(vec4<f32>(closest_point, 1.0), view.clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let point_screen = closest_point;
             let dist = distance(pixel_center, point_screen.xy);
 
             // blend hair radius from MIN to MAX based on distance to camera
-            let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
+            let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p1_screen.z + p2_screen.z) / 2.0);
 
             // Simple linear falloff based on distance
             let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
