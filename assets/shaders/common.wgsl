@@ -78,6 +78,59 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
 }
 
+fn world_to_screen_aabbnorm(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_clip_bounds: mat2x3<f32>) -> vec3<f32> {
+
+    // Transform from world to clip space
+    let clip_pos = clip_from_world * position;
+
+    // Check if the point is behind the camera (w <= 0 typically indicates this)
+    // Using a small epsilon might be safer depending on the projection matrix, but w < 0 is common.
+    if (clip_pos.w <= 0.0) {
+        // Point is behind the camera or exactly on the near plane in a way that causes issues.
+        return vec3<f32>(-1.0, -1.0, -1.0); // Indicate an invalid screen position
+    }
+
+    // Perform perspective division to get Normalized Device Coordinates (NDC)
+    // NDC range is typically [-1, 1] for x/y and [0, 1] or [-1, 1] for z depending on convention.
+    let ndc = clip_pos.xyz / clip_pos.w;
+
+    // Extract the min and max clip bounds for the AABB
+    let min_clip = aabb_clip_bounds[0]; // vec3
+    let max_clip = aabb_clip_bounds[1]; // vec3
+
+    // Calculate the range (delta) of the AABB in clip space
+    // Add a small epsilon to avoid division by zero if the AABB has zero size in an axis
+    let epsilon = 0.00001;
+    let clip_range = max_clip - min_clip + vec3<f32>(epsilon);
+
+    // Normalize the NDC coordinates relative to the AABB bounds
+    // This maps the AABB's clip space volume to a [0, 1] cube
+    let norm_coords = (ndc - min_clip) / clip_range;
+
+    // Clamp the normalized coordinates to the [0, 1] range.
+    // This ensures points outside the AABB's projection are clamped to its boundaries.
+    let clamped_norm_coords = clamp(norm_coords, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Convert normalized coordinates to screen coordinates
+    // X: [0, 1] -> [0, screen_width]
+    let screen_x = clamped_norm_coords.x * screen_width;
+
+    // Y: [0, 1] -> [0, screen_height] (with Y flip for top-left origin)
+    // norm_coords.y = 0 corresponds to min_clip.y (bottom in NDC)
+    // norm_coords.y = 1 corresponds to max_clip.y (top in NDC)
+    // Screen Y = 0 should be the top, so we invert norm_coords.y
+    let screen_y = (1.0 - clamped_norm_coords.y) * screen_height;
+
+    // Z: [0, 1] -> [0, 1] (depth, potentially flipped depending on convention)
+    // The reference world_to_screen function returns 1.0 - normalized_depth.
+    // Assuming norm_coords.z = 0 corresponds to the near plane of the AABB (min_clip.z)
+    // and norm_coords.z = 1 corresponds to the far plane of the AABB (max_clip.z).
+    // To match the reference (1=near, 0=far), we flip it.
+    let screen_z = 1.0 - clamped_norm_coords.z;
+
+    return vec3<f32>(screen_x, screen_y, screen_z);
+}
+
 fn screen_to_world(
     screen_pos: vec3<f32>,           // (x, y, packed_depth)
     view: View,

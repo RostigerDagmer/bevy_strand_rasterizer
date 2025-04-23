@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/spline.wgsl"::{ intersect_catmull_rom_spline_3d, closest_point };
-#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, screen_to_world, calculate_froxel_index }
+#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, screen_to_world, calculate_froxel_index }
 #import "shaders/types.wgsl"::{
     Aabb,
     FroxelConfig,
@@ -17,8 +17,8 @@ const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute p
 var<push_constant> pc: PushConstants;
 
 const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
-const MIN_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 1.0; // Example: Thickness in pixels
+const MIN_HAIR_RADIUS_PIXELS : f32 = 0.4; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 0.8; // Example: Thickness in pixels
 
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
@@ -196,8 +196,10 @@ fn rasterize_strands(
             let verts = get_segment_vertices(segment_ref);
 
             // Project to light space (pixels)
-            let p0_screen = world_to_screen(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p1_screen = world_to_screen(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            // let p0_screen = world_to_screen(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            // let p1_screen = world_to_screen(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p0_screen = world_to_screen_aabbnorm(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
+            let p1_screen = world_to_screen_aabbnorm(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
 
             // Skip if segment is fully behind camera or off-screen after projection
             // if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
@@ -263,7 +265,7 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.04;
+    let ambient_factor = 0.02;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -284,7 +286,9 @@ fn rasterize_strands(
     // light relative data
     let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
     let cascade = light.cascades[0]; // TODO: select cascade based on distance
-    let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
+    let light_cascade_clip_from_world = cascade.clip_from_world;
+
+    let light_clip_bounds = find_clip_bounds(light_cascade_clip_from_world, geo.aabb.min, geo.aabb.max);
     let light_aabb_znear_zfar = vec2<f32>(light_clip_bounds[0].z, light_clip_bounds[1].z);
     let texture_dims = textureDimensions(deep_opacity_maps);
     let shadow_map_dims = vec2<f32>(texture_dims.xy);
@@ -366,7 +370,8 @@ fn rasterize_strands(
 
                 // let fragment_world_pos = mix(v0_world, v1_world, clamp(t, 0.0, 1.0));
                 let fragment_world_pos = vec4<f32>(screen_to_world(p_frag.xyz, view, aabb_znear_zfar), 1.0);
-                let fragment_light = world_to_screen(fragment_world_pos, cascade.clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
+                // let fragment_light = world_to_screen(fragment_world_pos, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_aabb_znear_zfar);
+                let fragment_light = world_to_screen_aabbnorm(fragment_world_pos, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_clip_bounds);
                 var sample_coord = vec2<f32>(fragment_light.xy / shadow_map_dims.xy);
                 
                 let dom_depth = textureSampleLevel(deep_opacity_depth_maps, deep_opacity_depth_sampler, sample_coord, 0.0);

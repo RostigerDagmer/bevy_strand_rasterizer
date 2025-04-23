@@ -18,21 +18,25 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
+    // let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
+    let handle: Handle<DsonAsset> = asset_server.load("curly/curly.dsf".to_string());
+    // let handle: Handle<DsonAsset> = asset_server.load("Wet Messy Bang Hair/Wet Messy Bang Hair.dsf".to_string());
     commands.spawn((
         StrandAsset { handle },
         StrandMaterial {
-            // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.5),
+            // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
+            absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
-            absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
-            // specular_color: Vec4::new(0.87, 0.7, 0.38, 1.0),
-            specular_color: Vec4::new(0.82, 0.663, 0.365, 0.8),
-            ambient_factor: 0.1,
+            // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
+            // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
+            // specular_color: Vec4::new(0.82, 0.663, 0.365, 0.3),
+            specular_color: Vec4::new(0.82, 0.463, 0.465, 0.3),
+            ambient_factor: 0.05,
             ao_factor: 0.1,
             eta: 1.55,   // index of refraction
-            beta: 0.55,   // higher order path roughness
-            alpha: 0.24, // first order path roughness
-            shift: 0.01, // specular shift
+            beta: 0.5,   // higher order path roughness
+            alpha: 0.22, // first order path roughness
+            shift: 0.025, // specular shift
             pad1: 0,
             pad2: 0,
         },
@@ -40,7 +44,10 @@ fn setup(
     ));
 
     commands.spawn((
-        FroxelConfig::default(),
+        FroxelConfig {
+            depth_slices: 48,
+            ..Default::default()
+        },
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 4.1, 0.0),
@@ -76,11 +83,11 @@ fn setup(
         },
         FroxelConfig {
             // TODO: move into plugin
-            screen_width: 2048, // shadow map size in this context
-            screen_height: 2048,
+            screen_width: 512, // shadow map size in this context
+            screen_height: 512,
             froxel_size_x: 8,
             froxel_size_y: 8,
-            depth_slices: 32,
+            depth_slices: 16,
         },
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow

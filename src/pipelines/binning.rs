@@ -41,6 +41,7 @@ pub struct StrandBinningArtifactBuffers {
     pub tile_offsets_buffer: Buffer,
     pub current_tile_write_indices_buffer: Buffer,
     pub packed_segments_buffer: Buffer,
+    // pub indirect_buffer: Buffer,
 }
 
 #[derive(Resource, Default)]
@@ -397,7 +398,7 @@ pub fn prepare_binning_buffers(
     // Create the packed segments buffer
     let packed_segments_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_packed_segments_buffer"),
-        size: 1024 * 1024 * 8 * 4, // Initial size, will be resized after scan
+        size: (froxel_config.screen_width as u64) * (froxel_config.screen_height as u64) * (froxel_config.depth_slices as u64) * 4, // Initial size, will be resized after scan
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -785,6 +786,7 @@ pub fn run_binning_pass(
         let workgroup_size_x = 64; // Match shader
         let num_workgroups_x = (num_strands_or_segments + workgroup_size_x - 1) / workgroup_size_x;
         pass.dispatch_workgroups(num_workgroups_x, 1, 1);
+        // pass.dispatch_workgroups_indirect(indirect_buffer, indirect_offset);
     }
 
     // --- Binning complete ---
