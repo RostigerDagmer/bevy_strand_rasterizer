@@ -8,19 +8,12 @@ use bevy::{
     },
     prelude::*,
     render::{
-        Render, RenderApp, RenderSet,
-        extract_component::ExtractComponentPlugin,
-        render_asset::RenderAssets,
-        render_graph::{
+        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
             Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
-        },
-        render_resource::{
+        }, render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        },
-        renderer::{RenderContext, RenderDevice},
-        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
-        view::{self, ViewUniform, ViewUniformOffset, ViewUniforms, prepare_view_uniforms},
+        }, renderer::{RenderContext, RenderDevice, RenderQueue}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet
     },
 };
 
@@ -43,6 +36,7 @@ impl Plugin for StrandRasterizerPlugin {
             // ExtractComponentPlugin::<Strands>::default(),
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
+            ExtractComponentPlugin::<StrandMaterial>::default(),
         ));
         app.init_resource::<StrandAssetResources>();
         app.add_systems(Update, set_strand_geometry);
@@ -66,6 +60,7 @@ impl Plugin for StrandRasterizerPlugin {
             ((
                 use_froxel_buffer,
                 use_deep_opacity_maps,
+                update_material_buffer,
                 use_strand_geometry.after(prepare_view_uniforms),
             )
                 .chain()
@@ -501,7 +496,10 @@ fn set_strand_geometry(
         let index_buffer = ShaderStorageBuffer::from(strand_indices);
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
         let geo_buffer = ShaderStorageBuffer::from(geos_data);
-        let material_buffer = ShaderStorageBuffer::from(vec![material]);
+        let mut material_buffer = ShaderStorageBuffer::from(vec![material]);
+        material_buffer.buffer_description.usage = BufferUsages::STORAGE
+            | BufferUsages::COPY_DST
+            | BufferUsages::COPY_SRC;
         // debug!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
@@ -518,6 +516,26 @@ fn set_strand_geometry(
             max_segments_in_strand,
             aabb,
         });
+    }
+}
+
+// uploads changed material paramters to the buffer
+pub fn update_material_buffer(
+    query: Query<(Entity, &StrandGeometry, &StrandMaterial)>,
+    storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    render_queue: Res<RenderQueue>,
+) {
+    for (entity, geometry, material) in query.iter() {
+        let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
+            warn!("Material storage buffer not found for entity: {:?}", entity);
+            continue;
+        };
+        let material_bytes = bytemuck::bytes_of(material);
+        render_queue.write_buffer(
+            &material_buffer.buffer, // Get the underlying wgpu::Buffer
+            0, // Offset in the buffer to start writing (0 for the start)
+            material_bytes, // The byte slice to write
+        );
     }
 }
 

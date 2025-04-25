@@ -468,7 +468,7 @@ fn shade_strands(
 
         // view direction
         let tangent = U;
-        let camera_dir = normalize(view.world_position - (vertex.xyz + next_vertex.xyz) / 2.0);
+        let camera_dir = normalize(view.world_position - U / 2.0);
         let binormal = normalize(cross(tangent, camera_dir));
         let V = normalize(cross(binormal, tangent));
 
@@ -481,7 +481,7 @@ fn shade_strands(
             let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
             let bcsdf = marschner(vertex, L, V, U, material);
 
-            var c = bcsdf * (light.color.xyz * 0.005); // * dot(V, L);
+            var c = bcsdf * (light.color.xyz / 255.0);
             c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor); // ambient TODO: ambient lighting
 
             accum_color += vec4<f32>(c.xyz, material.absorption_color.w);

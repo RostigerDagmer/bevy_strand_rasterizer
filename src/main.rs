@@ -1,5 +1,6 @@
 use bevy::pbr::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 mod dson;
 use dson::*;
@@ -26,17 +27,19 @@ fn setup(
         StrandMaterial {
             // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
             absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
+            // absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
             // specular_color: Vec4::new(0.82, 0.663, 0.365, 0.3),
-            specular_color: Vec4::new(0.82, 0.463, 0.465, 0.3),
-            ambient_factor: 0.05,
+            specular_color: Vec4::new(0.82, 0.463, 0.465, 0.9),
+            // specular_color: Vec4::new(0.769, 0.383, 0.325, 0.9),
+            ambient_factor: 0.02,
             ao_factor: 0.1,
             eta: 1.55,   // index of refraction
-            beta: 0.5,   // higher order path roughness
-            alpha: 0.22, // first order path roughness
-            shift: 0.025, // specular shift
+            beta: 0.25,   // higher order path roughness
+            alpha: 0.05, // first order path roughness
+            shift: 0.05, // specular shift
             pad1: 0,
             pad2: 0,
         },
@@ -51,6 +54,8 @@ fn setup(
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
         PanOrbitCamera {
             focus: Vec3::new(0.0, 4.1, 0.0),
+            button_orbit: MouseButton::Right,
+            button_pan: MouseButton::Middle,
             ..Default::default()
         },
     ));
@@ -101,6 +106,74 @@ fn setup(
     ));
 }
 
+/// The egui panel that edits all StrandMaterial components in the world.
+fn strand_material_ui_system(
+    mut contexts: EguiContexts,
+    mut query: Query<&mut StrandMaterial>,
+) {
+    egui::Window::new("Strand Material")
+        .default_width(300.0)
+        .show(contexts.ctx_mut(), |ui| {
+            for mut mat in query.iter_mut() {
+                // --- Absorption Color ---
+                let mut ab = [
+                    mat.absorption_color.x,
+                    mat.absorption_color.y,
+                    mat.absorption_color.z,
+                    mat.absorption_color.w,
+                ];
+                if ui
+                    .color_edit_button_rgba_premultiplied(&mut ab)
+                    .on_hover_text("Absorption Color (RGBA)")
+                    .changed()
+                {
+                    mat.absorption_color = Vec4::from(ab);
+                }
+
+                // --- Specular Color ---
+                let mut sp = [
+                    mat.specular_color.x,
+                    mat.specular_color.y,
+                    mat.specular_color.z,
+                    mat.specular_color.w,
+                ];
+                if ui
+                    .color_edit_button_rgba_premultiplied(&mut sp)
+                    .on_hover_text("Specular Color (RGBA)")
+                    .changed()
+                {
+                    mat.specular_color = Vec4::from(sp);
+                }
+
+                ui.separator();
+
+                // --- Scalar parameters ---
+                ui.add(
+                    egui::Slider::new(&mut mat.ambient_factor, 0.0..=1.0)
+                        .text("Ambient Factor"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.ao_factor, 0.0..=1.0).text("AO Factor"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.eta, 1.0..=2.5)
+                        .text("Eta (Index of Refraction)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.beta, 0.0..=1.0).text("Beta (Roughness)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.alpha, 0.0..=1.0)
+                        .text("Alpha (Roughness)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.shift, 0.0..=1.0).text("Specular Shift"),
+                );
+            }
+        });
+}
+
+
 fn debug_print_geo(query: Query<&StrandAsset>, assets: Res<Assets<DsonAsset>>) {
     for st_asset in query.iter() {
         let Some(asset) = assets.get(&st_asset.handle) else {
@@ -142,12 +215,14 @@ fn debug_print_camera_distance_to_aabb(
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(EguiPlugin)
         .add_plugins(StrandRasterizerPlugin)
         .add_plugins(PanOrbitCameraPlugin)
         .add_plugins(perf::FpsDisplayPlugin)
         .init_asset::<DsonAsset>()
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
+        .add_systems(Update, strand_material_ui_system)
         // .add_systems(Update, debug_print_geo)
         // .add_systems(Update, debug_print_camera_distance_to_aabb)
         .run();

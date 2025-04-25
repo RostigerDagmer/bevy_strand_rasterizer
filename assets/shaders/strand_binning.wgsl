@@ -16,7 +16,7 @@
     min_root_above }
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const CULL_MAX_DIST: f32 = 100.0;
+const CULL_MAX_DIST: f32 = 75.0;
 const CULL_MIN_DIST: f32 = 8.0;
 const SHADOW_MAP_BOOST_FACTOR: f32 = 6.0;
 const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
@@ -56,7 +56,7 @@ fn stochastic_cull_camera(view: View, aabb: Aabb, sample_threshold: f32) -> bool
     let aabb_center = aabb.max - aabb.min;
     let distance = length(view.world_position - aabb_center);
     let norm_distance = max((distance - CULL_MIN_DIST), 0.0) / CULL_MAX_DIST;
-    if sample_threshold <= pow(norm_distance, 0.2) {
+    if sample_threshold <= pow(norm_distance, 0.1) {
         return true;
     }
     return false;

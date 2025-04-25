@@ -265,7 +265,7 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.02;
+    let ambient_factor = 0.03;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -427,7 +427,7 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.02;
+    let ambient_factor = 0.03;
     let hair_root_factor = 0.015;
     let spline_alpha = 1.0;
 
