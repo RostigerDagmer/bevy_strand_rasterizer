@@ -3,6 +3,9 @@ name = "strand_software_rasterizer"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.bevy.asset_metadata]
+shaders = { type = "WgslShader" }
+
 [dependencies]
 bevy = "0.15.3"
 bytemuck = "1.22.0"
@@ -13,3 +16,5 @@ anyhow = "1.0.97"
 bevy_radix_sort = "0.15.0"
 bevy_wgsl_utils = { git = "https://github.com/AllenPocketGamer/bevy_wgsl_utils.git", branch = "master" }
 bevy_panorbit_camera = "0.25.0"
+# bevy-inspector-egui = { git = "https://github.com/jakobhellermann/bevy-inspector-egui.git", rev = "8d7580b304c7202054e5d821f6269e1e32b58712" }
+bevy_egui = "0.33.0"
