@@ -78,6 +78,23 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
 }
 
+fn world_to_screen_raw(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32) -> vec3<f32> {
+    let clip_pos = clip_from_world * position;
+
+    if clip_pos.w < 0.0 {
+        // Handle point behind camera
+        return vec3<f32>(-1.0, -1.0, -1.0);
+    }
+    // Perform perspective division to get NDC coordinates
+    let ndc = clip_pos.xyz / clip_pos.w;
+
+    let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
+    let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
+    
+
+    return vec3<f32>(screen_x, screen_y, 1.0 - ndc.z);
+}
+
 fn world_to_screen_aabbnorm(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_clip_bounds: mat2x3<f32>) -> vec3<f32> {
 
     // Transform from world to clip space

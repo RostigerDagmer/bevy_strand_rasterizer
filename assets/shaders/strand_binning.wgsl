@@ -16,9 +16,9 @@
     min_root_above }
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const CULL_MAX_DIST: f32 = 75.0;
+const CULL_MAX_DIST: f32 = 100.0;
 const CULL_MIN_DIST: f32 = 8.0;
-const SHADOW_MAP_BOOST_FACTOR: f32 = 6.0;
+const SHADOW_MAP_BOOST_FACTOR: f32 = 8.0;
 const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
 
 // --- Structures ---

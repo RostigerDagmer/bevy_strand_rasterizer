@@ -17,8 +17,8 @@ use bevy::{
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
     },
-    utils::HashMap,
 };
+use std::collections::HashMap;
 
 use crate::{
     components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT,
@@ -435,6 +435,7 @@ pub fn create_strand_shadow_textures(
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: None,
+        usage: Some(TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING),
     });
     let depth_sampler = device.create_sampler(&SamplerDescriptor {
         label: Some("strand_shadow_depth_sampler"),
@@ -473,6 +474,7 @@ pub fn create_strand_shadow_textures(
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: None,
+        usage: Some(TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING),
     });
 
     let opacity_sampler = device.create_sampler(&SamplerDescriptor {

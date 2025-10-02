@@ -22,6 +22,7 @@ pub mod rasterizer {
     pub const GEO_BUFFER: u32 = 18;
     pub const DEEP_OPACITY_TEXTURE_O_VIEW: u32 = 19;
     pub const DEEP_OPACITY_TEXTURE_D_VIEW: u32 = 20;
+    pub const OUTPUT_DEPTH: u32 = 21;
 
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
@@ -33,6 +34,7 @@ pub mod rasterizer {
             ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
             ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
+            ShaderDefVal::UInt("OUTPUT_DEPTH".into(), OUTPUT_DEPTH),
             ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("SHADING_BUFFER".into(), SHADING_BUFFER),

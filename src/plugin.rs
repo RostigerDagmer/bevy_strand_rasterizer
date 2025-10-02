@@ -25,7 +25,6 @@ use crate::{
     shader_types::*,
 };
 
-const MAX_NUMBER_OF_STRANDS: u32 = 1024 * 1024; // for physics
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
 
 pub struct StrandRasterizerPlugin;
@@ -77,8 +76,6 @@ impl Plugin for StrandRasterizerPlugin {
             // you need to extract it manually or with the plugin like above.
             // Add a [`Node`] to the [`RenderGraph`]
             // The Node needs to impl FromWorld (dealt with by derive(Default))
-            // .add_render_graph_node::<SpatialHashingNode>(Core3d, SpatialHashingLabel)
-            // .add_render_graph_node::<SimpleGpuSortNode>(Core3d, SimpleGpuSortNodeLabel)
             .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
             .add_render_graph_node::<CompositionNode>(Core3d, CompositionLabel)
             // .add_render_graph_edge(
@@ -315,7 +312,7 @@ impl Node for StrandRasterizerNode {
                     render_context,
                     pipeline_cache,
                     shadow_pipeline,
-                    frustrum,
+                    &frustrum,
                     &raster_resources,
                     &shading_resources,
                     &shadows_bindgroup,
@@ -572,8 +569,10 @@ fn use_froxel_buffer(
             packed_segments_buffer,
         ) = prepare_binning_buffers(&device, config);
 
-        let (texture, view) = create_render_target_texture(&device, config);
-        raster_resources.output_texture = Some(view);
+        let (texture, target_view) = create_render_target_texture(&device, config);
+        let (texture, depth_view) = create_render_target_depth_texture(&device, config);
+        raster_resources.output_texture = Some(target_view);
+        raster_resources.output_depth = Some(depth_view);
         // modify the resource
         raster_resources
             .froxel_buffer

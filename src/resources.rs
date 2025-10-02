@@ -1,5 +1,6 @@
-use bevy::{prelude::*, render::render_resource::BindGroup, utils::HashMap};
 use crate::shader_types::PushConstants;
+use bevy::{prelude::*, render::render_resource::BindGroup};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct StrandAssetInstance {

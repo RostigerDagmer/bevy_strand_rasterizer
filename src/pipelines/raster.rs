@@ -13,8 +13,10 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, utils::HashMap
+    },
 };
+
+use std::collections::HashMap;
 
 use crate::{
     components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT,
@@ -31,6 +33,7 @@ pub struct StrandRasterizerResources {
     pub froxel_buffer: HashMap<Entity, Buffer>,
     pub froxel_config_buffer: HashMap<Entity, Buffer>,
     pub output_texture: Option<TextureView>,
+    pub output_depth: Option<TextureView>,
     pub strand_count: Option<u32>,
     pub frustrum_config: HashMap<Entity, FroxelConfig>,
 }
@@ -130,6 +133,17 @@ impl StrandRasterizerPipeline {
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
                         format: TextureFormat::Rgba8Unorm,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                // Output depth texture (write-only storage texture)
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::OUTPUT_DEPTH,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::R32Float,
                         view_dimension: TextureViewDimension::D2,
                     },
                     count: None,
@@ -318,6 +332,7 @@ pub fn create_strand_raster_bind_group(
     let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
     let packed_segments = resources.froxel_buffer.get(entity).ok_or(())?;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
+    let output_depth = resources.output_depth.as_ref().ok_or(())?;
     let froxel_config_buffer = resources.froxel_config_buffer.get(entity).ok_or(())?;
     let shading_buffer = shading_resources.output_texture.as_ref().ok_or(())?;
 
@@ -357,6 +372,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::OUTPUT_DEPTH,
+                    resource: BindingResource::TextureView(output_depth),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::VIEW_UNIFORM,
@@ -412,6 +431,28 @@ pub fn create_render_target_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    (texture, view)
+}
+
+pub fn create_render_target_depth_texture(
+    device: &RenderDevice,
+    config: &FroxelConfig,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_rasterizer_output"),
+        size: Extent3d {
+            width: config.screen_width,
+            height: config.screen_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R32Float,
         usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });

@@ -1,8 +1,8 @@
 use bevy::{
-    core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state, prelude::*, render::{
+    core_pipeline::{fullscreen_vertex_shader::fullscreen_shader_vertex_state, prepass::ViewPrepassTextures}, prelude::*, render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel}, render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState, PushConstantRange, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, StoreOp, TextureFormat, TextureSampleType, TextureView, TextureViewDimension
-        }, renderer::{RenderContext, RenderDevice}, view::{ViewTarget, ViewUniform}
+        }, renderer::{RenderContext, RenderDevice}, view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms}
     }
 };
 
@@ -29,6 +29,17 @@ impl FromWorld for CompositionPipeline {
                 BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: Some(ViewUniform::min_size()),
+                    },
+                    count: None,
+                },
+                // Input Scene Texture
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float { filterable: true }, // Assuming HDR intermediate
                         view_dimension: TextureViewDimension::D2,
@@ -38,19 +49,39 @@ impl FromWorld for CompositionPipeline {
                 },
                 // Sampler
                 BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 2,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
                 // Strand Rasterizer Output Texture
                 BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: 3,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float { filterable: true }, // Or Uint/Sint if format is different, but sampling rgba8unorm as float is fine
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true }, // Or Uint/Sint if format is different, but sampling rgba8unorm as float is fine
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth { },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
                     },
                     count: None,
                 },
@@ -116,10 +147,26 @@ impl Node for CompositionNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.view_entity();
+        let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
+        
         let Some(view_target) = world.get::<ViewTarget>(view_entity) else {
             // This can happen if the view doesn't have a ViewTarget
             // (e.g., shadow map views, reflection probes)
             debug!("View entity {:?} does not have a ViewTarget", view_entity);
+            return Ok(());
+        };
+        
+        let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        let Some(depth_target) = world.get::<ViewPrepassTextures>(view_entity) else {
+            warn!("View entity {:?} does not have a DepthTarget", view_entity);
             return Ok(());
         };
         let Some(composition_pipeline) = world.get_resource::<CompositionPipeline>() else {
@@ -135,17 +182,24 @@ impl Node for CompositionNode {
             warn!("Strand output texture not ready");
             return Ok(());
         };
+        let Some(strand_depth_texture) = strand_raster_resources.output_depth.as_ref() else {
+            warn!("Strand depth texture not ready");
+            return Ok(());
+        };
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(pipeline) = pipeline_cache.get_render_pipeline(composition_pipeline.pipeline)
         else {
-            warn!("Composition render pipeline not ready");
+            warn!("Composition render pipeline not ready (pipeline cache)");
             return Ok(());
         };
 
         // Get the input texture (result of main pass)
-        // In 0.13+, use get_color_attachment() which handles intermediate textures
+        // let input_texture = view_target.get_color_attachment().view; // <- this one is multisampled 
         let input_texture = view_target.main_texture_view();
+        info!("Depth target {:?}", depth_target.depth_view());
+        let scene_depth_texture = depth_target.depth_view().expect("Depth prepass enabled");
+
 
         let bind_group = render_context.render_device().create_bind_group(
             "composition_bind_group",
@@ -153,15 +207,27 @@ impl Node for CompositionNode {
             &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: BindingResource::TextureView(input_texture), // Main scene texture
+                    resource: view_uniforms.uniforms.binding().unwrap(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::Sampler(&composition_pipeline.sampler),
+                    resource: BindingResource::TextureView(input_texture), // Main scene texture
                 },
                 BindGroupEntry {
                     binding: 2,
+                    resource: BindingResource::Sampler(&composition_pipeline.sampler),
+                },
+                BindGroupEntry {
+                    binding: 3,
                     resource: BindingResource::TextureView(strand_output_texture), // Strand texture
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::TextureView(strand_depth_texture), // Strand depth texture
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: BindingResource::TextureView(scene_depth_texture), // Scene depth texture
                 },
             ],
         );
@@ -190,7 +256,7 @@ impl Node for CompositionNode {
         });
 
         render_pass.set_render_pipeline(pipeline);
-        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         render_pass.draw(0..3, 0..1); // Draw a fullscreen triangle
 
         Ok(())

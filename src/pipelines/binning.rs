@@ -8,11 +8,12 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, utils::HashMap
+    },
 };
-use bevy_radix_sort::dispatch_workgroup_ext;
 
-use crate::{components::FroxelConfig, pipelines::layouts, shader_types::PushConstants};
+use std::collections::HashMap;
+
+use crate::{components::FroxelConfig, pipelines::{ext::dispatch_workgroup_ext, layouts}, shader_types::PushConstants};
 
 use super::raster::StrandRasterizerResources;
 

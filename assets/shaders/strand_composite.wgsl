@@ -1,42 +1,34 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
+#import bevy_render::view::View
 
 // Input textures and sampler
-@group(0) @binding(0) var scene_texture: texture_2d<f32>;
-@group(0) @binding(1) var texture_sampler: sampler;
-@group(0) @binding(2) var strand_texture: texture_2d<f32>; // Input is rgba8unorm, but sampling as f32 is fine
+@group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var scene_texture: texture_2d<f32>;
+@group(0) @binding(2) var texture_sampler: sampler;
+@group(0) @binding(3) var strand_texture: texture_2d<f32>; // Input is rgba8unorm, but sampling as f32 is fine
+@group(0) @binding(4) var strand_depth: texture_2d<f32>;
+@group(0) @binding(5) var scene_depth: texture_depth_multisampled_2d;
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Sample the main scene texture
     let scene_color = textureSample(scene_texture, texture_sampler, in.uv);
+    let icoord  = in.uv * view.viewport.zw; // integer coordinates
+    let scene_depth = textureLoad(scene_depth, vec2<i32>(icoord), 0);
+    let strand_depth = textureSample(strand_depth, texture_sampler, in.uv).x;
 
-    // Sample the strand heatmap texture
-    // Use textureLoad if sizes/coords match exactly and no filtering needed
-    // let strand_tex_size = textureDimensions(strand_texture);
-    // let coord = vec2<i32>(floor(in.uv * vec2<f32>(strand_tex_size)));
-    // let strand_color = textureLoad(strand_texture, coord, 0); // Load directly
+    // let min_depth = max(strand_depth, scene_depth);
+    // return vec4<f32>(min_depth, min_depth, min_depth, 1.0);
 
-    // Or sample if filtering/different coords
-     let strand_color = textureSample(strand_texture, texture_sampler, in.uv);
+    if (scene_depth > strand_depth) {
+        // early out if there's nothing to blend
+        return scene_color;
+    }
 
-    // --- Blending Logic ---
-    // Option A: Alpha Blending (using strand_color.a)
-    // Assumes strand_color has meaningful alpha (like the 0.2 you set)
+    let strand_color = textureSample(strand_texture, texture_sampler, in.uv);
+
     let blended_color = mix(scene_color.rgb, strand_color.rgb, strand_color.a);
     let final_alpha = scene_color.a; // Keep original scene alpha or blend if needed
 
-    // Option B: Additive Blending (good for heatmaps)
-    // let blended_color = scene_color.rgb + strand_color.rgb * strand_color.a; // Modulate by alpha
-    // let final_alpha = scene_color.a;
-
-    // Option C: Simple Overlay (if strand_color alpha is just for intensity)
-    // let blended_color = scene_color.rgb + strand_color.rgb;
-    // let final_alpha = scene_color.a;
-
-
     return vec4<f32>(blended_color, final_alpha);
-    // Debug: Just show strand texture
-    // return strand_color;
-    // Debug: Just show scene texture
-    // return scene_color;
 }

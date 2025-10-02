@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/spline.wgsl"::{ intersect_catmull_rom_spline_3d, closest_point };
-#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, screen_to_world, calculate_froxel_index }
+#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world, calculate_froxel_index }
 #import "shaders/types.wgsl"::{
     Aabb,
     FroxelConfig,
@@ -28,6 +28,7 @@ const MAX_HAIR_RADIUS_PIXELS : f32 = 0.8; // Example: Thickness in pixels
 @group(0) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
 @group(0) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
 @group(0) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
 @group(0) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
 @group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(0) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
@@ -108,7 +109,7 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
 }
 
 // #define DEBUG
-const GAMMA: f32 = 0.3; // distribution coefficient for DOM slices.
+const GAMMA: f32 = 1.0; // distribution coefficient for DOM slices.
 
 #ifdef SHADOWS 
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
@@ -198,8 +199,10 @@ fn rasterize_strands(
             // Project to light space (pixels)
             // let p0_screen = world_to_screen(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             // let p1_screen = world_to_screen(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p0_screen = world_to_screen_aabbnorm(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
-            let p1_screen = world_to_screen_aabbnorm(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
+            // let p0_screen = world_to_screen_aabbnorm(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
+            // let p1_screen = world_to_screen_aabbnorm(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height), clip_bounds);
+            let p0_screen = world_to_screen_raw(verts[0], clip_from_world, f32(config.screen_width), f32(config.screen_height));
+            let p1_screen = world_to_screen_raw(verts[1], clip_from_world, f32(config.screen_width), f32(config.screen_height));
 
             // Skip if segment is fully behind camera or off-screen after projection
             // if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { 
@@ -293,6 +296,7 @@ fn rasterize_strands(
     let texture_dims = textureDimensions(deep_opacity_maps);
     let shadow_map_dims = vec2<f32>(texture_dims.xy);
     let depth_texture_slices = texture_dims.z;
+    var g_min_depth: f32 = 1.0;
 
     for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
 
@@ -336,8 +340,10 @@ fn rasterize_strands(
             let v1_world = vertices[v1_strand_idx];
 
             // Project to screen space (pixels)
-            let p0_screen = world_to_screen(v0_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
-            let p1_screen = world_to_screen(v1_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            // let p0_screen = world_to_screen(v0_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            // let p1_screen = world_to_screen(v1_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
+            let p0_screen = world_to_screen_raw(v0_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height));
+            let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height));
 
             // Skip if segment is fully behind camera or off-screen after projection
             if (p0_screen.x < 0.0 && p1_screen.x < 0.0) { continue; } // Basic culling
@@ -347,6 +353,9 @@ fn rasterize_strands(
             if (t < 0.0 || t > 1.0) { continue; } // Skip if outside segment
             let p_frag = mix(p0_screen, p1_screen, t);
             let dist = distance(pixel_center, p_frag.xy);
+            // let ndc_p_frag_z = (p_frag.z * (aabb_znear_zfar.y - aabb_znear_zfar.x)) + aabb_znear_zfar.x;
+            // let world_p_frag = screen_to_world(p_frag, view, aabb_znear_zfar);
+            // let ndc_p_frag_z = world_to_screen_ndc(vec4<f32>(world_p_frag, 1.0), view.unjittered_clip_from_world, f32(config.screen_width), f32(config.screen_height));
 
             // blend hair radius from MIN to MAX based on distance to camera
             let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, (p0_screen.z + p1_screen.z) / 2.0);
@@ -386,6 +395,8 @@ fn rasterize_strands(
                 let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
                 // transmittance accumulation
                 froxel_color = blend_over(froxel_color, hair_fragment);
+                g_min_depth = min(g_min_depth, p_frag.z);
+                // g_min_depth = min(g_min_depth, ndc_p_frag_z);
             }
             if (froxel_color.a > 0.9995) {
                 break; // Stop processing this segment
@@ -410,6 +421,7 @@ fn rasterize_strands(
 
     // Write the final accumulated color to the render target
     textureStore(render_target, pixel_coord_int, final_color);
+    textureStore(depth_target, pixel_coord_int, vec4<f32>(1.0 - g_min_depth, 0.0, 0.0, 0.0));
 }
 #endif
 

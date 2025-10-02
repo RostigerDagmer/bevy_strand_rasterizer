@@ -15,7 +15,7 @@ impl Plugin for FpsDisplayPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<GlobalZIndex>();
 
-        app.add_plugins(FrameTimeDiagnosticsPlugin)
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_systems(Startup, setup_fps_ui_strict)
             .add_systems(Update, update_fps_value);
     }
