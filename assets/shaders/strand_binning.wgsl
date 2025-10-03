@@ -18,7 +18,7 @@
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
 const CULL_MAX_DIST: f32 = 100.0;
 const CULL_MIN_DIST: f32 = 8.0;
-const SHADOW_MAP_BOOST_FACTOR: f32 = 8.0;
+const SHADOW_MAP_BOOST_FACTOR: f32 = 5.0;
 const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
 
 // --- Structures ---
@@ -63,14 +63,15 @@ fn stochastic_cull_camera(view: View, aabb: Aabb, sample_threshold: f32) -> bool
 }
 
 fn stochastic_cull_light(aabb_clip: mat2x3<f32>, sample_threshold: f32) -> bool {
-    let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
-    let area = coverage.x * coverage.y;
-    let lod_threshold = clamp((sqrt(area) * SHADOW_MAP_BOOST_FACTOR), 0.0, 1.0);
-    if sample_threshold > lod_threshold { // lod_threshold {
-        return false;
-    } else {
-        return true;
-    }
+    // let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
+    // let area = coverage.x * coverage.y;
+    // let lod_threshold = clamp((sqrt(area) * SHADOW_MAP_BOOST_FACTOR), 0.0, 1.0);
+    // if sample_threshold > lod_threshold { // lod_threshold {
+    //     return false;
+    // } else {
+    //     return true;
+    // }
+    return false;
 }
 
 #ifdef STAGE_PLACE

@@ -19,15 +19,18 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
-    // let handle: Handle<DsonAsset> = asset_server.load("curly/curly.dsf".to_string());
+    // let handle: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
+    let handle: Handle<DsonAsset> = asset_server.load("curly/curly.dsf".to_string());
     // let handle: Handle<DsonAsset> = asset_server.load("Wet Messy Bang Hair/Wet Messy Bang Hair.dsf".to_string());
     commands.spawn((
         StrandAsset { handle },
         StrandMaterial {
+            // absorption_color: Vec4::new(0.7, 0.7, 0.7, 0.5),
+            // specular_color: Vec4::new(0.7, 0.7, 0.7, 0.1),
+
             // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
-            absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
-            // absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
+            // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
+            absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
@@ -37,8 +40,10 @@ fn setup(
             ambient_factor: 0.02,
             ao_factor: 0.1,
             eta: 1.55,   // index of refraction
-            beta: 0.25,   // higher order path roughness
-            alpha: 0.05, // first order path roughness
+            // beta: 0.25,   // higher order path roughness
+            // alpha: 0.05, // first order path roughness
+            beta: 0.45,
+            alpha: 0.1,
             shift: 0.05, // specular shift
             pad1: 0,
             pad2: 0,
@@ -48,7 +53,7 @@ fn setup(
 
     commands.spawn((
         FroxelConfig {
-            depth_slices: 24,
+            depth_slices: 64,
             ..Default::default()
         },
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
@@ -62,9 +67,9 @@ fn setup(
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(0.3))),
+        Mesh3d(meshes.add(Sphere::new(0.2))),
         MeshMaterial3d(materials.add(Color::srgb_u8(124, 144, 255))),
-        Transform::from_xyz(0.0, 3.5, 0.0),
+        Transform::from_xyz(0.0, 4.0, 0.05),
     ));
 
     // add one light

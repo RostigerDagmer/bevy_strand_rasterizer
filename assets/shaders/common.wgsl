@@ -78,21 +78,20 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
     return vec3<f32>(screen_x, screen_y, 1.0 - screen_z);
 }
 
-fn world_to_screen_raw(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32) -> vec3<f32> {
-    let clip_pos = clip_from_world * position;
-
-    if clip_pos.w < 0.0 {
-        // Handle point behind camera
+fn world_to_screen_raw(
+    position: vec4<f32>,
+    clip_from_world: mat4x4<f32>,
+    viewport: vec4<f32>, // (x, y, w, h)
+) -> vec3<f32> {
+    let clip = clip_from_world * position;
+    if clip.w <= 0.0 {
         return vec3<f32>(-1.0, -1.0, -1.0);
     }
-    // Perform perspective division to get NDC coordinates
-    let ndc = clip_pos.xyz / clip_pos.w;
-
-    let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
-    let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
-    
-
-    return vec3<f32>(screen_x, screen_y, 1.0 - ndc.z);
+    let ndc = clip.xyz / clip.w; // ndc in [-1,1]^2 x [0,1] (wgpu/Vulkan)
+    let sx = viewport.x + (ndc.x * 0.5 + 0.5) * viewport.z;
+    let sy = viewport.y + (ndc.y * -0.5 + 0.5) * viewport.w; // flip Y (top-left origin)
+    // return NDC z directly (no reversal)
+    return vec3<f32>(sx, sy, ndc.z);
 }
 
 fn world_to_screen_aabbnorm(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_clip_bounds: mat2x3<f32>) -> vec3<f32> {
@@ -168,6 +167,27 @@ fn screen_to_world(
     let ndc_point = vec4<f32>(ndc_x, ndc_y, ndc_z, 1.0);
     let world_h = view.world_from_clip * ndc_point;
 
+    return world_h.xyz / world_h.w;
+}
+
+fn screen_to_world_raw(
+    screen_pos: vec3<f32>,      // (x, y, ndc_z)
+    view: View,                 // has view.world_from_clip and view.viewport
+    viewport: vec4<f32>,
+) -> vec3<f32> {
+    let vp = viewport; // (x, y, w, h)
+
+    // normalize to viewport-local [0,1]
+    let u = (screen_pos.x - vp.x) / vp.z;
+    let v = (screen_pos.y - vp.y) / vp.w;
+
+    // NDC
+    let ndc_x = u * 2.0 - 1.0;
+    let ndc_y = 1.0 - v * 2.0; // undo top-left origin
+    let ndc_z = screen_pos.z;  // already NDC z
+
+    let clip_p = vec4<f32>(ndc_x, ndc_y, ndc_z, 1.0);
+    let world_h = view.world_from_clip * clip_p;
     return world_h.xyz / world_h.w;
 }
 
