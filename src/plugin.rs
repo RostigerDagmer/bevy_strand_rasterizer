@@ -8,12 +8,22 @@ use bevy::{
     },
     prelude::*,
     render::{
-        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
+        Render, RenderApp, RenderSet,
+        extract_component::ExtractComponentPlugin,
+        render_asset::RenderAssets,
+        render_graph::{
             Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
-        }, render_resource::{
+        },
+        render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        }, renderer::{RenderContext, RenderDevice, RenderQueue}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{self, prepare_view_uniforms, ViewUniform, ViewUniformOffset, ViewUniforms}, Render, RenderApp, RenderSet
+        },
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        view::{
+            self, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
+            prepare_view_uniforms,
+        },
     },
 };
 
@@ -38,7 +48,16 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<StrandMaterial>::default(),
         ));
         app.init_resource::<StrandAssetResources>();
-        app.add_systems(Update, set_strand_geometry);
+        app.add_systems(
+            Update,
+            (
+                set_strand_geometry,
+                flag_realloc_on_view_change,
+                flag_realloc_on_config_change,
+                flag_realloc_on_tie_change,
+                tie_view_to_froxel_config,
+            ),
+        );
     }
     fn finish(&self, app: &mut App) {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -77,22 +96,27 @@ impl Plugin for StrandRasterizerPlugin {
             // Add a [`Node`] to the [`RenderGraph`]
             // The Node needs to impl FromWorld (dealt with by derive(Default))
             .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
+            .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
+            .add_render_graph_node::<StrandShadowRasterizerNode>(
+                Core3d,
+                StrandShadowRasterizerLabel,
+            )
             .add_render_graph_node::<CompositionNode>(Core3d, CompositionLabel)
-            // .add_render_graph_edge(
-            //     Core3d,
-            //     SpatialHashingLabel,
-            //     bevy::core_pipeline::core_3d::graph::Node3d::EndPrepasses,
-            // )
-            // .add_render_graph_edge(Core3d, SimpleGpuSortNodeLabel, SpatialHashingLabel)
-            // .add_render_graph_edge(Core3d, StrandRasterizerLabel, SimpleGpuSortNodeLabel)
             .add_render_graph_edge(
                 Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
+                bevy::core_pipeline::core_3d::graph::Node3d::EndPrepasses,
+                StrandShadowRasterizerLabel,
+            )
+            .add_render_graph_edge(Core3d, StrandShadowRasterizerLabel, StrandShadingLabel)
+            .add_render_graph_edge(Core3d, StrandShadingLabel, StrandRasterizerLabel) // run after ALL shadow maps are present
+            .add_render_graph_edge(
+                Core3d,
                 StrandRasterizerLabel,
+                CompositionLabel, // Run after strand rasterization
             )
             .add_render_graph_edge(
                 Core3d,
-                StrandRasterizerLabel, // Run after strand rasterization
+                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass, // Run before composition
                 CompositionLabel,
             )
             .add_render_graph_edge(
@@ -104,12 +128,222 @@ impl Plugin for StrandRasterizerPlugin {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct StrandRasterizerNode;
+pub struct StrandShadowRasterizerNode;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
-pub struct StrandRasterizerLabel;
+pub struct StrandShadowRasterizerLabel;
 
-impl Node for StrandRasterizerNode {
+impl Node for StrandShadowRasterizerNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if !world.contains_resource::<StrandRasterizerResources>() {
+            return Ok(());
+        }
+        let view_entity = graph.view_entity(); // Get the entity this node instance is running for
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let render_device = world.resource::<RenderDevice>();
+        let raster_resources = world.resource::<StrandRasterizerResources>();
+        let shadow_pipeline = world.resource::<StrandShadowPipeline>();
+        let binning_pipeline = world.resource::<StrandBinningPipeline>();
+        let shadow_resources = world.resource::<StrandShadowResources>();
+        let binning_buffers = world.resource::<StrandBinningBuffers>();
+        let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
+        let light_meta = world.resource::<LightMeta>(); // Get light meta
+        let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
+        let shadow_samplers = world.resource::<ShadowSamplers>();
+
+        let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity)
+        else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewLightUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        // --- Check Prerequisites ---
+        let Some(view_binding) = view_uniforms.uniforms.binding() else {
+            warn!("ViewUniforms binding not available.");
+            return Ok(());
+        };
+
+        let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without LightBinding",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        let Some(clusterable_objects) = global_clusterable_object_meta
+            .gpu_clusterable_objects
+            .binding()
+        else {
+            warn!("GlobalClusterableObjectMeta binding not available.");
+            return Ok(());
+        };
+
+        let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
+            warn!(
+                "Node running on view {:?} without ViewClusterBindings",
+                view_entity
+            );
+            // This might be expected if clustering isn't enabled/used for this view?
+            return Ok(()); // Adjust handling if necessary
+        };
+
+        let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
+            warn!(
+                "Node running on view {:?} without ViewShadowBindings",
+                view_entity
+            );
+            // This is expected for views rendering shadow maps, but required for views sampling them.
+            // If your node ONLY samples shadows, this might be an error.
+            // If your node might run on shadow views, handle appropriately.
+            return Ok(()); // Adjust handling if necessary
+        };
+        let Some(cluster_indices_binding) =
+            view_cluster_bindings.clusterable_object_index_lists_binding()
+        else {
+            warn!(
+                "ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding()
+        else {
+            warn!(
+                "ViewClusterBindings offsets_and_counts_binding not available for view {:?}",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        for entity in raster_resources.froxel_config_buffer.keys() {
+            debug!("Dispatching for entity: {:?}", entity);
+            // Get the dimensions to calculate dispatch size
+            let Some(frustrum) = raster_resources.frustrum_config.get(entity) else {
+                warn!("No frustum size defined.");
+                return Ok(());
+            };
+
+            // Get the strand count for dispatch dimensions
+            let Some(strand_count) = raster_resources.strand_count else {
+                warn!("No strand count set.");
+                return Ok(());
+            };
+
+            if *entity != view_entity {
+                debug!("light entity: {:?}", entity);
+                let Ok((shadows_bindgroup, dynamic_offsets)) = &create_strand_shadow_bind_group(
+                    entity,
+                    render_device,
+                    shadow_pipeline,
+                    shadow_resources,
+                    &raster_resources,
+                    binning_buffers,
+                    &view_binding,
+                    &light_binding,
+                    view_uniform_offset,
+                    view_light_uniform_offset,
+                    &cluster_indices_binding,
+                    &cluster_offsets_binding,
+                    &clusterable_objects,
+                    shadow_samplers,
+                    (
+                        &view_shadow_bindings.point_light_depth_texture_view,
+                        &view_shadow_bindings.directional_light_depth_texture_view,
+                    ),
+                ) else {
+                    warn!("Failed to create strand shadow bind group.");
+                    continue;
+                };
+                // Binning bind group (shadow pass)
+                let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
+                    &entity,
+                    render_device,
+                    binning_pipeline,
+                    view_binding.clone(),
+                    view_uniform_offset,
+                    light_binding.clone(),
+                    view_light_uniform_offset,
+                    raster_resources,
+                    binning_buffers,
+                ) else {
+                    warn!("Failed to create strand binning bind group for shadows .");
+                    return Ok(());
+                };
+
+                run_binning_pass(
+                    &entity,
+                    render_device,
+                    render_context,
+                    pipeline_cache,
+                    strand_binning_bind_groups,
+                    binning_buffers,
+                    binning_pipeline,
+                    &frustrum,
+                    strand_count,
+                    true,
+                );
+
+                run_shadow_pass(
+                    render_context,
+                    pipeline_cache,
+                    shadow_pipeline,
+                    &frustrum,
+                    &raster_resources,
+                    &shadows_bindgroup,
+                    &dynamic_offsets,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DomPunchThroughNode;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct DomPunchThroughLabel;
+
+impl Node for DomPunchThroughNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        // pass
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StrandShadingNode;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct StrandShadingLabel;
+
+impl Node for StrandShadingNode {
     fn run(
         &self,
         graph: &mut RenderGraphContext,
@@ -124,14 +358,11 @@ impl Node for StrandRasterizerNode {
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let render_device = world.resource::<RenderDevice>();
-        let binning_pipeline = world.resource::<StrandBinningPipeline>();
         let shading_pipeline = world.resource::<StrandShadingPipeline>();
-        let shadow_pipeline = world.resource::<StrandShadowPipeline>();
-        let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
         let binning_buffers = world.resource::<StrandBinningBuffers>();
+        let raster_resources = world.resource::<StrandRasterizerResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
         let shadow_resources = world.resource::<StrandShadowResources>();
-        let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
         let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -187,16 +418,6 @@ impl Node for StrandRasterizerNode {
             return Ok(()); // Adjust handling if necessary
         };
 
-        let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
-            warn!(
-                "Node running on view {:?} without ViewShadowBindings",
-                view_entity
-            );
-            // This is expected for views rendering shadow maps, but required for views sampling them.
-            // If your node ONLY samples shadows, this might be an error.
-            // If your node might run on shadow views, handle appropriately.
-            return Ok(()); // Adjust handling if necessary
-        };
         let Some(cluster_indices_binding) =
             view_cluster_bindings.clusterable_object_index_lists_binding()
         else {
@@ -218,9 +439,12 @@ impl Node for StrandRasterizerNode {
 
         // Shading bind group
         let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
+            &view_entity,
             render_device,
             &shading_pipeline,
+            raster_resources,
             &shading_resources,
+            &shadow_resources,
             &binning_buffers,
             &view_binding,
             &light_binding,
@@ -244,82 +468,150 @@ impl Node for StrandRasterizerNode {
             &shading_group_offsets,
         );
 
-        for entity in raster_resources.froxel_config_buffer.keys() {
-            debug!("Dispatching for entity: {:?}", entity);
-            // Get the dimensions to calculate dispatch size
-            let Some(frustrum) = raster_resources.frustrum_config.get(entity) else {
-                warn!("No frustum size defined.");
-                return Ok(());
-            };
+        Ok(())
+    }
+}
 
-            // Get the strand count for dispatch dimensions
-            let Some(strand_count) = raster_resources.strand_count else {
-                warn!("No strand count set.");
-                return Ok(());
-            };
+#[derive(Debug, Clone, Default)]
+pub struct StrandRasterizerNode;
 
-            if *entity != view_entity {
-                debug!("light entity: {:?}", entity);
-                let Ok((shadows_bindgroup, dynamic_offsets)) = &create_strand_shadow_bind_group(
-                    entity,
-                    render_device,
-                    shadow_pipeline,
-                    shadow_resources,
-                    &raster_resources,
-                    binning_buffers,
-                    &view_binding,
-                    &light_binding,
-                    view_uniform_offset,
-                    view_light_uniform_offset,
-                    &cluster_indices_binding,
-                    &cluster_offsets_binding,
-                    &clusterable_objects,
-                    shadow_samplers,
-                ) else {
-                    warn!("Failed to create strand shadow bind group.");
-                    continue;
-                };
-                // Binning bind group (shadow pass)
-                let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
-                    &entity,
-                    render_device,
-                    binning_pipeline,
-                    view_binding.clone(),
-                    view_uniform_offset,
-                    light_binding.clone(),
-                    view_light_uniform_offset,
-                    raster_resources,
-                    binning_buffers,
-                ) else {
-                    warn!("Failed to create strand binning bind group for shadows .");
-                    return Ok(());
-                };
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct StrandRasterizerLabel;
 
-                run_binning_pass(
-                    &entity,
-                    render_device,
-                    render_context,
-                    pipeline_cache,
-                    strand_binning_bind_groups,
-                    binning_buffers,
-                    binning_pipeline,
-                    &frustrum,
-                    strand_count,
-                    true,
-                );
-
-                run_shadow_pass(
-                    render_context,
-                    pipeline_cache,
-                    shadow_pipeline,
-                    &frustrum,
-                    &raster_resources,
-                    &shading_resources,
-                    &shadows_bindgroup,
-                    &dynamic_offsets,
-                );
-            }
+impl Node for StrandRasterizerNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        // Check if we have resources
+        if !world.contains_resource::<StrandRasterizerResources>() {
+            return Ok(());
         }
+        let view_entity = graph.view_entity(); // Get the entity this node instance is running for
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let render_device = world.resource::<RenderDevice>();
+        let binning_pipeline = world.resource::<StrandBinningPipeline>();
+        // let shading_pipeline = world.resource::<StrandShadingPipeline>();
+        // let shadow_pipeline = world.resource::<StrandShadowPipeline>();
+        let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
+        let binning_buffers = world.resource::<StrandBinningBuffers>();
+        let shading_resources = world.resource::<StrandShadingResources>();
+        let shadow_resources = world.resource::<StrandShadowResources>();
+        let raster_resources = world.resource::<StrandRasterizerResources>();
+        let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
+        let light_meta = world.resource::<LightMeta>(); // Get light meta
+        // let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
+        // let shadow_samplers = world.resource::<ShadowSamplers>();
+
+        let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity)
+        else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without ViewLightUniformOffset",
+                view_entity
+            );
+            return Ok(());
+        };
+
+        // --- Check Prerequisites ---
+        let Some(view_binding) = view_uniforms.uniforms.binding() else {
+            warn!("ViewUniforms binding not available.");
+            return Ok(());
+        };
+
+        let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
+            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
+            warn!(
+                "Node running on view {:?} without LightBinding",
+                view_entity
+            );
+            return Ok(());
+        };
+        // let Some(clusterable_objects) = global_clusterable_object_meta
+        //     .gpu_clusterable_objects
+        //     .binding()
+        // else {
+        //     warn!("GlobalClusterableObjectMeta binding not available.");
+        //     return Ok(());
+        // };
+
+        // let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
+        //     warn!(
+        //         "Node running on view {:?} without ViewClusterBindings",
+        //         view_entity
+        //     );
+        //     // This might be expected if clustering isn't enabled/used for this view?
+        //     return Ok(()); // Adjust handling if necessary
+        // };
+
+        // let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
+        //     warn!(
+        //         "Node running on view {:?} without ViewShadowBindings",
+        //         view_entity
+        //     );
+        //     // This is expected for views rendering shadow maps, but required for views sampling them.
+        //     // If your node ONLY samples shadows, this might be an error.
+        //     // If your node might run on shadow views, handle appropriately.
+        //     return Ok(()); // Adjust handling if necessary
+        // };
+        // let Some(cluster_indices_binding) =
+        //     view_cluster_bindings.clusterable_object_index_lists_binding()
+        // else {
+        //     warn!(
+        //         "ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}",
+        //         view_entity
+        //     );
+        //     return Ok(());
+        // };
+
+        // let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding()
+        // else {
+        //     warn!(
+        //         "ViewClusterBindings offsets_and_counts_binding not available for view {:?}",
+        //         view_entity
+        //     );
+        //     return Ok(());
+        // };
+
+        // // Shading bind group
+        // let Ok((shading_bind_group, shading_group_offsets)) = create_strand_shading_bind_group(
+        //     render_device,
+        //     &shading_pipeline,
+        //     &shading_resources,
+        //     &binning_buffers,
+        //     &view_binding,
+        //     &light_binding,
+        //     view_uniform_offset,
+        //     view_light_uniform_offset,
+        //     &cluster_indices_binding,
+        //     &cluster_offsets_binding,
+        //     &clusterable_objects,
+        //     shadow_samplers,
+        // ) else {
+        //     warn!("Failed to create strand shading bind group.");
+        //     return Ok(());
+        // };
+
+        // run_shading_pass(
+        //     render_context,
+        //     pipeline_cache,
+        //     shading_pipeline,
+        //     shading_resources,
+        //     &shading_bind_group,
+        //     &shading_group_offsets,
+        // );
 
         // Get the dimensions to calculate dispatch size
         let Some(frustrum) = raster_resources.frustrum_config.get(&view_entity) else {
@@ -494,9 +786,8 @@ fn set_strand_geometry(
         let meta_buffer = ShaderStorageBuffer::from(strand_meta);
         let geo_buffer = ShaderStorageBuffer::from(geos_data);
         let mut material_buffer = ShaderStorageBuffer::from(vec![material]);
-        material_buffer.buffer_description.usage = BufferUsages::STORAGE
-            | BufferUsages::COPY_DST
-            | BufferUsages::COPY_SRC;
+        material_buffer.buffer_description.usage =
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
         // debug!("Index buffer: {:?}", index_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
@@ -530,8 +821,8 @@ pub fn update_material_buffer(
         let material_bytes = bytemuck::bytes_of(material);
         render_queue.write_buffer(
             &material_buffer.buffer, // Get the underlying wgpu::Buffer
-            0, // Offset in the buffer to start writing (0 for the start)
-            material_bytes, // The byte slice to write
+            0,                       // Offset in the buffer to start writing (0 for the start)
+            material_bytes,          // The byte slice to write
         );
     }
 }
@@ -553,9 +844,57 @@ pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig)
     buffer
 }
 
-// render world buffe retrieval
+fn flag_realloc_on_view_change(
+    mut commands: Commands,
+    cams: Query<(Entity, Option<&TieFroxelsToView>), Changed<ExtractedView>>,
+    // or listen to WindowResized and map to camera(s)
+) {
+    for (e, _) in &cams {
+        commands.entity(e).insert(NeedsRealloc);
+    }
+}
+
+fn flag_realloc_on_config_change(mut commands: Commands, q: Query<Entity, Changed<FroxelConfig>>) {
+    for e in &q {
+        commands.entity(e).insert(NeedsRealloc);
+    }
+}
+
+fn flag_realloc_on_tie_change(mut commands: Commands, q: Query<Entity, Changed<TieFroxelsToView>>) {
+    for e in &q {
+        commands.entity(e).insert(NeedsRealloc);
+    }
+}
+
+fn tie_view_to_froxel_config(
+    cams: Query<
+        (Entity, &TieFroxelsToView, &ExtractedView, &mut FroxelConfig),
+        Changed<ExtractedView>,
+    >,
+) {
+    for (entity, tie_mode, extracted_view, mut config) in cams {
+        info!("Viewport change: {:?}", extracted_view.viewport);
+        let viewport_x = extracted_view.viewport.z;
+        let viewport_y = extracted_view.viewport.w;
+        match tie_mode {
+            TieFroxelsToView::Fixed(v) => {}
+            TieFroxelsToView::Native => {
+                config.screen_width = viewport_x;
+                config.screen_height = viewport_y;
+            }
+            TieFroxelsToView::Scaled(s) => {
+                let w = ((viewport_x as f32) * s) as u32;
+                let h = ((viewport_y as f32) * s) as u32;
+                config.screen_width = w;
+                config.screen_height = h;
+            }
+        }
+    }
+}
+
+// render world buffer retrieval
 fn use_froxel_buffer(
-    query: Query<(Entity, &FroxelConfig), Added<FroxelConfig>>,
+    query: Query<(Entity, &FroxelConfig), Or<(Added<FroxelConfig>, With<NeedsRealloc>)>>,
     device: Res<RenderDevice>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
     mut binning_resources: ResMut<StrandBinningBuffers>,
@@ -569,8 +908,11 @@ fn use_froxel_buffer(
             packed_segments_buffer,
         ) = prepare_binning_buffers(&device, config);
 
-        let (texture, target_view) = create_render_target_texture(&device, config);
-        let (texture, depth_view) = create_render_target_depth_texture(&device, config);
+        let (texture, target_view) = recreate_render_target_texture(&device, config);
+        let (texture, depth_view) = recreate_render_target_depth_texture(&device, config);
+
+        info!("Recreated render target: {:?}", config);
+
         raster_resources.output_texture = Some(target_view);
         raster_resources.output_depth = Some(depth_view);
         // modify the resource
@@ -606,13 +948,18 @@ fn use_deep_opacity_maps(
         if shadow_resources.dom_targets.contains_key(&entity) {
             continue;
         }
-        let ((opacity_texture, opacity_view, opacity_sampler), (depth_texture, depth_view, depth_sampler)) = create_strand_shadow_textures(
+        let (
+            (opacity_texture, opacity_view, opacity_sampler),
+            (depth_texture, depth_view, depth_sampler),
+        ) = create_strand_shadow_textures(
             &device,
             config.screen_width,
             config.screen_height,
             config.depth_slices,
         );
-        shadow_resources.dom_targets.insert(entity, (opacity_view, depth_view));
+        shadow_resources
+            .dom_targets
+            .insert(entity, (opacity_view, depth_view));
         shadow_resources
             .dom_samplers
             .insert(entity, (opacity_sampler, depth_sampler));

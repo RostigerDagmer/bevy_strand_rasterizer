@@ -1,14 +1,6 @@
-
-
 // --- Structures ---
-struct Aabb {
-    min: vec3<f32>,
-    pad_a: f32,
-    max: vec3<f32>,
-    pad_b: f32,
-} // align(16)
 
-struct FroxelConfig { // Ensure this matches Rust exactly
+struct FroxelConfig {
     screen_width: u32,
     screen_height: u32,
     froxel_size_x: u32,
@@ -16,10 +8,17 @@ struct FroxelConfig { // Ensure this matches Rust exactly
     depth_slices: u32,
 }
 
-struct SegmentRef { // Ensure this matches Rust if defined there
+struct SegmentRef {
     strand_idx: u32,
     segment_start_idx: u32, // Index into index buffer
 }
+
+struct Aabb {
+    min: vec3<f32>,
+    pad_a: f32,
+    max: vec3<f32>,
+    pad_b: f32,
+} // align(16)
 
 struct StrandGeo {
     strand_count: u32,
@@ -29,7 +28,7 @@ struct StrandGeo {
     aabb: Aabb,
 } // align(16)
 
-struct StrandMeta { // Ensure this matches Rust exactly
+struct StrandMeta {
     count: u32,     // Number of vertices in strand
     offset: u32,    // Start index in the original indices buffer (or vertices buffer?)
     pad_a: u32,      // Padding for alignment
@@ -49,7 +48,7 @@ struct StrandMaterial {
     pad_b: u32,
 }
 
-struct PushConstants { // Ensure this matches Rust and range covers all fields
+struct PushConstants {
     workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
     num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
     scan_load_base: u32,

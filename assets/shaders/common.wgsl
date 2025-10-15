@@ -24,7 +24,7 @@ fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
 
 
 fn find_clip_bounds(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, world_aabb_max: vec3<f32>) -> mat2x3<f32> {
-    
+
     var min_clip = vec3<f32>(999999.0);
     var max_clip = vec3<f32>(-999999.0);
 
@@ -41,10 +41,15 @@ fn find_clip_bounds(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, wor
     for (var i = 0u; i < 8u; i = i + 1u) {
         let clip_pos = clip_from_world * corners[i];
         // For orthographic projections, w will usually be 1.0;
-        let view_pos = clip_pos.xyz / clip_pos.w;
-        // Update min and max for the z component:
-        min_clip = min(min_clip, view_pos);
-        max_clip = max(max_clip, view_pos);
+        if (clip_pos.w > 0.0) {
+            let view_pos = clip_pos.xyz / clip_pos.w;
+            min_clip = min(min_clip, view_pos);
+            max_clip = max(max_clip, view_pos);
+        }
+        // let view_pos = clip_pos.xyz / clip_pos.w;
+        // // Update min and max for the z component:
+        // min_clip = min(min_clip, view_pos);
+        // max_clip = max(max_clip, view_pos);
     }
     return mat2x3(min_clip, max_clip);
 }
@@ -57,21 +62,21 @@ fn world_to_screen(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_wid
         // Handle point behind camera
         return vec3<f32>(-1.0, -1.0, -1.0);
     }
-    
+
     // Perform perspective division to get NDC coordinates
     let ndc = clip_pos.xyz / clip_pos.w;
-    
+
     // Convert NDC to screen coordinates for X and Y
     let screen_x = (ndc.x * 0.5 + 0.5) * screen_width;
     let screen_y = (ndc.y * -0.5 + 0.5) * screen_height; // Flip Y for top-left origin
-    
+
     // Ensure proper ordering (min should be closer to camera)
     let z_near = aabb_znear_zfar.x;
     let z_far = aabb_znear_zfar.y;
-    
+
     // Normalize the depth within the AABB Z range
     let normalized_depth = (ndc.z - z_near) / (z_far - z_near);
-    
+
     // Clamp to ensure we stay in the [0,1] range even if point is outside AABB
     let screen_z = clamp(normalized_depth, 0.0, 1.0);
 
@@ -213,11 +218,11 @@ fn hash_to_unit_float(x: u32) -> f32 {
 // fn canonical_min_mask(v: vec4<f32>) -> vec4<bool> {
 //     // 1. Find the minimum value across all components
 //     let min_val = canonical_min(v);
-  
+
 //     // 2. Create a mask identifying ALL components equal to the minimum value
 //     //    Comparison operators on vectors return boolean vectors in WGSL.
 //     let is_min: vec4<bool> = (v == vec4(min_val)); // e.g., (false, true, true, false)
-  
+
 //     var prev_cum_mask = vec4<bool>(false);
 //     var current_cum = is_min.x;     // Start with cum up to x
 //     prev_cum_mask.y = current_cum;  // Set prev for y
@@ -226,7 +231,7 @@ fn hash_to_unit_float(x: u32) -> f32 {
 //     current_cum = current_cum | is_min.z; // Update cum up to z
 //     prev_cum_mask.w = current_cum;  // Set prev for w
 //     let final_mask = is_min & !prev_cum_mask; // Same final step
-  
+
 //     return final_mask; // e.g., (false, true, false, false) for input (3.0, 1.0, 1.0, 2.0)
 // }
 fn canonical_min(v: vec3<f32>) -> f32 {
@@ -236,11 +241,11 @@ fn canonical_min(v: vec3<f32>) -> f32 {
 fn canonical_min_mask(v: vec3<f32>) -> vec3<bool> {
     // 1. Find the minimum value across all components
     let min_val = canonical_min(v);
-  
+
     // 2. Create a mask identifying ALL components equal to the minimum value
     //    Comparison operators on vectors return boolean vectors in WGSL.
     let is_min: vec3<bool> = (v == vec3(min_val)); // e.g., (false, true, true)
-  
+
     return select(
         select(vec3(false, false, true), vec3(false, true, false), is_min.y),
         vec3(true, false, false),

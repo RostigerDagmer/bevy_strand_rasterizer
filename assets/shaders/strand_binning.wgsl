@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float, canonical_min, canonical_min_mask}
-#import "shaders/spline.wgsl"::{ 
+#import "shaders/spline.wgsl"::{
     solve_cubic_3d,
     catmull_rom_t,
     catmull_rom_T_a,
@@ -18,7 +18,7 @@
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
 const CULL_MAX_DIST: f32 = 100.0;
 const CULL_MIN_DIST: f32 = 8.0;
-const SHADOW_MAP_BOOST_FACTOR: f32 = 5.0;
+const SHADOW_MAP_BOOST_FACTOR: f32 = 3.0;
 const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical splines
 
 // --- Structures ---
@@ -63,15 +63,15 @@ fn stochastic_cull_camera(view: View, aabb: Aabb, sample_threshold: f32) -> bool
 }
 
 fn stochastic_cull_light(aabb_clip: mat2x3<f32>, sample_threshold: f32) -> bool {
-    // let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
-    // let area = coverage.x * coverage.y;
-    // let lod_threshold = clamp((sqrt(area) * SHADOW_MAP_BOOST_FACTOR), 0.0, 1.0);
-    // if sample_threshold > lod_threshold { // lod_threshold {
-    //     return false;
-    // } else {
-    //     return true;
-    // }
-    return false;
+    let coverage = (aabb_clip[1] - aabb_clip[0]) * 0.5; // since NDC is [-1,1]
+    let area = coverage.x * coverage.y;
+    let lod_threshold = clamp((sqrt(area) * SHADOW_MAP_BOOST_FACTOR), 0.0, 1.0);
+    if sample_threshold > lod_threshold { // lod_threshold {
+        return false;
+    } else {
+        return true;
+    }
+    // return false;
 }
 
 #ifdef STAGE_PLACE
@@ -117,6 +117,60 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
 }
 #endif
 
+
+fn emit_xy_dilated(
+    f: vec3<i32>,
+    r_ix: i32,
+    r_iy: i32,
+    max_f: vec3<i32>,
+    cfg: FroxelConfig
+#ifdef STAGE_PLACE
+  , seg_ref: SegmentRef
+#endif
+) -> bool {
+    // Clamp the stamp rectangle to grid bounds.
+    let x0 = max(0, f.x - r_ix);
+    let x1 = min(max_f.x - 1, f.x + r_ix);
+    let y0 = max(0, f.y - r_iy);
+    let y1 = min(max_f.y - 1, f.y + r_iy);
+
+    // Optional: make the footprint more “disk-like” than square.
+    // If you want strictly conservative coverage with no pruning, delete the 'if' test below.
+    let rx2 = f32(r_ix) * f32(r_ix);
+    let ry2 = f32(r_iy) * f32(r_iy);
+
+    for (var yy = y0; yy <= y1; yy = yy + 1) {
+        for (var xx = x0; xx <= x1; xx = xx + 1) {
+            // Elliptical mask in cell space (cheap): (dx/rx)^2 + (dy/ry)^2 <= 1
+            // Handle zero radii without division by zero.
+            var passing = true;
+            if (r_ix > 0 || r_iy > 0) {
+                let dx = f32(xx - f.x);
+                let dy = f32(yy - f.y);
+                let nx = select(0.0, dx * dx / rx2, r_ix > 0);
+                let ny = select(0.0, dy * dy / ry2, r_iy > 0);
+                passing = (nx + ny) <= 1.0 + 1e-6;
+            }
+            if (!passing) { continue; }
+
+            #ifdef STAGE_COUNT
+            if (!add_segment_ref_to_froxel(u32(xx), u32(yy), u32(f.z), cfg)) {
+                return false;
+            }
+            #endif
+
+            #ifdef STAGE_PLACE
+            if (!add_segment_ref_to_froxel(u32(xx), u32(yy), u32(f.z), seg_ref, cfg)) {
+                return false;
+            }
+            #endif
+        }
+    }
+    return true;
+}
+
+
+
 #ifdef STAGE_COUNT
 #define COUNT_OR_PLACE
 #endif
@@ -135,6 +189,8 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
 #endif
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
+    let r_ix = 0; //i32(ceil(half_thickness_px / f32(cfg.froxel_size_x)));
+    let r_iy = 0; //i32(ceil(half_thickness_px / f32(cfg.froxel_size_y)));
 
     // Use i32 for stepping, but ensure non-negative before passing to add_segment_ref_to_froxel
     // Clamp depth index calculation strictly between 0 and depth_slices-1
@@ -203,6 +259,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
 
     var safety = 0u;
     let max_steps = u32(max_f.x + max_f.y + max_f.z + 3); // Generous upper bound
+    let zero_thickness = r_ix == 0 && r_iy == 0;
 
     loop {
         safety = safety + 1u;
@@ -210,18 +267,28 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
 
         // Add segment count to current froxel IF it's within valid bounds
         if in_bounds(f, max_f) {
-            #ifdef STAGE_COUNT
-            if !add_segment_ref_to_froxel(u32(f.x), u32(f.y), u32(f.z), cfg) {
-                // Optional: handle case where buffer is full, though unlikely for count
-                break;
+            if (zero_thickness) {
+                #ifdef STAGE_COUNT
+                if !add_segment_ref_to_froxel(u32(f.x), u32(f.y), u32(f.z), cfg) {
+                    // Optional: handle case where buffer is full, though unlikely for count
+                    break;
+                }
+                #endif
+                #ifdef STAGE_PLACE
+                if !add_segment_ref_to_froxel(u32(f.x), u32(f.y), u32(f.z), seg_ref, cfg) {
+                    // Optional: handle case where buffer is full
+                    break;
+                }
+                #endif
+            } else {
+                if (!emit_xy_dilated(
+                                f, r_ix, r_iy, max_f, cfg
+                                #ifdef STAGE_PLACE
+                                , seg_ref
+                                #endif
+                            )) { break; }
             }
-            #endif
-            #ifdef STAGE_PLACE
-            if !add_segment_ref_to_froxel(u32(f.x), u32(f.y), u32(f.z), seg_ref, cfg) {
-                // Optional: handle case where buffer is full
-                break;
-            }
-            #endif
+
         } else {
             // Stop if we step out of bounds entirely
             break;
@@ -252,7 +319,7 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, seg_ref: S
 }
 
 //////////// SPLINES ////////////////
-/// 
+///
 
 
 #ifdef STAGE_COUNT
@@ -266,7 +333,7 @@ fn trace_segment_through_froxels_analytical(p0: vec3<f32>, p1: vec3<f32>, p2: ve
     let coeff = catmull_rom_coefficients_3d(p0, p1, p2, p3, ts);
     let froxel_dim = vec3<f32>(
         f32(cfg.froxel_size_x),
-        f32(cfg.froxel_size_y), 
+        f32(cfg.froxel_size_y),
         1.0 / f32(cfg.depth_slices)
     );
     let max_f = vec3<i32>(
@@ -378,7 +445,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let strand_hash = wang_hash(strand_idx);
     let sample_threshold = hash_to_unit_float(strand_hash);
     var mode = MODE;
-    
+
     #ifdef SHADOWS
         mode = 0u; // TODO: use analytical splines for shadows
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
@@ -386,7 +453,10 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let clip_from_world = cascade.clip_from_world;
         let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         // culling
-        if stochastic_cull_light(aabb_clip, sample_threshold) {
+        // if stochastic_cull_light(aabb_clip, sample_threshold) {
+        //     return;
+        // }
+        if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
         let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
@@ -428,11 +498,11 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 
             let cap_factor = 0.001;
             let alpha = 1.0;
-            
+
             let N = normalize(p2 - p1);
             var p0 = p1 - N * cap_factor;
             var p3 = p2;
-            
+
             for (var i = 1u; i < num_vertices_in_strand - 1u; i = i + 1u) {
                 let p2_idx = start_vertex_offset + i;
                 let p3_world = vertices[indices[p2_idx + 1u]];
@@ -455,7 +525,7 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         default: {
             var prev_vtx = vertices[indices[start_vertex_offset]];
 
-            #ifdef SHADOWS 
+            #ifdef SHADOWS
                 var prev_screen_pos = world_to_screen_aabbnorm(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_clip);
             #else
                 var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
@@ -464,10 +534,10 @@ fn count_strands(@builtin(global_invocation_id) id: vec3<u32>) {
             for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
                 let current_vtx_idx = indices[start_vertex_offset + i];
                 if current_vtx_idx >= arrayLength(&vertices) { break; } // Bounds check
-        
+
                 let current_vtx = vertices[current_vtx_idx];
 
-                #ifdef SHADOWS 
+                #ifdef SHADOWS
                     var current_screen_pos = world_to_screen_aabbnorm(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_clip);
                 #else
                     let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
@@ -641,7 +711,7 @@ fn scan_sums(
     if element_idx_in_pass < num_elements_this_pass {
         if pc.scan_load_base == 0u { // First pass reads original counts
             value = input_counts[read_idx];
-        } else { 
+        } else {
             // Subsequent passes read intermediate sums from output buffer
             value = output_offsets[read_idx];
         }
@@ -808,7 +878,7 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
     let strand_hash = wang_hash(strand_idx);
     let sample_threshold = hash_to_unit_float(strand_hash);
     var mode = MODE;
-    
+
     #ifdef SHADOWS
         mode = 0u; // TODO: use analytical splines for shadows
         let light: types::DirectionalLight = lights.directional_lights[LIGHT_INDEX];
@@ -816,7 +886,10 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         let clip_from_world = cascade.clip_from_world;
         let aabb_clip = find_clip_bounds(clip_from_world, aabb.min, aabb.max);
         // culling
-        if stochastic_cull_light(aabb_clip, sample_threshold) {
+        // if stochastic_cull_light(aabb_clip, sample_threshold) {
+        //     return;
+        // }
+        if stochastic_cull_camera(view, aabb, sample_threshold) {
             return;
         }
         let aabb_znear_zfar = vec2<f32>(aabb_clip[0].z, aabb_clip[1].z);
@@ -860,11 +933,11 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
 
             let cap_factor = 0.001;
             let alpha = 1.0;
-            
+
             let N = normalize(p2 - p1);
             var p0 = p1 - N * cap_factor;
             var p3 = p2;
-            
+
             for (var i = 1u; i < num_vertices_in_strand - 1u; i = i + 1u) {
                 let p2_idx = start_vertex_offset + i;
                 let p3_world = vertices[indices[p2_idx + 1u]];
@@ -889,17 +962,17 @@ fn place_strands(@builtin(global_invocation_id) id: vec3<u32>) {
         default: {
             var prev_vtx = vertices[indices[start_vertex_offset]];
 
-            #ifdef SHADOWS 
+            #ifdef SHADOWS
                 var prev_screen_pos = world_to_screen_aabbnorm(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_clip);
             #else
                 var prev_screen_pos = world_to_screen(prev_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);
             #endif
 
-            for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {  
+            for (var i = 1u; i < num_vertices_in_strand; i = i + 1u) {
                 let current_vtx_idx = indices[start_vertex_offset + i];
                 let current_vtx = vertices[current_vtx_idx];
 
-                #ifdef SHADOWS 
+                #ifdef SHADOWS
                     var current_screen_pos = world_to_screen_aabbnorm(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_clip);
                 #else
                     let current_screen_pos = world_to_screen(current_vtx, clip_from_world, f32(config.screen_width), f32(config.screen_height), aabb_znear_zfar);

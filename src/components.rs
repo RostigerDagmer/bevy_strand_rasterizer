@@ -1,7 +1,10 @@
 use bevy::{
-    math::{bounding::Aabb3d, Vec4},
+    math::{Vec4, bounding::Aabb3d},
     prelude::*,
-    render::{extract_component::ExtractComponent, render_resource::ShaderType, storage::ShaderStorageBuffer},
+    render::{
+        extract_component::ExtractComponent, render_resource::ShaderType,
+        storage::ShaderStorageBuffer,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -56,7 +59,7 @@ impl Default for StrandMaterial {
     }
 }
 
-#[derive(Component, ExtractComponent, Copy, Clone, Pod, Zeroable)]
+#[derive(Component, ExtractComponent, Copy, Clone, Pod, Zeroable, Debug)]
 #[repr(C)]
 pub struct FroxelConfig {
     pub screen_width: u32,
@@ -76,3 +79,38 @@ impl Default for FroxelConfig {
         }
     }
 }
+
+impl FroxelConfig {
+    pub fn get_num_tiles(&self) -> (u32, u32, u32) {
+        let num_tiles_x = (self.screen_width + self.froxel_size_x - 1) / self.froxel_size_x;
+        let num_tiles_y = (self.screen_height + self.froxel_size_y - 1) / self.froxel_size_y;
+
+        return (
+            num_tiles_x,
+            num_tiles_y,
+            num_tiles_x * num_tiles_y * self.depth_slices,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FroxelCapacity {
+    pub tiles_cap_x: u32,
+    pub tiles_cap_y: u32,
+    pub depth_cap: u32,
+    pub tiles_capacity: u64, // use u64 to be safe
+    pub packed_capacity_bytes: u64,
+}
+
+#[derive(Component, Clone, Copy)]
+pub enum TieFroxelsToView {
+    /// Raster at exactly the view resolution (AA handled analytically).
+    Native,
+    /// Raster at view * scale (e.g. 0.7) then upscale/resolve.
+    Scaled(f32),
+    /// Raster at a fixed internal size (e.g. for stable perf).
+    Fixed(UVec2),
+}
+
+#[derive(Component, Clone, Copy)]
+pub struct NeedsRealloc;

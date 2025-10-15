@@ -1,6 +1,6 @@
-use bevy::pbr::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use bevy::pbr::CascadeShadowConfigBuilder;
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 mod dson;
 use dson::*;
@@ -30,21 +30,23 @@ fn setup(
 
             // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
             // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
-            absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
+            // absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
+            absorption_color: Vec4::new(1.0, 209.0 / 255.0, 184.0 / 255.0, 0.8),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
             // specular_color: Vec4::new(0.82, 0.663, 0.365, 0.3),
-            specular_color: Vec4::new(0.82, 0.463, 0.465, 0.9),
+            specular_color: Vec4::new(1.0, 229.0 / 255.0, 210.0 / 255.0, 0.9),
             // specular_color: Vec4::new(0.769, 0.383, 0.325, 0.9),
             ambient_factor: 0.02,
             ao_factor: 0.1,
-            eta: 1.55,   // index of refraction
+            eta: 1.55, // index of refraction
             // beta: 0.25,   // higher order path roughness
             // alpha: 0.05, // first order path roughness
-            beta: 0.45,
-            alpha: 0.1,
-            shift: 0.05, // specular shift
+            // beta: 0.45,
+            beta: 0.85,
+            alpha: 0.15,
+            shift: 0.01, // specular shift
             pad1: 0,
             pad2: 0,
         },
@@ -53,6 +55,8 @@ fn setup(
 
     commands.spawn((
         FroxelConfig {
+            screen_height: 2048,
+            screen_width: 2048,
             depth_slices: 64,
             ..Default::default()
         },
@@ -63,13 +67,14 @@ fn setup(
             button_pan: MouseButton::Middle,
             ..Default::default()
         },
-        bevy::core_pipeline::prepass::DepthPrepass
+        TieFroxelsToView::Native,
+        bevy::core_pipeline::prepass::DepthPrepass,
     ));
 
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(0.2))),
-        MeshMaterial3d(materials.add(Color::srgb_u8(124, 144, 255))),
-        Transform::from_xyz(0.0, 4.0, 0.05),
+        MeshMaterial3d(materials.add(Color::srgb_u8(144, 144, 144))),
+        Transform::from_xyz(0.0, 4.5, 0.25),
     ));
 
     // add one light
@@ -94,11 +99,11 @@ fn setup(
         },
         FroxelConfig {
             // TODO: move into plugin
-            screen_width: 512, // shadow map size in this context
-            screen_height: 512,
+            screen_width: 1024 + 512, // shadow map size in this context
+            screen_height: 1024 + 512,
             froxel_size_x: 8,
             froxel_size_y: 8,
-            depth_slices: 16,
+            depth_slices: 8,
         },
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow
@@ -113,10 +118,7 @@ fn setup(
 }
 
 /// The egui panel that edits all StrandMaterial components in the world.
-fn strand_material_ui_system(
-    mut contexts: EguiContexts,
-    mut query: Query<&mut StrandMaterial>,
-) {
+fn strand_material_ui_system(mut contexts: EguiContexts, mut query: Query<&mut StrandMaterial>) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -158,28 +160,39 @@ fn strand_material_ui_system(
 
                 // --- Scalar parameters ---
                 ui.add(
-                    egui::Slider::new(&mut mat.ambient_factor, 0.0..=1.0)
-                        .text("Ambient Factor"),
+                    egui::Slider::new(&mut mat.ambient_factor, 0.0..=1.0).text("Ambient Factor"),
                 );
+                ui.add(egui::Slider::new(&mut mat.ao_factor, 0.0..=1.0).text("AO Factor"));
                 ui.add(
-                    egui::Slider::new(&mut mat.ao_factor, 0.0..=1.0).text("AO Factor"),
+                    egui::Slider::new(&mut mat.eta, 1.0..=2.5).text("Eta (Index of Refraction)"),
                 );
-                ui.add(
-                    egui::Slider::new(&mut mat.eta, 1.0..=2.5)
-                        .text("Eta (Index of Refraction)"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut mat.beta, 0.0..=1.0).text("Beta (Roughness)"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut mat.alpha, 0.0..=1.0)
-                        .text("Alpha (Roughness)"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut mat.shift, 0.0..=1.0).text("Specular Shift"),
-                );
+                ui.add(egui::Slider::new(&mut mat.beta, 0.0..=1.0).text("Beta (Roughness)"));
+                ui.add(egui::Slider::new(&mut mat.alpha, 0.0..=1.0).text("Alpha (Roughness)"));
+                ui.add(egui::Slider::new(&mut mat.shift, 0.0..=1.0).text("Specular Shift"));
             }
         });
+}
+
+fn rotate_light_around_z_axis(
+    time: Res<Time>,
+    mut query: Query<&mut Transform, With<DirectionalLight>>,
+) {
+    // Angular speed in radians per second (slow rotation)
+    const ANGULAR_SPEED: f32 = std::f32::consts::PI / 16.0; // one full rotation in ~32s
+
+    for mut transform in &mut query {
+        // Extract position
+        let pos = transform.translation;
+
+        // Rotate around global Z by delta_angle
+        let delta_angle = ANGULAR_SPEED * time.delta_secs();
+        let rotation = Quat::from_rotation_y(delta_angle);
+        transform.translation = rotation * pos;
+
+        // Keep the light facing the same *direction* relative to the scene
+        // If you want the light to keep pointing toward the origin, uncomment this:
+        transform.look_at(Vec3::ZERO, Vec3::Y);
+    }
 }
 
 fn main() {
@@ -192,6 +205,7 @@ fn main() {
         .init_asset::<DsonAsset>()
         .init_asset_loader::<DsonAssetLoader>()
         .add_systems(Startup, setup)
+        .add_systems(Update, rotate_light_around_z_axis)
         .add_systems(EguiPrimaryContextPass, strand_material_ui_system)
         .run();
 }

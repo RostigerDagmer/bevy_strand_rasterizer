@@ -6,8 +6,8 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
             CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
-            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, DepthStencilState,
+            Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
             PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
             SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
             Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
@@ -42,9 +42,60 @@ pub struct StrandShadowResources {
 pub struct StrandShadowPipeline {
     pub bind_group_layout: BindGroupLayout,
     pub shadow_pipeline: CachedComputePipelineId,
+    // pub punch_through_pipeline: CachedRenderPipelineId,
 }
 
+pub const DOM_FORMAT: TextureFormat = TextureFormat::R32Float;
+
 impl StrandShadowPipeline {
+    pub fn create_punch_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        device.create_bind_group_layout(
+            "strand_shadow_punch_bind_group_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: layouts::shadows::DEEP_OPACITY_TEXTURE_O, // opacity array
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shadows::DEEP_OPACITY_TEXTURE_D, // depth texture
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shadows::POINT_LIGHT_SHADOW_MAP,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth {},
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shadows::DIRECTIONAL_LIGHT_SHADOW_MAP,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth {},
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+            ],
+        )
+    }
+
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         // We shade in strand space so we only need the vertex, index and meta buffers in terms of geometry.
         // We also need the View and light buffers and an output buffer containing the shading data along line segments.
@@ -196,16 +247,37 @@ impl StrandShadowPipeline {
                 },
                 // Point Light Depth Texture
                 BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE_SAMPLER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Directional Light Depth Texture
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE_SAMPLER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
                     binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::CubeArray,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 // Directional Light Depth Texture
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 // Output texture (write-only storage texture)
@@ -214,7 +286,7 @@ impl StrandShadowPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::R16Float,
+                        format: DOM_FORMAT,
                         view_dimension: TextureViewDimension::D3,
                     },
                     count: None,
@@ -224,7 +296,7 @@ impl StrandShadowPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::R16Float,
+                        format: DOM_FORMAT,
                         view_dimension: TextureViewDimension::D2,
                     },
                     count: None,
@@ -239,9 +311,11 @@ impl FromWorld for StrandShadowPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        // let punch_bind_group_layout = Self::create_punch_bind_group_layout(device);
 
         let shader_loader = world.resource::<AssetServer>();
         let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
+        // let punch_shader = shader_loader.load("shaders/shadow_punch.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let cdefs = [
@@ -273,6 +347,38 @@ impl FromWorld for StrandShadowPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
+        // let punch_through_pipeline =
+        //     pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        //         label: Some("shadow_punch_through_pipeline".into()),
+        //         layout: vec![punch_bind_group_layout.clone()],
+        //         push_constant_ranges: vec![],
+        //         vertex: (),
+        //         primitive: PrimitiveState {
+        //             topology: TriangleList,
+        //             cull_mode: None, // or match Bevy’s shadow pass
+        //             ..Default::default()
+        //         },
+        //         depth_stencil: Some(DepthStencilState {
+        //             format: SHADOW_FORMAT, // must match Bevy’s (e.g., Depth32Float)
+        //             depth_write_enabled: true,
+        //             depth_compare: CompareFunction::Less, // the trick: only replace if DOM is nearer
+        //             stencil: Default::default(),
+        //             bias: DepthBiasState {
+        //                 constant: SAME_AS_SHADOW_PASS, // copy Bevy’s values
+        //                 slope_scale: SAME_AS_SHADOW_PASS,
+        //                 clamp: 0,
+        //             },
+        //         }),
+        //         multisample: MultisampleState::default(),
+        //         fragment: Some(FragmentState {
+        //             targets: vec![], // no color
+        //             shader: punch_shader,
+        //             entry_point: "fs".into(),
+        //             shader_defs: layouts::shadows::shader_defs(), // no color targets
+        //         }),
+        //         zero_initialize_workgroup_memory: false,
+        //     });
+
         debug!(
             "Created strand raster compute pipelines: rasterize={:?}",
             shadow_pipeline
@@ -300,6 +406,7 @@ pub fn create_strand_shadow_bind_group(
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
     shadows: &ShadowSamplers,
+    shadow_textures: (&TextureView, &TextureView),
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let artifacts = buffers.artifacts.get(entity).ok_or(())?;
     let layout = &pipeline.bind_group_layout;
@@ -376,14 +483,20 @@ pub fn create_strand_shadow_bind_group(
                 },
                 // Bind the shadow map texture
                 BindGroupEntry {
+                    binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE_SAMPLER,
+                    resource: BindingResource::Sampler(&shadows.point_light_linear_sampler),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE_SAMPLER,
+                    resource: BindingResource::Sampler(&shadows.directional_light_linear_sampler),
+                },
+                BindGroupEntry {
                     binding: layouts::rasterizer::POINT_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(&shadows.point_light_comparison_sampler),
+                    resource: BindingResource::TextureView(shadow_textures.0),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(
-                        &shadows.directional_light_comparison_sampler,
-                    ),
+                    resource: BindingResource::TextureView(shadow_textures.1),
                 },
                 // Render target array
                 BindGroupEntry {
@@ -419,23 +532,27 @@ pub fn create_strand_shadow_textures(
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: TextureFormat::R16Float, // TODO: compact
+        format: DOM_FORMAT, // TODO: compact
         usage: TextureUsages::STORAGE_BINDING
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST,
-        view_formats: &[TextureFormat::R16Float],
+        view_formats: &[DOM_FORMAT],
     });
 
     let depth_texture_view = depth_texture.create_view(&TextureViewDescriptor {
         label: Some("strand_shadow_depth_view"),
-        format: Some(TextureFormat::R16Float),
+        format: Some(DOM_FORMAT),
         dimension: Some(TextureViewDimension::D2),
         aspect: TextureAspect::All,
         base_mip_level: 0,
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: None,
-        usage: Some(TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING),
+        usage: Some(
+            TextureUsages::COPY_DST
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::STORAGE_BINDING,
+        ),
     });
     let depth_sampler = device.create_sampler(&SamplerDescriptor {
         label: Some("strand_shadow_depth_sampler"),
@@ -458,23 +575,27 @@ pub fn create_strand_shadow_textures(
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D3,
-        format: TextureFormat::R16Float,
+        format: DOM_FORMAT,
         usage: TextureUsages::STORAGE_BINDING
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST,
-        view_formats: &[TextureFormat::R16Float],
+        view_formats: &[DOM_FORMAT],
     });
 
     let opacity_texture_view = opacity_texture.create_view(&TextureViewDescriptor {
         label: Some("strand_shadow_opacity_view"),
-        format: Some(TextureFormat::R16Float),
+        format: Some(DOM_FORMAT),
         dimension: Some(TextureViewDimension::D3),
         aspect: TextureAspect::All,
         base_mip_level: 0,
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: None,
-        usage: Some(TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING),
+        usage: Some(
+            TextureUsages::COPY_DST
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::STORAGE_BINDING,
+        ),
     });
 
     let opacity_sampler = device.create_sampler(&SamplerDescriptor {
@@ -500,7 +621,6 @@ pub fn run_shadow_pass(
     pipeline: &StrandShadowPipeline,
     froxel_config: &FroxelConfig,
     resources: &StrandRasterizerResources,
-    shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
     offsets: &[u32],
 ) {
@@ -508,7 +628,7 @@ pub fn run_shadow_pass(
     // --- Rasterize ---
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("Strand Rasterize"),
+            label: Some("Strand Rasterize Shadow"),
             ..default()
         });
         let Some(raster_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.shadow_pipeline)
@@ -524,7 +644,7 @@ pub fn run_shadow_pass(
         // Set push constants if needed
         let pushconstants = PushConstants {
             num_elements: resources.strand_count.unwrap_or(0),
-            workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
+            workgroup_offset: 0, // TODO: maybe its time to make this its own field
             scan_load_base: 0,
             scan_save_base: 0,
         };

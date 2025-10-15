@@ -46,6 +46,10 @@ const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE; // TODO: shaderdef
 @group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
 @group(0) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(#{MATERIAL_BUFFER}) var<storage, read> materials: array<StrandMaterial>;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_sampler: sampler;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_depth_sampler: sampler;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O_VIEW}) var deep_opacity_maps: texture_3d<f32>;
+@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D_VIEW}) var deep_opacity_depth_maps: texture_2d<f32>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -179,11 +183,9 @@ fn fresnel_reflectance(eta_i: f32, eta_t: f32, cos_theta_i: f32) -> f32 {
     let sin_theta_transmitted_sq = eta_ratio * eta_ratio * sin_theta_incident_sq;
     let cos_theta_transmitted = sqrt(1.0 - sin_theta_transmitted_sq);
 
-    let r_parallel = ((eta_t * cos_theta_incident) - (eta_i * cos_theta_transmitted)) /
-                     ((eta_t * cos_theta_incident) + (eta_i * cos_theta_transmitted));
-    
-    let r_perpendicular = ((eta_i * cos_theta_incident) - (eta_t * cos_theta_transmitted)) /
-                          ((eta_i * cos_theta_incident) + (eta_t * cos_theta_transmitted));
+    let r_parallel = ((eta_t * cos_theta_incident) - (eta_i * cos_theta_transmitted)) / ((eta_t * cos_theta_incident) + (eta_i * cos_theta_transmitted));
+
+    let r_perpendicular = ((eta_i * cos_theta_incident) - (eta_t * cos_theta_transmitted)) / ((eta_i * cos_theta_incident) + (eta_t * cos_theta_transmitted));
 
     return (r_parallel * r_parallel + r_perpendicular * r_perpendicular) * 0.5;
 }
@@ -318,7 +320,7 @@ fn Mp(v_long_val: f32, theta_i_: f32, theta_r: f32, alpha_p_shift: f32) -> f32 {
     let exp_arg = (sin_theta_i * sin_theta_r) / v_long_val;
 
     // var csch_val = 0.0;
-    // if ((1.0 / v_long_val) < 1e-6) {
+    // if (1.0 / v_long_val) < 1e-6 {
     //     csch_val = 2.0 * exp(-1.0 / v_long_val);
     // } else {
     //     csch_val = 1.0 / sinh(1.0 / v_long_val);
@@ -326,19 +328,19 @@ fn Mp(v_long_val: f32, theta_i_: f32, theta_r: f32, alpha_p_shift: f32) -> f32 {
     let csch_val = csch(1.0 / v_long_val);
 
     let bessel_val = bessel_first_approx(bessel_arg, 5u);
-    // let m_val = (csch_val / (2.0 * v_long_val)) * bessel_val * exp(exp_arg);
-    // return m_val;
+    let m_val = (csch_val / (2.0 * v_long_val)) * bessel_val * exp(exp_arg);
+    return m_val;
 
     // Debug
     // return exp(exp_arg); // looks good
-    return bessel_val * exp(exp_arg); //
-    // return (csch_val / (2.0 * v_long_val)); // 
+    // return bessel_val * exp(exp_arg); //
+    // return (csch_val / (2.0 * v_long_val)); //
 }
 
 fn Np(p: u32, phi: f32, theta_i: f32, theta_r: f32, eta_val: f32, mu_a_rgb_val: vec3<f32>, v_azim_val: f32, beta_azim_val: f32) -> vec3<f32> {
     let q_roots = LEG_ROOTS;
     let q_weights = LEG_WEIGHTS;
-    
+
     // Ref:
     // sin_theta_i = np.sin(theta_i)
     // cos_theta_d = np.cos(theta_d)
@@ -372,7 +374,6 @@ fn Np(p: u32, phi: f32, theta_i: f32, theta_r: f32, eta_val: f32, mu_a_rgb_val: 
 
     // Apply the 1/2 factor from Equation 10 [cite: 113]
     return integral_val * 0.5;
-
 }
 
 
@@ -391,7 +392,7 @@ fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val:
 fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, material: StrandMaterial) -> vec3<f32> {
 
     let u = direction;
-    
+
     // Compute the key angles needed for Marschner model
     let theta_i = acos(dot(direction, light_normal));
     let theta_r = acos(dot(direction, view_normal));
@@ -414,15 +415,14 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     // return Mp_val * vec3<f32>(1.0, 1.0, 1.0); // TODO: remove this debug line
 
     // return Np(0u, phi, theta_i, theta_r, eta, sigma_a, v_long_val, sqrt(v_azim_val)) + Np(1u, phi, theta_i, theta_r, eta, sigma_a, v_long_val, sqrt(v_azim_val)); // TODO: remove this debug line
-
 }
 
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn shade_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,
-    @builtin(workgroup_id) workgroup_id: vec3u,         
-    @builtin(local_invocation_id) local_id: vec3u          
+    @builtin(workgroup_id) workgroup_id: vec3u,
+    @builtin(local_invocation_id) local_id: vec3u
 ) {
 
     let strand_id = workgroup_id.x;
@@ -444,6 +444,9 @@ fn shade_strands(
     // var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
     var material = materials[0]; // TODO: use either strand metadata or strandgeometry for material lookup.
     var accum_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+
+    let texture_dims = textureDimensions(deep_opacity_maps);
+    let shadow_map_dims = vec2<f32>(texture_dims.xy);
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) { // in case we have more segments than workgroup size
         let segment_offset = segment_id + i;
@@ -474,18 +477,22 @@ fn shade_strands(
 
         let ao_intensity = smoothstep(1.0, 0.0, max(0.0, 1.0 - (f32(segment_offset) / f32(strand_count))));
 
-        // TODO: we can theoretically split this across multiple workgroups
-        for (var j = 0u; j < light_count; j = j+1) {
+        // TODO: we can theoretically split this across multiple workgroups radiance accumulation is commutative
+        for (var j = 0u; j < light_count; j = j + 1) {
             let light: types::DirectionalLight = lights.directional_lights[j];
+            // let cascade = lights.cascades[0];
             let light_flags = light.flags;
             let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
+            // get local occlusion if there is a shadowmap
+            // let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
+            // let fragment_light = world_to_screen_aabbnorm(fragment_world_pos, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_clip_bounds);
+
             let bcsdf = marschner(vertex, L, V, U, material);
 
             var c = bcsdf * (light.color.xyz / 255.0);
             c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor); // ambient TODO: ambient lighting
 
             accum_color += vec4<f32>(c.xyz, material.absorption_color.w);
-
         }
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;

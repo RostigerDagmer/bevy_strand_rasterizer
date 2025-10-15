@@ -1,15 +1,29 @@
 use bevy::{
-    core_pipeline::{fullscreen_vertex_shader::fullscreen_shader_vertex_state, prepass::ViewPrepassTextures}, prelude::*, render::{
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel}, render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState, PushConstantRange, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, StoreOp, TextureFormat, TextureSampleType, TextureView, TextureViewDimension
-        }, renderer::{RenderContext, RenderDevice}, view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms}
-    }
+    core_pipeline::{
+        fullscreen_vertex_shader::fullscreen_shader_vertex_state, prepass::ViewPrepassTextures,
+    },
+    prelude::*,
+    render::{
+        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
+        render_resource::{
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
+            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, LoadOp,
+            MultisampleState, Operations, PipelineCache, PrimitiveState, PushConstantRange,
+            RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
+            SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType,
+            StorageTextureAccess, StoreOp, TextureFormat, TextureSampleType, TextureView,
+            TextureViewDimension,
+        },
+        renderer::{RenderContext, RenderDevice},
+        view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+    },
 };
 
 use crate::{pipelines::layouts, shader_types::PushConstants};
 
 use super::raster::StrandRasterizerResources;
-
 
 #[derive(Resource)]
 pub struct CompositionPipeline {
@@ -79,7 +93,7 @@ impl FromWorld for CompositionPipeline {
                     binding: 5,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Depth { },
+                        sample_type: TextureSampleType::Depth {},
                         view_dimension: TextureViewDimension::D2,
                         multisampled: true,
                     },
@@ -132,7 +146,6 @@ impl FromWorld for CompositionPipeline {
     }
 }
 
-
 #[derive(Default)]
 pub struct CompositionNode;
 
@@ -148,14 +161,14 @@ impl Node for CompositionNode {
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.view_entity();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
-        
+
         let Some(view_target) = world.get::<ViewTarget>(view_entity) else {
             // This can happen if the view doesn't have a ViewTarget
             // (e.g., shadow map views, reflection probes)
             debug!("View entity {:?} does not have a ViewTarget", view_entity);
             return Ok(());
         };
-        
+
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
             // This node might run on views without this (e.g. shadow maps). Handle appropriately.
             warn!(
@@ -195,11 +208,10 @@ impl Node for CompositionNode {
         };
 
         // Get the input texture (result of main pass)
-        // let input_texture = view_target.get_color_attachment().view; // <- this one is multisampled 
+        // let input_texture = view_target.get_color_attachment().view; // <- this one is multisampled
         let input_texture = view_target.main_texture_view();
         info!("Depth target {:?}", depth_target.depth_view());
         let scene_depth_texture = depth_target.depth_view().expect("Depth prepass enabled");
-
 
         let bind_group = render_context.render_device().create_bind_group(
             "composition_bind_group",

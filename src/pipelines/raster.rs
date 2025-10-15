@@ -1,5 +1,7 @@
 use bevy::{
-    pbr::ViewLightsUniformOffset, prelude::*, render::{
+    pbr::ViewLightsUniformOffset,
+    prelude::*,
+    render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
@@ -264,14 +266,15 @@ impl FromWorld for StrandRasterizerPipeline {
             shader: rasterize_shader,
             shader_defs: [
                 cdefs.as_slice(),
-                &[ShaderDefVal::UInt(
-                    "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
-                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
-                ),
-                ShaderDefVal::UInt(
-                    "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
-                    layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
-                )
+                &[
+                    ShaderDefVal::UInt(
+                        "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
+                        layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                    ),
+                    ShaderDefVal::UInt(
+                        "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
+                        layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    ),
                 ],
             ]
             .concat(),
@@ -416,7 +419,7 @@ pub fn create_strand_raster_bind_group(
 }
 
 // Create output texture for the rasterizer
-pub fn create_render_target_texture(
+pub fn recreate_render_target_texture(
     device: &RenderDevice,
     config: &FroxelConfig,
 ) -> (Texture, TextureView) {
@@ -438,7 +441,7 @@ pub fn create_render_target_texture(
     (texture, view)
 }
 
-pub fn create_render_target_depth_texture(
+pub fn recreate_render_target_depth_texture(
     device: &RenderDevice,
     config: &FroxelConfig,
 ) -> (Texture, TextureView) {

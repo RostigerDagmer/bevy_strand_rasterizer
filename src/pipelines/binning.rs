@@ -1,5 +1,7 @@
 use bevy::{
-    pbr::ViewLightsUniformOffset, prelude::*, render::{
+    pbr::ViewLightsUniformOffset,
+    prelude::*,
+    render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
@@ -7,13 +9,17 @@ use bevy::{
             PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, ShaderType,
         },
         renderer::{RenderContext, RenderDevice},
-        view::{ViewUniform, ViewUniformOffset},
+        view::{ExtractedView, ViewUniform, ViewUniformOffset},
     },
 };
 
 use std::collections::HashMap;
 
-use crate::{components::FroxelConfig, pipelines::{ext::dispatch_workgroup_ext, layouts}, shader_types::PushConstants};
+use crate::{
+    components::{FroxelCapacity, FroxelConfig, TieFroxelsToView},
+    pipelines::{ext::dispatch_workgroup_ext, layouts, raster::recreate_render_target_texture},
+    shader_types::PushConstants,
+};
 
 use super::raster::StrandRasterizerResources;
 
@@ -59,6 +65,7 @@ pub struct StrandBinningBuffers {
     pub index_buffer: Option<Buffer>,
     pub meta_buffer: Option<Buffer>,
     pub geos_buffer: Option<Buffer>,
+    // pub capacity: FroxelCapacity,
 }
 
 #[derive(Resource)]
@@ -139,11 +146,7 @@ impl FromWorld for StrandBinningPipeline {
                     true,
                     Some(ViewUniform::min_size()),
                 ), // view
-                Self::uniform_buffer_entry(
-                    layouts::binning::LIGHT_UNIFORM,
-                    true,
-                    None,
-                ),
+                Self::uniform_buffer_entry(layouts::binning::LIGHT_UNIFORM, true, None),
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
@@ -193,11 +196,7 @@ impl FromWorld for StrandBinningPipeline {
                     true,
                     Some(ViewUniform::min_size()),
                 ), // view
-                Self::uniform_buffer_entry(
-                    layouts::binning::LIGHT_UNIFORM,
-                    true,
-                    None,
-                ),
+                Self::uniform_buffer_entry(layouts::binning::LIGHT_UNIFORM, true, None),
                 Self::storage_buffer_entry(layouts::binning::GEO_BUFFER, true, None), // geos
             ],
         );
@@ -245,15 +244,16 @@ impl FromWorld for StrandBinningPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
-        let count_pipeline_shadows = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("strand_binning_count_pipeline_shadows".into()),
-            layout: vec![count_layout.clone()], // Use specific layout
-            shader: binning_shader.clone(),
-            shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into(), "SHADOWS".into()]].concat(),
-            push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "count_strands".into(),
-            zero_initialize_workgroup_memory: false,
-        });
+        let count_pipeline_shadows =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("strand_binning_count_pipeline_shadows".into()),
+                layout: vec![count_layout.clone()], // Use specific layout
+                shader: binning_shader.clone(),
+                shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into(), "SHADOWS".into()]].concat(),
+                push_constant_ranges: vec![push_constant_range.clone()],
+                entry_point: "count_strands".into(),
+                zero_initialize_workgroup_memory: false,
+            });
 
         let scan_sums_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_binning_scan_sums_pipeline".into()),
@@ -399,7 +399,10 @@ pub fn prepare_binning_buffers(
     // Create the packed segments buffer
     let packed_segments_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("strand_packed_segments_buffer"),
-        size: (froxel_config.screen_width as u64) * (froxel_config.screen_height as u64) * (froxel_config.depth_slices as u64) * 4, // Initial size, will be resized after scan
+        size: (froxel_config.screen_width as u64)
+            * (froxel_config.screen_height as u64)
+            * (froxel_config.depth_slices as u64)
+            * 4, // Initial size, will be resized after scan
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -411,6 +414,127 @@ pub fn prepare_binning_buffers(
         packed_segments_buffer,
     )
 }
+
+fn compute_active_raster_size(view_px: UVec2, tie: TieFroxelsToView) -> UVec2 {
+    match tie {
+        TieFroxelsToView::Native => view_px,
+        TieFroxelsToView::Scaled(s) => (view_px.as_vec2() * s).floor().as_uvec2().max(UVec2::ONE),
+        TieFroxelsToView::Fixed(sz) => sz.max(UVec2::ONE),
+    }
+}
+
+fn tiles_for(size: UVec2, tile: UVec2) -> UVec2 {
+    UVec2::new(
+        (size.x + tile.x - 1) / tile.x,
+        (size.y + tile.y - 1) / tile.y,
+    )
+}
+
+fn grow_to_capacity(active: UVec2, cap: &mut FroxelCapacity, depth_slices: u32) -> bool {
+    let mut need_realloc = false;
+
+    let target_cap_x = active.x.next_power_of_two().max(8); // clamp to reasonable min
+    let target_cap_y = active.y.next_power_of_two().max(8);
+
+    if target_cap_x > cap.tiles_cap_x
+        || target_cap_y > cap.tiles_cap_y
+        || depth_slices > cap.depth_cap
+    {
+        cap.tiles_cap_x = target_cap_x;
+        cap.tiles_cap_y = target_cap_y;
+        cap.depth_cap = depth_slices;
+        cap.tiles_capacity =
+            (cap.tiles_cap_x as u64) * (cap.tiles_cap_y as u64) * (cap.depth_cap as u64);
+        need_realloc = true;
+    }
+    need_realloc
+}
+
+// fn prepare_resize_and_capacity(
+//     render_device: Res<RenderDevice>,
+//     render_queue: Res<bevy::render::renderer::RenderQueue>,
+//     pipeline_cache: Res<PipelineCache>,
+//     views: Query<(&ExtractedView, Option<&TieFroxelsToView>)>, // or your camera query
+//     mut raster_resources: ResMut<StrandRasterizerResources>,
+//     mut binning_resources: ResMut<StrandBinningBuffers>,
+// ) {
+//     for (entity, per_view) in raster_resources.froxel_config_buffer.clone().into_iter() {
+//         // Get view size
+//         let Ok((extracted, tie_mode)) = views.get(entity) else {
+//             warn!("No view on entity: {:?}", entity);
+//             continue;
+//         };
+//         let extracted = extracted;
+//         let view_px = UVec2::new(extracted.viewport.z as u32, extracted.viewport.w as u32);
+//         let tie = per_view.and_then(|_| raster_resources.tie_modes.get(&entity))
+//                           .copied()
+//                           .unwrap_or(TieFroxelsToView::Native);
+
+//         // Compute active raster size & tiles
+//         let internal_px = compute_active_raster_size(view_px, tie);
+//         let config = raster_resources.frustrum_config[&entity];
+//         let tile = UVec2::new(
+//             config.froxel_size_x,
+//             config.froxel_size_y,
+//         );
+//         let tiles_active = tiles_for(internal_px, tile);
+//         let num_tiles_total = tiles_active.x as u64 * tiles_active.y as u64
+//                             * raster_resources.frustrum_config[&entity].depth_slices as u64;
+
+//         // Update uniform (ACTIVE values only)
+//         let mut cfg = raster_resources.frustrum_config.get_mut(&entity).unwrap().clone();
+//         cfg.screen_width  = internal_px.x;
+//         cfg.screen_height = internal_px.y;
+//         cfg.num_tiles_x   = tiles_active.x;
+//         cfg.num_tiles_y   = tiles_active.y;
+//         cfg.num_tiles_total = num_tiles_total;
+
+//         let cfg_buf = raster_resources.froxel_config_buffer.get(&entity).unwrap();
+//         render_queue.write_buffer(cfg_buf, 0, bytemuck::bytes_of(&cfg));
+
+//         // Capacity check
+//         let artifacts = binning_resources.artifacts.get_mut(&entity).unwrap();
+//         let mut cap = artifacts.capacity.clone();
+//         let need_realloc = grow_to_capacity(tiles_active, &mut cap, cfg.depth_slices);
+
+//         // Packed buffer capacity policy (optionally also check a soft limit)
+//         // cap.packed_capacity_bytes = compute_or_grow_packed_capacity(&cap, cfg);
+
+//         if need_realloc {
+//             // Recreate storage buffers sized to cap.tiles_capacity
+//             let new_artifacts = recreate_binning_buffers_with_capacity(
+//                 &render_device,
+//                 &cap,
+//                 /* initial_zero = */ true,
+//             );
+
+//             // Recreate or grow render target textures to cover internal_px
+//             let (target_view, depth_view) =
+//                 recreate_render_target_texture(&render_device, &config);
+
+//             // Swap in artifacts + views
+//             *artifacts = new_artifacts;
+//             raster_resources.output_texture = Some(target_view);
+//             raster_resources.output_depth   = Some(depth_view);
+
+//             // Recreate bind groups for this entity (buffers changed)
+//             let bg = create_strand_binning_bind_group(
+//                 &entity,
+//                 &render_device,
+//                 &raster_resources.binning_pipeline, // wherever you keep it
+//                 /* view uniforms... */,
+//                 /* light uniforms... */,
+//                 &raster_resources,
+//                 &binning_resources,
+//             ).expect("bind groups");
+
+//             raster_resources.binning_bind_groups.insert(entity, bg);
+//         } else {
+//             // No rebinding: just ensure buffers are cleared per-frame before use (you already clear tile_counts in the pass)
+//             // If you need to clear offsets/current indices here, do it via compute or encoder.clear_buffer
+//         }
+//     }
+// }
 
 pub fn create_strand_binning_bind_group(
     entity: &Entity,
@@ -427,12 +551,12 @@ pub fn create_strand_binning_bind_group(
     let index_buffer = binning_resources.index_buffer.as_ref().ok_or(())?;
     let strand_metadata_buffer = binning_resources.meta_buffer.as_ref().ok_or(())?;
 
-    let artifacts = binning_resources
-        .artifacts
+    let artifacts = binning_resources.artifacts.get(entity).ok_or(())?;
+
+    let froxel_config_buffer = raster_resources
+        .froxel_config_buffer
         .get(entity)
         .ok_or(())?;
-
-    let froxel_config_buffer = raster_resources.froxel_config_buffer.get(entity).ok_or(())?;
 
     // Count Bind Group
     let count_bind_group = device.create_bind_group(
@@ -453,14 +577,11 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: layouts::binning::TILE_COUNTS_BUFFER,
-                resource: artifacts
-                    .tile_counts_buffer
-                    .as_entire_binding(),
+                resource: artifacts.tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_CONFIG,
-                resource: froxel_config_buffer
-                    .as_entire_binding(),
+                resource: froxel_config_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::VIEW_UNIFORM,
@@ -488,15 +609,11 @@ pub fn create_strand_binning_bind_group(
         &[
             BindGroupEntry {
                 binding: layouts::binning::TILE_COUNTS_BUFFER,
-                resource: artifacts
-                    .tile_counts_buffer
-                    .as_entire_binding(),
+                resource: artifacts.tile_counts_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::TILE_OFFSETS_BUFFER,
-                resource: artifacts
-                    .tile_offsets_buffer
-                    .as_entire_binding(),
+                resource: artifacts.tile_offsets_buffer.as_entire_binding(),
             },
             // Implicitly handles total count via buffer structure
         ],
@@ -509,9 +626,7 @@ pub fn create_strand_binning_bind_group(
         &[
             BindGroupEntry {
                 binding: layouts::binning::TILE_OFFSETS_BUFFER,
-                resource: artifacts
-                    .tile_offsets_buffer
-                    .as_entire_binding(),
+                resource: artifacts.tile_offsets_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::CURRENT_TILE_WRITE_INDICES,
@@ -547,14 +662,11 @@ pub fn create_strand_binning_bind_group(
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_TILE_BUFFER,
-                resource: artifacts
-                    .packed_segments_buffer
-                    .as_entire_binding(),
+                resource: artifacts.packed_segments_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::FROXEL_CONFIG,
-                resource: froxel_config_buffer
-                    .as_entire_binding(),
+                resource: froxel_config_buffer.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: layouts::binning::VIEW_UNIFORM,
@@ -595,10 +707,7 @@ pub fn run_binning_pass(
     num_strands_or_segments: u32,
     is_light_entity: bool,
 ) {
-
-    let Some(artifacts) = buffers
-        .artifacts
-        .get(entity) else {
+    let Some(artifacts) = buffers.artifacts.get(entity) else {
         warn!("No artifacts for entity: {:?}", entity);
         return;
     };
@@ -638,8 +747,7 @@ pub fn run_binning_pass(
         } else {
             pipelines.count_pipeline
         };
-        let Some(count_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id)
-        else {
+        let Some(count_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
             warn!("Count pipeline not found");
             return;
         };
@@ -773,8 +881,7 @@ pub fn run_binning_pass(
         } else {
             pipelines.place_pipeline
         };
-        let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id)
-        else {
+        let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
             warn!("Place pipeline not found");
             return;
         };

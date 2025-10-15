@@ -1,14 +1,28 @@
 use bevy::{
-    pbr::{ShadowSamplers, ViewLightsUniformOffset, ViewShadowBindings}, prelude::*, render::{
+    pbr::{ShadowSamplers, ViewLightsUniformOffset, ViewShadowBindings},
+    prelude::*,
+    render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferSize, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState, PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
+            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
+            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }
+    },
 };
 
-use crate::{pipelines::layouts, plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants};
+use crate::{
+    pipelines::{layouts, shadows::StrandShadowResources},
+    plugin::MAX_TEXTURE_EXTENT,
+    shader_types::PushConstants,
+};
 
 use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources};
 
@@ -22,7 +36,6 @@ pub struct StrandShadingResources {
     pub strand_count: Option<u32>,
     pub max_segments_in_strand: Option<u32>,
 }
-
 
 #[derive(Resource)]
 pub struct StrandShadingPipeline {
@@ -139,6 +152,42 @@ impl StrandShadingPipeline {
                     ty: BindingType::Sampler(SamplerBindingType::Comparison),
                     count: None,
                 },
+                // Deep Opacity Texture Array (Opacity layers)
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Deep Opacity Texture View
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O_VIEW,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Deep Opacity Texture Array (Depth)
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Deep Opacity Texture View
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
@@ -176,14 +225,17 @@ impl FromWorld for StrandShadingPipeline {
         let shading_shader = shader_loader.load("shaders/strand_shading.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
-        let cdefs = [vec![ShaderDefVal::UInt(
-            "MAX_TEXTURE_EXTENT".into(),
-            crate::plugin::MAX_TEXTURE_EXTENT,
-        ), ShaderDefVal::UInt(
-            "WORKGROUP_SIZE".into(),
-            SHADING_WORKGROUP_SIZE,
-        )
-        ], layouts::shading::shader_defs()].concat();
+        let cdefs = [
+            vec![
+                ShaderDefVal::UInt(
+                    "MAX_TEXTURE_EXTENT".into(),
+                    crate::plugin::MAX_TEXTURE_EXTENT,
+                ),
+                ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SHADING_WORKGROUP_SIZE),
+            ],
+            layouts::shading::shader_defs(),
+        ]
+        .concat();
 
         let shading_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_shading_pipeline".into()),
@@ -210,11 +262,13 @@ impl FromWorld for StrandShadingPipeline {
     }
 }
 
-
 pub fn create_strand_shading_bind_group(
+    view_entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandShadingPipeline,
+    raster_resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
+    shadow_resources: &StrandShadowResources,
     buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -225,6 +279,11 @@ pub fn create_strand_shading_bind_group(
     clusterable_objects: &BindingResource,
     shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
+    let light_entities = raster_resources
+        .froxel_config_buffer
+        .keys()
+        .find(|k| *k != view_entity)
+        .ok_or(())?;
 
     let layout = &pipeline.bind_group_layout;
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
@@ -232,6 +291,11 @@ pub fn create_strand_shading_bind_group(
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
     let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
+    let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
+    let dom_sampler = shadow_resources
+        .dom_samplers
+        .get(light_entities)
+        .ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -277,7 +341,25 @@ pub fn create_strand_shading_bind_group(
                 },
                 BindGroupEntry {
                     binding: layouts::shading::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(&shadows.directional_light_comparison_sampler),
+                    resource: BindingResource::Sampler(
+                        &shadows.directional_light_comparison_sampler,
+                    ),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O,
+                    resource: BindingResource::Sampler(&dom_sampler.0),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O_VIEW,
+                    resource: BindingResource::TextureView(&dom_texture.0),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D,
+                    resource: BindingResource::Sampler(&dom_sampler.1),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    resource: BindingResource::TextureView(&dom_texture.1),
                 },
                 // Bind the output texture
                 BindGroupEntry {
