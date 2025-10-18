@@ -95,6 +95,17 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                // Material buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::MATERIAL_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // Tile offsets buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
@@ -333,6 +344,7 @@ pub fn create_strand_raster_bind_group(
     let tile_counts_buffer = &artifacts.tile_counts_buffer;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
     let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
+    let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
     let packed_segments = resources.froxel_buffer.get(entity).ok_or(())?;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
     let output_depth = resources.output_depth.as_ref().ok_or(())?;
@@ -359,6 +371,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::GEO_BUFFER,
                     resource: geos_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::MATERIAL_BUFFER,
+                    resource: material_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,

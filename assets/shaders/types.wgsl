@@ -31,7 +31,7 @@ struct StrandGeo {
 struct StrandMeta {
     count: u32,     // Number of vertices in strand
     offset: u32,    // Start index in the original indices buffer (or vertices buffer?)
-    pad_a: u32,      // Padding for alignment
+    material_idx: u32, // material index
     pad_b: u32,      // Padding for alignment
 }
 

@@ -48,53 +48,6 @@ pub struct StrandShadowPipeline {
 pub const DOM_FORMAT: TextureFormat = TextureFormat::R32Float;
 
 impl StrandShadowPipeline {
-    pub fn create_punch_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
-            "strand_shadow_punch_bind_group_layout",
-            &[
-                BindGroupLayoutEntry {
-                    binding: layouts::shadows::DEEP_OPACITY_TEXTURE_O, // opacity array
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: layouts::shadows::DEEP_OPACITY_TEXTURE_D, // depth texture
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: layouts::shadows::POINT_LIGHT_SHADOW_MAP,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Depth {},
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: true,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: layouts::shadows::DIRECTIONAL_LIGHT_SHADOW_MAP,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Depth {},
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: true,
-                    },
-                    count: None,
-                },
-            ],
-        )
-    }
 
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         // We shade in strand space so we only need the vertex, index and meta buffers in terms of geometry.
@@ -138,6 +91,17 @@ impl StrandShadowPipeline {
                 // Geos buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::GEO_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Material buffer
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::MATERIAL_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -395,7 +359,8 @@ pub fn create_strand_shadow_bind_group(
     entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandShadowPipeline,
-    shading_resources: &StrandShadowResources,
+    shadow_resources: &StrandShadowResources,
+    shading_resources: &StrandShadingResources,
     raster_resources: &StrandRasterizerResources,
     buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
@@ -416,7 +381,8 @@ pub fn create_strand_shadow_bind_group(
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    let output_texture = shading_resources.dom_targets.get(entity).ok_or(())?;
+    let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
+    let output_texture = shadow_resources.dom_targets.get(entity).ok_or(())?;
     let packed_segments = raster_resources.froxel_buffer.get(entity).ok_or(())?;
     let froxel_config_buffer = raster_resources
         .froxel_config_buffer
@@ -444,6 +410,10 @@ pub fn create_strand_shadow_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::GEO_BUFFER,
                     resource: geos_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::MATERIAL_BUFFER,
+                    resource: material_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,

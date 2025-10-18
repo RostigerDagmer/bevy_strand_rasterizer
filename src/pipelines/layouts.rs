@@ -19,12 +19,13 @@ pub mod rasterizer {
     pub const CLUSTERABLE_OBJECTS: u32 = 15;
     pub const POINT_LIGHT_DEPTH_TEXTURE_SAMPLER: u32 = 16;
     pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE_SAMPLER: u32 = 17;
-    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 22;
-    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 23;
     pub const GEO_BUFFER: u32 = 18;
     pub const DEEP_OPACITY_TEXTURE_O_VIEW: u32 = 19;
     pub const DEEP_OPACITY_TEXTURE_D_VIEW: u32 = 20;
     pub const OUTPUT_DEPTH: u32 = 21;
+    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 22;
+    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 23;
+    pub const MATERIAL_BUFFER: u32 = 24;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -65,6 +66,7 @@ pub mod rasterizer {
                 DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
             ),
             ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
+            ShaderDefVal::UInt("MATERIAL_BUFFER".into(), MATERIAL_BUFFER),
         ]
     }
 }

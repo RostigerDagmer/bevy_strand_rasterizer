@@ -9,6 +9,7 @@
     SegmentRef,
     StrandGeo,
     StrandMeta,
+    StrandMaterial,
     PushConstants,
 }
 
@@ -24,6 +25,7 @@ const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
 @group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
 @group(0) @binding(#{GEO_BUFFER}) var<storage, read> geos: array<StrandGeo>;
+@group(0) @binding(#{MATERIAL_BUFFER}) var<storage, read> materials: array<StrandMaterial>;
 @group(0) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read> tile_offsets_buffer: array<u32>;
 @group(0) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
 @group(0) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
@@ -243,7 +245,8 @@ fn rasterize_strands(@builtin(global_invocation_id) gid: vec3<u32>,
             let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, clamp(p.z, 0.0, 1.0)); // clamp(0.5 * (p0.z + p1.z), 0.0, 1.0));
             let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
             if cov <= 0.0 { continue; }
-
+            // fetch material because we are going to need the alpha/Beer.
+            let mat = materials[strand_metadata[seg.strand_idx].material_idx];
             // map to [0,1] behind z0
             let dzp = max(0.0, p.z - z0) * invSpan;
 
@@ -263,8 +266,8 @@ fn rasterize_strands(@builtin(global_invocation_id) gid: vec3<u32>,
             // optional 2-slice linear distribution to reduce stair-steps
             let w = fract(tL);
 
-            // your per-fragment opacity (replace 0.5f by strand alpha/Beer)
-            let a = cov * 0.2;
+            // your per-fragment opacity
+            let a = cov * mat.absorption_color.w * 0.5;
 
             // accumulate (keep α in [0,1])
             let a0 = alpha[i];
@@ -434,10 +437,15 @@ fn rasterize_strands(
                 let dom_depth = textureSampleLevel(deep_opacity_depth_maps, deep_opacity_depth_sampler, sample_coord, 0.0);
                 let min_depth = dom_depth.x;
                 var occlusion = 0.0;
-                // if fragment_light.z > min_depth {
-                let d = pow((fragment_light.z - min_depth), GAMMA);
-                occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
-                // }
+                if fragment_light.z > min_depth {
+                    let span = max(1e-6, 1.0 - min_depth);
+                    let invSpan = 1.0 / span;
+                    let dzp = max(0.0, fragment_light.z - min_depth) * invSpan;
+                    let u = pow(clamp(dzp, 0.0, 1.0), GAMMA);
+                    let tL = u * f32(texture_dims.z);
+                    let d = min(tL, f32(texture_dims.z - 1u));
+                    occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
+                }
 
                 var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * ambient_factor;
                 let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);

@@ -150,6 +150,7 @@ impl Node for StrandShadowRasterizerNode {
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let binning_pipeline = world.resource::<StrandBinningPipeline>();
         let shadow_resources = world.resource::<StrandShadowResources>();
+        let shading_resources = world.resource::<StrandShadingResources>();
         let binning_buffers = world.resource::<StrandBinningBuffers>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
@@ -257,6 +258,7 @@ impl Node for StrandShadowRasterizerNode {
                     render_device,
                     shadow_pipeline,
                     shadow_resources,
+                    shading_resources,
                     &raster_resources,
                     binning_buffers,
                     &view_binding,

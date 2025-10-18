@@ -16,13 +16,13 @@ pub struct PushConstants {
 pub struct StrandMeta {
     pub count: u32,  // number of vertices in this strand
     pub offset: u32, // offset into the index buffer for this strand
+    pub material_idx: u32,
     pad1: u32,
-    pad2: u32,
 }
 
 impl From<(u32, u32)> for StrandMeta {
     fn from((count, offset): (u32, u32)) -> Self {
-        Self { count, offset, pad1: 0, pad2: 0 }
+        Self { count, offset, material_idx: 0, pad1: 0 }
     }
 }
 
