@@ -23,20 +23,23 @@
     PushConstants,
 }
 
-var<push_constant> pc: PushConstants;
-
 #import "shaders/common.wgsl"::{
     PI,
     PI_HALF,
     SQRT_2_PI,
+    DOM_GAMMA,
+    find_clip_bounds,
+    world_to_screen_aabbnorm
 }
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE; // TODO: shaderdef
 
+var<push_constant> pc: PushConstants;
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
 @group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
+@group(0) @binding(#{GEO_BUFFER}) var<storage, read> geos: array<StrandGeo>;
 @group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
@@ -328,12 +331,12 @@ fn Mp(v_long_val: f32, theta_i_: f32, theta_r: f32, alpha_p_shift: f32) -> f32 {
     let csch_val = csch(1.0 / v_long_val);
 
     let bessel_val = bessel_first_approx(bessel_arg, 5u);
-    let m_val = (csch_val / (2.0 * v_long_val)) * bessel_val * exp(exp_arg);
-    return m_val;
+    // let m_val = (csch_val / (2.0 * v_long_val)) * bessel_val * exp(exp_arg);
+    // return m_val;
 
     // Debug
     // return exp(exp_arg); // looks good
-    // return bessel_val * exp(exp_arg); //
+    return bessel_val * exp(exp_arg); //
     // return (csch_val / (2.0 * v_long_val)); //
 }
 
@@ -377,19 +380,19 @@ fn Np(p: u32, phi: f32, theta_i: f32, theta_r: f32, eta_val: f32, mu_a_rgb_val: 
 }
 
 
-fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val: f32, mu_a_rgb_val: vec3<f32>, v_long_val: f32, v_azim_val: f32, alpha_p_val: f32, specular_a_rgb_val: vec4<f32>) -> vec3<f32> {
+fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val: f32, mu_a_rgb_val: vec3<f32>, v_long_val: f32, v_azim_val: f32, alpha_p_val: f32, specular_a_rgb_val: vec4<f32>, occlusion: f32) -> vec3<f32> {
     // for more information on this see: model_building.ipynb
     let beta_azim_val = sqrt(v_azim_val);
     var total_reflectance = Mp(v_long_val, theta_i, theta_r, alpha_p_val) * specular_a_rgb_val.xyz * specular_a_rgb_val.w;
     // var total_reflectance = vec3<f32>(0.0, 0.0, 0.0);
     for (var p = 0u; p < PATH_COUNT; p = p + 1) {
         let Np_val = Np(p, phi_i, theta_i, theta_r, eta_val, mu_a_rgb_val, v_azim_val, beta_azim_val);
-        total_reflectance = total_reflectance + Np_val;
+        total_reflectance = total_reflectance + Np_val * ((f32(p + 1u) * (1.0 - occlusion)) / f32(PATH_COUNT));
     }
     return total_reflectance;
 }
 
-fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, material: StrandMaterial) -> vec3<f32> {
+fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, light_normal: vec3<f32>, material: StrandMaterial, occlusion: f32) -> vec3<f32> {
 
     let u = direction;
 
@@ -406,7 +409,7 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
     let v_long_val = material.alpha * material.alpha;
     let v_azim_val = material.beta * material.beta;
 
-    let bcsdf = weta_strand_bsdf(theta_i, phi, theta_r, phi, material.eta, sigma_a, v_long_val, v_azim_val, material.shift, material.specular_color);
+    let bcsdf = weta_strand_bsdf(theta_i, phi, theta_r, phi, material.eta, sigma_a, v_long_val, v_azim_val, material.shift, material.specular_color, occlusion);
     return bcsdf;
 
     // Debug
@@ -442,11 +445,12 @@ fn shade_strands(
     let light_count = lights.n_directional_lights;
 
     // var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
-    var material = materials[0]; // TODO: use either strand metadata or strandgeometry for material lookup.
-    var accum_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var material = materials[strand_meta.material_idx];
+    var accum_color = vec4<f32>(0.0, 0.0, 0.0, material.absorption_color.w);
 
     let texture_dims = textureDimensions(deep_opacity_maps);
     let shadow_map_dims = vec2<f32>(texture_dims.xy);
+    let geo = geos[0]; // TODO
 
     for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) { // in case we have more segments than workgroup size
         let segment_offset = segment_id + i;
@@ -480,19 +484,34 @@ fn shade_strands(
         // TODO: we can theoretically split this across multiple workgroups radiance accumulation is commutative
         for (var j = 0u; j < light_count; j = j + 1) {
             let light: types::DirectionalLight = lights.directional_lights[j];
-            // let cascade = lights.cascades[0];
+            let cascade = light.cascades[0]; // TODO: select cascade based on distance
+            let light_cascade_clip_from_world = cascade.clip_from_world;
             let light_flags = light.flags;
             let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
             // get local occlusion if there is a shadowmap
-            // let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
-            // let fragment_light = world_to_screen_aabbnorm(fragment_world_pos, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_clip_bounds);
+            let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
+            let fragment_light = world_to_screen_aabbnorm(vertex, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_clip_bounds);
+            var sample_coord = vec2<f32>(fragment_light.xy / shadow_map_dims.xy);
 
-            let bcsdf = marschner(vertex, L, V, U, material);
+            let dom_depth = textureSampleLevel(deep_opacity_depth_maps, deep_opacity_depth_sampler, sample_coord, 0.0);
+            let min_depth = dom_depth.x;
+            var occlusion = 0.0;
+            if fragment_light.z > min_depth {
+                let span = max(1e-6, 1.0 - min_depth);
+                let invSpan = 1.0 / span;
+                let dzp = max(0.0, fragment_light.z - min_depth) * invSpan;
+                let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
+                let tL = u * f32(texture_dims.z);
+                let d = min(tL, f32(texture_dims.z - 1u));
+                occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
+            }
+
+            let bcsdf = marschner(vertex, L, V, U, material, occlusion);
 
             var c = bcsdf * (light.color.xyz / 255.0);
             c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor); // ambient TODO: ambient lighting
 
-            accum_color += vec4<f32>(c.xyz, material.absorption_color.w);
+            accum_color += vec4<f32>(c.xyz, 0.0);
         }
         let out_row = strand_id % MAX_TEXTURE_EXT;
         let out_col = strand_id / MAX_TEXTURE_EXT;

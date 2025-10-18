@@ -12,6 +12,8 @@ const PI = 3.14159265359;
 const PI_HALF = PI / 2.0;
 const SQRT_2_PI = sqrt(2.0 * PI);
 
+const DOM_GAMMA: f32 = 1.0; // distribution coefficient for DOM slices.
+
 fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
     let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
     let froxels_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;

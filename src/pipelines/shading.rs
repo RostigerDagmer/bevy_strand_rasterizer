@@ -83,6 +83,17 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
+                // Geos buffer (read-only storage buffer)
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::GEO_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // View Uniform Buffer
                 BindGroupLayoutEntry {
                     binding: layouts::shading::VIEW_UNIFORM,
@@ -289,6 +300,7 @@ pub fn create_strand_shading_bind_group(
     let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
     let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
     let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
     let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
     let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
@@ -309,6 +321,10 @@ pub fn create_strand_shading_bind_group(
                 BindGroupEntry {
                     binding: layouts::shading::INDEX_BUFFER,
                     resource: index_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::GEO_BUFFER,
+                    resource: geos_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::shading::META_BUFFER,
@@ -366,7 +382,6 @@ pub fn create_strand_shading_bind_group(
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
                 },
-                // Bind the material buffer
                 BindGroupEntry {
                     binding: layouts::shading::MATERIAL_BUFFER,
                     resource: material_buffer.as_entire_binding(),

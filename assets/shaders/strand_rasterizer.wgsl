@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/spline.wgsl"::{ intersect_catmull_rom_spline_3d, closest_point };
-#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index }
+#import "shaders/common.wgsl"::{ DOM_GAMMA, find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index }
 #import "shaders/types.wgsl"::{
     Aabb,
     FroxelConfig,
@@ -14,13 +14,11 @@
 }
 
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-
-var<push_constant> pc: PushConstants;
-
 const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
 const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
 
+var<push_constant> pc: PushConstants;
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
 @group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
@@ -35,6 +33,7 @@ const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
 @group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(0) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 @group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
@@ -111,7 +110,6 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
 }
 
 // #define DEBUG
-const GAMMA: f32 = 1.0; // distribution coefficient for DOM slices.
 
 #ifdef SHADOWS
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
@@ -251,17 +249,11 @@ fn rasterize_strands(@builtin(global_invocation_id) gid: vec3<u32>,
             let dzp = max(0.0, p.z - z0) * invSpan;
 
             // optional gamma warp AFTER normalization
-            let u = pow(clamp(dzp, 0.0, 1.0), GAMMA);
+            let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
 
             // slice index (safe clamp)
             let tL = u * f32(L);
             let i = min(u32(floor(tL)), L - 1u);
-
-            // if p.z > light_z {
-            //     alpha[i] = 1.0;
-            //     z_nearest = min(z_nearest, light_z);
-            //     continue;
-            // }
 
             // optional 2-slice linear distribution to reduce stair-steps
             let w = fract(tL);
@@ -441,7 +433,7 @@ fn rasterize_strands(
                     let span = max(1e-6, 1.0 - min_depth);
                     let invSpan = 1.0 / span;
                     let dzp = max(0.0, fragment_light.z - min_depth) * invSpan;
-                    let u = pow(clamp(dzp, 0.0, 1.0), GAMMA);
+                    let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(texture_dims.z);
                     let d = min(tL, f32(texture_dims.z - 1u));
                     occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
@@ -642,7 +634,7 @@ fn rasterize_strands(
                 let min_depth = dom_depth.x;
                 var occlusion = 0.0;
                 if fragment_light.z > min_depth {
-                    let d = pow((fragment_light.z - min_depth), GAMMA);
+                    let d = pow((fragment_light.z - min_depth), DOM_GAMMA);
                     occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
                 }
 
