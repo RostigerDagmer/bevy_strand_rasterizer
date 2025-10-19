@@ -315,7 +315,6 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.03;
 
     let tile_coord_x = workgroup_id.x;
     let tile_coord_y = workgroup_id.y;
@@ -439,7 +438,8 @@ fn rasterize_strands(
                     occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
                 }
 
-                var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * ambient_factor;
+                let mat = materials[strand_meta.material_idx];
+                var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * 0.5 * mat.ambient_factor + (mat.absorption_color.xyz) * 0.5 * mat.ambient_factor;
                 let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
                 // let hair_fragment = vec4<f32>(occlusion, occlusion, occlusion, 0.5 * coverage);
                 // transmittance accumulation
@@ -486,7 +486,6 @@ fn rasterize_strands(
 
     // Initialize final pixel color (start transparent black)
     var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let ambient_factor = 0.03;
     let hair_root_factor = 0.015;
     let spline_alpha = 1.0;
 
@@ -637,8 +636,8 @@ fn rasterize_strands(
                     let d = pow((fragment_light.z - min_depth), DOM_GAMMA);
                     occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
                 }
-
-                var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * ambient_factor;
+                let mat = materials[strand_meta.material_idx];
+                var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * 0.5 * mat.ambient_factor + (mat.absorption_color.xyz) * 0.5 * mat.ambient_factor;
                 let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
                 // transmittance accumulation
                 froxel_color = blend_over(froxel_color, hair_fragment);
