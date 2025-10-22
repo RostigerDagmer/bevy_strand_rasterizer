@@ -1,0 +1,6 @@
+# wgsl-analyzer.toml
+[include]
+paths = [
+    "./assets",
+    "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.16.1/src",
+]

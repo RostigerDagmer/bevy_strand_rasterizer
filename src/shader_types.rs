@@ -56,6 +56,23 @@ pub struct StrandGeo {
     pub aabb: Aabb,
 }
 
+#[derive(Debug, Clone, ShaderType)]
+#[repr(C)]
+pub struct FinePrepassTask {
+    geo_id: u32,
+    strand_count: u32
+}
+
+pub struct BinningTask {
+    seg_idx: u32, // offset from beginning of strand.
+    strand_idx: u32, // offset into strand_meta buffer. (contains the base offset into index buffer + other stuff)
+    geo_idx: u32,
+    // bit idx[0]: flag = 0 if view 1 if light.
+    // bit ids[1:2]: light type if idx[0] is 1. (point = 0, spot = 1, directional = 2)
+    // Rest: index into the corresponding light buffer.
+    view_idx: u32,
+}
+
 impl StrandGeo {
     pub fn new(strand_count: u32, max_segments_in_strand: u32, aabb: Aabb3d) -> Self {
         Self {

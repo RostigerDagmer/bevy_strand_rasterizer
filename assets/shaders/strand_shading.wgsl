@@ -33,7 +33,7 @@
 }
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
-const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE; // TODO: shaderdef
+const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 
 var<push_constant> pc: PushConstants;
 @group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;

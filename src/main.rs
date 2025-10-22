@@ -56,9 +56,9 @@ fn setup(
 
     commands.spawn((
         FroxelConfig {
-            screen_height: 2048,
-            screen_width: 2048,
-            depth_slices: 64,
+            screen_height: 2160,
+            screen_width: 3840,
+            depth_slices: 32,
             ..Default::default()
         },
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
@@ -68,6 +68,10 @@ fn setup(
             button_pan: MouseButton::Middle,
             ..Default::default()
         },
+        Projection::from(PerspectiveProjection {
+                            fov: 20.0_f32.to_radians(),
+                            ..default()
+                        }),
         TieFroxelsToView::Native,
         bevy::core_pipeline::prepass::DepthPrepass,
     ));
@@ -199,6 +203,7 @@ fn rotate_light_around_z_axis(
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
         .add_plugins(EguiPlugin::default())
         .add_plugins(StrandRasterizerPlugin)
         .add_plugins(PanOrbitCameraPlugin)

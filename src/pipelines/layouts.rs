@@ -1,3 +1,35 @@
+
+pub mod prepass {
+    use bevy::render::render_resource::ShaderDefVal;
+
+    pub const VERTEX_BUFFER: u32 = 0;
+    pub const INDEX_BUFFER: u32 = 1;
+    pub const META_BUFFER: u32 = 2;
+    pub const GEO_BUFFER: u32 = 3;
+    pub const LIGHT_UNIFORM: u32 = 4;
+    pub const CLUSTER_INDICES: u32 = 5;
+    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 6;
+    pub const CLUSTERABLE_OBJECTS: u32 = 7;
+    pub const VIEW_UNIFORM: u32 = 8;
+    pub const INDIRECT_BUFFER: u32 = 9;
+
+    pub fn shader_defs() -> Vec<ShaderDefVal> {
+        vec![
+            ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
+            ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
+            ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
+            ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
+            ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
+            ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
+            ShaderDefVal::UInt("CLUSTER_OFFSETS_AND_COUNTS".into(), CLUSTER_OFFSETS_AND_COUNTS),
+            ShaderDefVal::UInt("CLUSTERABLE_OBJECTS".into(), CLUSTERABLE_OBJECTS),
+            ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
+            ShaderDefVal::UInt("INDIRECT_BUFFER".into(), INDIRECT_BUFFER),
+        ]
+    }
+}
+
+
 pub mod rasterizer {
     use bevy::render::render_resource::ShaderDefVal;
 

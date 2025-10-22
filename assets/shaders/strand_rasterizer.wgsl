@@ -456,7 +456,7 @@ fn rasterize_strands(
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        if final_color.a > 0.9999 {
+        if final_color.a > 0.999 {
             break; // Stop Z loop
         }
     } // End loop over depth slices (dz)
@@ -652,7 +652,7 @@ fn rasterize_strands(
 
         // --- Optional Early Exit ---
         // If pixel becomes nearly opaque, we can stop processing deeper Z slices
-        if final_color.a > 0.9999 {
+        if final_color.a > 0.999 {
             break; // Stop Z loop
         }
     } // End loop over depth slices (dz)
