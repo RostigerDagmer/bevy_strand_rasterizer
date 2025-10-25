@@ -13,11 +13,12 @@ use bevy::{
     },
     platform::collections::HashMap,
     prelude::{Deref, DerefMut},
-    reflect::{prelude::ReflectDefault, Reflect},
+    reflect::{Reflect, prelude::ReflectDefault},
     render::{
         render_asset::RenderAsset,
         render_resource::{
-            Buffer, BufferAddress, BufferDescriptor, BufferUsages, ShaderType,
+            BindGroupEntry, BindGroupLayoutEntry, BindingType, Buffer, BufferAddress,
+            BufferBindingType, BufferDescriptor, BufferUsages, ShaderStages, ShaderType,
             encase::{self, private::WriteInto},
         },
         renderer::{RenderDevice, RenderQueue},
@@ -95,6 +96,7 @@ pub struct GpuPagingAllocator {
     pub pools: HashMap<SlabKind, SlabPool>,
     pub device: RenderDevice,
     pub label_map: HashMap<SlabKind, &'static str>,
+    pub bind_map: HashMap<SlabKind, u32>,
     // One bind group that contains a binding_array per kind (see §3)
     // pub bind_group: BindGroup,
     // pub layout: BindGroupLayout,
@@ -109,6 +111,7 @@ impl FromWorld for GpuPagingAllocator {
             pools: HashMap::default(),
             device: device.clone(),
             label_map: HashMap::default(),
+            bind_map: HashMap::default(),
             handle_table: HandleTable::default(),
         }
     }
@@ -134,6 +137,55 @@ impl GpuPagingAllocator {
     // pub fn get_slab<'a>(self, key: AllocKey) -> Option<&'a Slab> {
 
     // }
+}
+
+pub trait BindGroupBuilder {
+    fn layout_entries(&self) -> Vec<BindGroupLayoutEntry>;
+    fn entries(&self) -> Vec<BindGroupEntry>;
+}
+
+impl BindGroupBuilder for GpuPagingAllocator {
+    fn layout_entries(&self) -> Vec<BindGroupLayoutEntry> {
+        self.pools
+            .iter()
+            .filter_map(|(kind, pool)| {
+                let count = pool.slabs.len();
+                (count > 0).then(|| BindGroupLayoutEntry {
+                    binding: *self.bind_map.get(kind).unwrap_or_else(|| {
+                        panic!("GpuPagingAllocator missing binding index for {:?}", kind)
+                    }),
+                    visibility: ShaderStages::COMPUTE
+                        | ShaderStages::VERTEX
+                        | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: Some(
+                        (count as u32)
+                            .try_into()
+                            .expect("bind_array_len to be NonZero"),
+                    ),
+                })
+            })
+            .collect()
+    }
+    fn entries(&self) -> Vec<BindGroupEntry> {
+        self.pools
+            .iter()
+            .flat_map(|(kind, pool)| {
+                let binding_index = *self.bind_map.get(kind).unwrap();
+                pool.slabs
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, slab)| BindGroupEntry {
+                        binding: binding_index,
+                        resource: slab.buffer.as_entire_binding(),
+                    })
+            })
+            .collect()
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
