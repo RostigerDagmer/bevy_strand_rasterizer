@@ -26,6 +26,16 @@
     PushConstants,
 }
 
+#import "shaders/prefix_sum.wgsl"::{
+    get_scan_workgroup_index,
+    workgroup_inclusive_scan_blelloch,
+    workgroup_exclusive_scan,
+    SCAN_THREADS,
+    SCAN_SUBGROUP_THREADS,
+    SCAN_SUBGROUPS,
+    subgroup_partials,
+    wg_scan_storage
+}
 
 const INITIAL_ROUND_ALLOC_SIZE: u32 = 32u;
 const REGULAR_ROUND_ALLOC_SIZE: u32 = 16u;
@@ -55,16 +65,20 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
     return false;
 }
 
+
+
 var<workgroup> wg_chunks: array<atomic<u32>, SCAN_THREADS>;
 
 fn pull_chunk(task_hash: u32, local_id: u32, size: u32) -> u32 {
     let pool_address: u32 = alloc(task_hash % N_HEADS, size);
-    atomicStore(&wg_chunks[local_id], pool_address);
+    // atomicStore(&wg_chunks[local_id], pool_address);
+    wg_chunks[local_id] = pool_address;
     return pool_address
 }
 
 fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
-    var chunk_addr = atomicLoad(&wg_chunks[local_id]);
+    // var chunk_addr = atomicLoad(&wg_chunks[local_id]);
+    var chunk_addr = wg_chunks[local_id];
     if (chunk_addr == 0u) {
         chunk_addr = pull_chunk(task_hash, local_id, size);
         return chunk_pool[chunk_addr];
@@ -78,7 +92,7 @@ fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
     }
 }
 
-fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig, level: u32) {
+fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig, level: u32) {
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
     let r_ix = 0; //i32(ceil(half_thickness_px / f32(cfg.froxel_size_x)));
@@ -150,6 +164,9 @@ fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig
     let max_steps = u32(max_f.x + max_f.y + max_f.z + 3); // Generous upper bound
     let zero_thickness = r_ix == 0 && r_iy == 0;
 
+    var chunk = 0xFFFFFFFF;
+    var current_count = 0u;
+
     loop {
         safety = safety + 1u;
         if safety > max_steps { break; } // Safety break
@@ -157,19 +174,34 @@ fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig
         // Add segment count to current froxel IF it's within valid bounds
         if in_bounds(f, max_f) {
             // TODO
-            let chunk = get_chunk(task_hash, local_id, select(INITIAL_ROUND_ALLOC_SIZE, REGULAR_ROUND_ALLOC_SIZE, level > 0u));
+            if (current_count >= CHUNK_SIZE) {
+                chunk = get_chunk(task_hash, local_id, select(INITIAL_ROUND_ALLOC_SIZE, REGULAR_ROUND_ALLOC_SIZE, level > 0u));
+            }
             let froxel_id = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
             switch level {
-                case 0u: {
+                // case 0u: {
 
-                }
+                // }
                 case (NUM_LEVELS - 1u): {
                     // emit raster work item
                 }
                 default: {
                     // next level in the hierarchy
+                    let unpacked = unpack_binning_field(task);
+                    let repacked = pack_binning_field(unpacked.x, level + 1u, unpacked.z);
+                    
+                    let task = BinningTask(
+                        froxel_id,
+                        task.seg_id,
+                        task.seg_idx
+                        packed_field
+                    )
+                    // 
+                    chunk.items[count] = seg_idx,
+                    chunk.count = chunk.count + 1u;
                 }
             }
+            current_count = chunk.count;
 
         } else {
             // Stop if we step out of bounds entirely
@@ -198,6 +230,34 @@ fn trace_segment_through_froxels(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig
              break;
         }
     }
+
+    workgroupBarrier();
+
+    let num_chunks = workgroup_exclusive_scan(lid, subgroup_id, subgroup_local_id, wg_chunk_counts[lid]);
+
+    var base:u32 = 0u;
+    if (lid == WG_SIZE - 1u) {
+        // tally up work
+        base = atomicAdd(&binning_queue.tail, num_chunks * BIN_TASK_SIZE / CHUNK_SIZE);
+    }
+    base = workgroupBroadcastFirst(base);
+
+    workgroupBarrier();
+
+    if (chunk != 0xFFFFFFFF) {
+        // submit work
+        for (var i = 0u; i < num_chunks * BIN_TASK_SIZE / CHUNK_SIZE; i = i + BIN_TASK_SIZE) {
+            let write_idx = base + i;
+            let chunk_idx = i / CHUNK_SIZE;
+            var chunk_pointer = wg_chunks[lid];
+            for (var j = 0u; j < chunk_idx; j = j + 1) {
+                chunk_pointer = chunk_pointer.next;
+            }
+            let chunk = chunk_pool[chunk_pointer];
+            let task = BinningTask(chunk.items[0], chunk.items[1], chunk.items[2], chunk.items[3]);
+            binning_queue.tasks[write_idx] = task;
+        }
+    }
 }
 
 fn nearest_pow2(n: f32) -> f32 {
@@ -218,7 +278,7 @@ fn nearest_pow2(n: f32) -> f32 {
 
 const NUM_LEVELS: u32 = 2u;
 
-fn process_level(task: BinningTask, local_id: vec3<u32>, task_hash: u32) {
+fn process_level(task: BinningTask, local_id: vec3<u32>, subgroup_id: u32, subgroup_local_id: u32, task_hash: u32) {
     // 1. construct froxelcfg for the current level.
     let is_shadow = task.frustrum_id & 0x1;
     let config_idx = task.frustrum_id >> 1u;
@@ -231,14 +291,7 @@ fn process_level(task: BinningTask, local_id: vec3<u32>, task_hash: u32) {
     let seg_idx = indices[task.seg_offset];
     let p0 = vertices[seg_idx];
     let p1 = vertices[seg_idx + 1u];
-    switch task.level {
-        case 0u: {
-            trace_segment_through_froxels_initial(p0, p1, level_cfg);
-        }
-        default: {
-            trace_segment_through_froxel_prebinned(p0, p1, level_cfg, level);
-        }
-    }
+    trace_segment_through_froxels(p0, p1, level_cfg);
 }
 
 fn kickoff_queue_empty() -> bool {

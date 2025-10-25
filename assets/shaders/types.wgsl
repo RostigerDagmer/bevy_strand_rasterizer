@@ -37,8 +37,9 @@ struct BinningTask {
     // in l0 this is just geo_id
     // in li it becomes a tile index at the previous level
     id_info: u32,
-    strand_id: u32,
-    seg_offset: u32,
+    chunk_id: u32,
+    // strand_id: u32,
+    seg_idx: u32,
     // bit [0:2]: bin level bits
     // bit [2]: whether this is a render target or a shadow target.
     // bit [3:]: index into the frustrum buffer (FroxelConfig).
@@ -52,6 +53,11 @@ fn unpack_binning_field(packed_field: u32) -> vec3<u32> {
     return vec3<u32>(is_shadow, bin_level, frustrum_index);
 }
 
+fn pack_binning_field(is_shadow: u32, bin_level: u32, frustrum_index: u32) -> u32 {
+    var packed_field = frustrum_index << 3u;
+    packed_field = packed_field & (is_shadow << 2u) & bin_level;
+    return packed_field;
+}
 
 struct RasterWorkItem {
     seg_id: u32,

@@ -9,13 +9,13 @@ use bevy::{
             ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
             FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
             PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess,
             Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
             TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    },
+    }, shader::ShaderDefVal,
 };
 
 use crate::{
@@ -257,7 +257,7 @@ impl FromWorld for StrandShadingPipeline {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
             }],
-            entry_point: "shade_strands".into(),
+            entry_point: Some("shade_strands".into()),
             zero_initialize_workgroup_memory: false,
         });
 

@@ -1,5 +1,4 @@
-use bevy::prelude::*;
-use bevy::pbr::CascadeShadowConfigBuilder;
+use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 mod dson;
@@ -12,6 +11,7 @@ mod perf;
 mod pipelines;
 mod plugin;
 mod shader_types;
+mod allocator;
 
 fn setup(
     mut commands: Commands,
@@ -56,8 +56,8 @@ fn setup(
 
     commands.spawn((
         FroxelConfig {
-            screen_height: 2160,
-            screen_width: 3840,
+            screen_height: 1080,
+            screen_width: 1920,
             depth_slices: 32,
             ..Default::default()
         },

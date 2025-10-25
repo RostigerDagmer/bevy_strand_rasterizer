@@ -30,7 +30,7 @@ const VISIBILITY_CULL_LIMIT_PX_LEN: f32 = 0.5; // TODO: can be a runtime param.
 @group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
 @group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
 @group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
-@group(0) @binding(#{FINE_QUEUE}) var<storage, write> fine_phase_queue: FinePrepassQueue;
+@group(0) @binding(#{PREPASS_QUEUE}) var<storage, write> fine_phase_queue: FinePrepassQueue;
 @group(0) @binding(#{VISIBLE_FLAGS}) var<storage, write> visible_flag: array<u32>;
 @group(0) @binding(#{VISIBLE_GEO}) var<storage, write> visible_geos: array<u32>; // prefix
 @group(0) @binding(#{GEO_PREFIX}) var<storage, write> geo_prefix: array<u32>;
@@ -236,11 +236,10 @@ fn process_fine(task: FinePrepassTask, lid: u32) {
 
         // Compact visible segments
         let local_sum = workgroup_exclusive_scan(lid, subgroup_id, subgroup_local_id, local_visible_flags[lid]);
-        let total = workgroupVisibleTotal; // returned by scan
 
         var base:u32 = 0u;
         if (lid == WG_SIZE - 1u) {
-            base = atomicAdd(&binning_queue.tail, total);
+            base = atomicAdd(&binning_queue.tail, local_sum);
         }
         base = workgroupBroadcastFirst(base);
         workgroupBarrier();

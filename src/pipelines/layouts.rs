@@ -1,17 +1,22 @@
 
 pub mod prepass {
-    use bevy::render::render_resource::ShaderDefVal;
+    use bevy::shader::ShaderDefVal;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
     pub const META_BUFFER: u32 = 2;
     pub const GEO_BUFFER: u32 = 3;
-    pub const LIGHT_UNIFORM: u32 = 4;
-    pub const CLUSTER_INDICES: u32 = 5;
-    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 6;
-    pub const CLUSTERABLE_OBJECTS: u32 = 7;
-    pub const VIEW_UNIFORM: u32 = 8;
-    pub const INDIRECT_BUFFER: u32 = 9;
+    pub const PREPASS_QUEUE: u32 = 4;
+    pub const BINNING_QUEUE: u32 = 5;
+    pub const LIGHT_UNIFORM: u32 = 6;
+    pub const CLUSTER_INDICES: u32 = 7;
+    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 8;
+    pub const CLUSTERABLE_OBJECTS: u32 = 9;
+    pub const VIEW_UNIFORM: u32 = 10;
+    pub const VISIBLE_FLAGS: u32 = 11;
+    pub const VISIBLE_GEO: u32 = 12;
+    pub const GEO_PREFIX: u32 = 13;
+    pub const INDIRECT_BUFFER: u32 = 14;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -19,6 +24,8 @@ pub mod prepass {
             ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
             ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
             ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
+            ShaderDefVal::UInt("PREPASS_QUEUE".into(), PREPASS_QUEUE),
+            ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
             ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
             ShaderDefVal::UInt("CLUSTER_OFFSETS_AND_COUNTS".into(), CLUSTER_OFFSETS_AND_COUNTS),
@@ -31,7 +38,7 @@ pub mod prepass {
 
 
 pub mod rasterizer {
-    use bevy::render::render_resource::ShaderDefVal;
+    use bevy::shader::ShaderDefVal;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
@@ -104,7 +111,7 @@ pub mod rasterizer {
 }
 
 pub mod shadows {
-    use bevy::render::render_resource::ShaderDefVal;
+    use bevy::shader::ShaderDefVal;
 
     pub const GEO_BUFFER: u32 = 0;
 
@@ -128,7 +135,7 @@ pub mod shadows {
 }
 
 pub mod binning {
-    use bevy::render::render_resource::ShaderDefVal;
+    use bevy::shader::ShaderDefVal;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
@@ -163,7 +170,7 @@ pub mod binning {
 }
 
 pub mod shading {
-    use bevy::render::render_resource::ShaderDefVal;
+    use bevy::shader::ShaderDefVal;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;

@@ -6,11 +6,11 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            PipelineCache, PushConstantRange, ShaderDefVal, ShaderStages, ShaderType,
+            PipelineCache, PushConstantRange, ShaderStages, ShaderType,
         },
         renderer::{RenderContext, RenderDevice},
-        view::{ExtractedView, ViewUniform, ViewUniformOffset},
-    },
+        view::{ViewUniform, ViewUniformOffset},
+    }, shader::ShaderDefVal,
 };
 
 use std::collections::HashMap;
@@ -240,7 +240,7 @@ impl FromWorld for StrandBinningPipeline {
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "count_strands".into(),
+            entry_point: Some("count_strands".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -251,7 +251,7 @@ impl FromWorld for StrandBinningPipeline {
                 shader: binning_shader.clone(),
                 shader_defs: [cdefs.as_slice(), &["STAGE_COUNT".into(), "SHADOWS".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()],
-                entry_point: "count_strands".into(),
+                entry_point: Some("count_strands".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -261,7 +261,7 @@ impl FromWorld for StrandBinningPipeline {
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_SUMS".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "scan_sums".into(),
+            entry_point: Some("scan_sums".into()),
             zero_initialize_workgroup_memory: true, // Scan often uses workgroup memory
         });
 
@@ -271,7 +271,7 @@ impl FromWorld for StrandBinningPipeline {
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_LAST".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "scan_last".into(),
+            entry_point: Some("scan_last".into()),
             zero_initialize_workgroup_memory: true,
         });
 
@@ -281,7 +281,7 @@ impl FromWorld for StrandBinningPipeline {
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_SCAN_PRFX".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "scan_prfx".into(),
+            entry_point: Some("scan_prfx".into()),
             zero_initialize_workgroup_memory: true,
         });
 
@@ -292,7 +292,7 @@ impl FromWorld for StrandBinningPipeline {
                 shader: binning_shader.clone(),
                 shader_defs: [cdefs.as_slice(), &["STAGE_INIT_PLACE".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()], // Might not need push constants?
-                entry_point: "init_placement_idx".into(),
+                entry_point: Some("init_placement_idx".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -302,7 +302,7 @@ impl FromWorld for StrandBinningPipeline {
             shader: binning_shader.clone(),
             shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into()]].concat(),
             push_constant_ranges: vec![push_constant_range.clone()],
-            entry_point: "place_strands".into(),
+            entry_point: Some("place_strands".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -313,7 +313,7 @@ impl FromWorld for StrandBinningPipeline {
                 shader: binning_shader.clone(),
                 shader_defs: [cdefs.as_slice(), &["STAGE_PLACE".into(), "SHADOWS".into()]].concat(),
                 push_constant_ranges: vec![push_constant_range.clone()],
-                entry_point: "place_strands".into(),
+                entry_point: Some("place_strands".into()),
                 zero_initialize_workgroup_memory: false,
             });
 

@@ -61,7 +61,7 @@ fn update_fps_value(
     query: Query<Entity, With<FpsValueMarker>>,
     mut writer: TextUiWriter,
 ) {
-    if let Ok(entity) = query.get_single() {
+    if let Ok(entity) = query.single() {
         if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(value) = fps.smoothed() {
                 *writer.text(entity, 2) = format!("{value:.1}").into();

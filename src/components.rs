@@ -1,27 +1,26 @@
 use bevy::{
-    math::{Vec4, bounding::Aabb3d},
+    math::{bounding::Aabb3d, Vec4},
     prelude::*,
     render::{
-        extract_component::ExtractComponent, render_resource::ShaderType,
-        storage::ShaderStorageBuffer,
+        extract_component::ExtractComponent, mesh::allocator::SlabId, render_resource::ShaderType, storage::ShaderStorageBuffer
     },
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::dson::DsonAsset;
+use crate::{allocator::{AllocKey, SlabKind}, dson::DsonAsset};
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
 pub struct StrandAsset {
     pub handle: Handle<DsonAsset>,
 }
 
-#[derive(Component, ExtractComponent, Debug, Clone)]
+#[derive(Component, ExtractComponent, Debug, Clone, Copy)]
 pub struct StrandGeometry {
-    pub vertices: Handle<ShaderStorageBuffer>,
-    pub indices: Handle<ShaderStorageBuffer>,
-    pub meta: Handle<ShaderStorageBuffer>,
-    pub geos: Handle<ShaderStorageBuffer>,
-    pub materials: Handle<ShaderStorageBuffer>,
+    pub vertices: AllocKey,
+    pub indices: AllocKey,
+    pub meta: AllocKey,
+    pub geos: AllocKey,
+    pub materials: AllocKey,
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
     pub aabb: Aabb3d,

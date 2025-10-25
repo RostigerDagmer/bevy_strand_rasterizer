@@ -8,29 +8,22 @@ use bevy::{
     },
     prelude::*,
     render::{
-        Render, RenderApp, RenderSet,
-        extract_component::ExtractComponentPlugin,
-        render_asset::RenderAssets,
-        render_graph::{
-            Node, NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, RunSubGraphError,
-        },
-        render_resource::{
+        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
+            Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, RunSubGraphError
+        }, render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        },
-        renderer::{RenderContext, RenderDevice, RenderQueue},
-        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
-        view::{
-            self, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
-            prepare_view_uniforms,
-        },
+        }, renderer::{RenderContext, RenderDevice, RenderQueue}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{
+            self, prepare_view_uniforms, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms
+        }, Render, RenderApp, RenderSet, RenderSystems
     },
 };
 
 use crate::{
     components::*,
+    allocator::*,
     dson::DsonAsset,
-    pipelines::{binning::*, composite::*, raster::*, shading::*, shadows::*, sim::StrandSimulatorResources},
+    pipelines::{binning::*, composite::*, prepass::StrandPrepassResources, raster::*, shading::*, shadows::*, sim::StrandSimulatorResources},
     resources::*,
     shader_types::*,
 };
@@ -78,11 +71,11 @@ impl Plugin for StrandRasterizerPlugin {
             ((
                 use_froxel_buffer,
                 use_deep_opacity_maps,
-                update_material_buffer,
-                use_strand_geometry.after(prepare_view_uniforms),
+                // update_material_buffer,
+                // use_strand_geometry.after(prepare_view_uniforms),
             )
                 .chain()
-                .in_set(RenderSet::Prepare),),
+                .in_set(RenderSystems::Prepare),),
         );
         render_app
             // Bevy's renderer uses a render graph which is a collection of nodes in a directed acyclic graph.
@@ -647,6 +640,7 @@ fn set_strand_geometry(
     query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
     assets: Res<Assets<DsonAsset>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut allocator: ResMut<GpuPagingAllocator>,
     mut commands: Commands,
 ) {
     for (entity, strand_asset, material) in query.iter() {
@@ -687,9 +681,6 @@ fn set_strand_geometry(
                 ]
             })
             .collect();
-        let vertex_buffer = ShaderStorageBuffer::from(vertices);
-        debug!("Vertex buffer: {:?}", vertex_buffer);
-        let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
 
         // Extract indices from polyline_list
         let Some(polyline_list) = &geometry.polyline_list else {
@@ -736,24 +727,31 @@ fn set_strand_geometry(
             aabb,
         )];
 
-        let index_buffer = ShaderStorageBuffer::from(strand_indices);
-        let meta_buffer = ShaderStorageBuffer::from(strand_meta);
-        let geo_buffer = ShaderStorageBuffer::from(geos_data);
-        let mut material_buffer = ShaderStorageBuffer::from(vec![material]);
-        material_buffer.buffer_description.usage =
-            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        // debug!("Index buffer: {:?}", index_buffer);
-        let index_buffer_handle = storage_buffers.add(index_buffer);
-        let meta_buffer_handle = storage_buffers.add(meta_buffer);
-        let geo_buffer_handle = storage_buffers.add(geo_buffer);
-        let material_buffer_handle = storage_buffers.add(material_buffer);
+        // let index_buffer = ShaderStorageBuffer::from(strand_indices);
+        // let meta_buffer = ShaderStorageBuffer::from(strand_meta);
+        // let geo_buffer = ShaderStorageBuffer::from(geos_data);
+        // let mut material_buffer = ShaderStorageBuffer::from(vec![material]);
+        // material_buffer.buffer_description.usage =
+        //     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        // // debug!("Index buffer: {:?}", index_buffer);
+        // let index_buffer_handle = storage_buffers.add(index_buffer);
+        // let meta_buffer_handle = storage_buffers.add(meta_buffer);
+        // let geo_buffer_handle = storage_buffers.add(geo_buffer);
+        // let material_buffer_handle = storage_buffers.add(material_buffer);
+
+        let vertex_buffer = allocator.allocate(SlabKind::Index, vertices);
+        let index_buffer = allocator.allocate(SlabKind::Index, strand_indices);
+        let meta_buffer = allocator.allocate(SlabKind::StrandMeta, strand_meta);
+        let geo_buffer = allocator.allocate(SlabKind::Geo, geos_data);
+        let material_buffer = allocator.allocate(SlabKind::Material, vec![material]);
+
 
         commands.entity(entity).insert(StrandGeometry {
-            vertices: vertex_buffer_handle,
-            indices: index_buffer_handle,
-            meta: meta_buffer_handle,
-            geos: geo_buffer_handle,
-            materials: material_buffer_handle,
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            meta: meta_buffer,
+            geos: geo_buffer,
+            materials: material_buffer,
             strand_count: polyline_list.values.len() as u32,
             max_segments_in_strand,
             aabb,
@@ -762,24 +760,25 @@ fn set_strand_geometry(
 }
 
 // uploads changed material paramters to the buffer
-pub fn update_material_buffer(
-    query: Query<(Entity, &StrandGeometry, &StrandMaterial)>,
-    storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
-    render_queue: Res<RenderQueue>,
-) {
-    for (entity, geometry, material) in query.iter() {
-        let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
-            warn!("Material storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
-        let material_bytes = bytemuck::bytes_of(material);
-        render_queue.write_buffer(
-            &material_buffer.buffer, // Get the underlying wgpu::Buffer
-            0,                       // Offset in the buffer to start writing (0 for the start)
-            material_bytes,          // The byte slice to write
-        );
-    }
-}
+// TODO
+// pub fn update_material_buffer(
+//     query: Query<(Entity, &StrandGeometry, &StrandMaterial)>,
+//     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+//     render_queue: Res<RenderQueue>,
+// ) {
+//     for (entity, geometry, material) in query.iter() {
+//         let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
+//             warn!("Material storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
+//         let material_bytes = bytemuck::bytes_of(material);
+//         render_queue.write_buffer(
+//             &material_buffer.buffer, // Get the underlying wgpu::Buffer
+//             0,                       // Offset in the buffer to start writing (0 for the start)
+//             material_bytes,          // The byte slice to write
+//         );
+//     }
+// }
 
 // Create froxel configuration uniform buffer
 pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
@@ -921,67 +920,88 @@ fn use_deep_opacity_maps(
     }
 }
 
-// render world buffer retrieval
-fn use_strand_geometry(
-    query: Query<(Entity, &StrandGeometry)>,
-    storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
-    device: Res<RenderDevice>,
-    mut raster_resources: ResMut<StrandRasterizerResources>,
-    mut binning_resources: ResMut<StrandBinningBuffers>,
-    mut shading_resources: ResMut<StrandShadingResources>,
-) {
-    // This is an example of how to retrieve the shader storage buffer created in the main world above
-    // and use it in the render world.
-    for (entity, geometry) in query.iter() {
-        // if raster_resources.bind_group.is_some() {
-        //     continue;
-        // }
+// should be done entirely in the extract schedule of GpuPaging
+// render world buffer retrieval (deprecate)
+// fn use_strand_geometry(
+//     query: Query<(Entity, &StrandGeometry)>,
+//     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+//     device: Res<RenderDevice>,
+//     asset_resources: Res<StrandAssetResources>,
+//     mut raster_resources: ResMut<StrandRasterizerResources>,
+//     mut binning_resources: ResMut<StrandBinningBuffers>,
+//     mut shading_resources: ResMut<StrandShadingResources>,
+//     mut prepass_resources: ResMut<StrandPrepassResources>
+// ) {
+//     // This is an example of how to retrieve the shader storage buffer created in the main world above
+//     // and use it in the render world.
+//     for (entity, geometry) in query.iter() {
+//         // if raster_resources.bind_group.is_some() {
+//         //     continue;
+//         // }
 
-        // --- Raster resources ---
-        debug!("Using strand geometry for entity: {:?}", entity);
-        let Some(index_storage_buffer) = storage_buffers.get(&geometry.indices) else {
-            warn!("Index storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
-        debug!("[{:?}] Index storage buffer found.", entity);
-        let Some(vertex_storage_buffer) = storage_buffers.get(&geometry.vertices) else {
-            warn!("Vertex storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
-        let Some(meta_storage_buffer) = storage_buffers.get(&geometry.meta) else {
-            warn!("Meta storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
-        let Some(geo_storage_buffer) = storage_buffers.get(&geometry.geos) else {
-            warn!("Geo storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
-        let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
-            warn!("Material storage buffer not found for entity: {:?}", entity);
-            continue;
-        };
+//         // --- Raster resources ---
+//         debug!("Using strand geometry for entity: {:?}", entity);
+//         let Some(index_storage_buffer) = storage_buffers.get(&geometry.indices) else {
+//             warn!("Index storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
+//         debug!("[{:?}] Index storage buffer found.", entity);
+//         let Some(vertex_storage_buffer) = storage_buffers.get(&geometry.vertices) else {
+//             warn!("Vertex storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
+//         let Some(meta_storage_buffer) = storage_buffers.get(&geometry.meta) else {
+//             warn!("Meta storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
+//         let Some(geo_storage_buffer) = storage_buffers.get(&geometry.geos) else {
+//             warn!("Geo storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
+//         let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
+//             warn!("Material storage buffer not found for entity: {:?}", entity);
+//             continue;
+//         };
 
-        debug!(
-            "[{:?}] Vertex storage buffer found: {:?}",
-            entity, vertex_storage_buffer.buffer
-        );
+//         debug!(
+//             "[{:?}] Vertex storage buffer found: {:?}",
+//             entity, vertex_storage_buffer.buffer
+//         );
 
-        binning_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
-        binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
-        binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
-        binning_resources.geos_buffer = Some(geo_storage_buffer.buffer.clone());
-        raster_resources.strand_count = Some(geometry.strand_count);
+//         binning_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
+//         binning_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
+//         binning_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
+//         binning_resources.geos_buffer = Some(geo_storage_buffer.buffer.clone());
+//         // Prepass (-> to replace the binning bindings)
+//         prepass_resources.vertex_buffer = Some(vertex_storage_buffer.buffer.clone());
+//         prepass_resources.meta_buffer = Some(meta_storage_buffer.buffer.clone());
+//         prepass_resources.index_buffer = Some(index_storage_buffer.buffer.clone());
+//         prepass_resources.geos_buffer = Some(geo_storage_buffer.buffer.clone());
 
-        let (shading_buffer, shading_buffer_view) = create_shading_target_texture(
-            &device,
-            geometry.strand_count,
-            geometry.max_segments_in_strand,
-        );
-        shading_resources.output_texture = Some(shading_buffer_view);
-        shading_resources.strand_count = Some(geometry.strand_count);
-        shading_resources.materials = Some(material_buffer.buffer.clone());
-        shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);
+//         raster_resources.strand_count = Some(geometry.strand_count);
 
-        debug!("Created bind group for strand rasterizer");
-    }
-}
+//         let (shading_buffer, shading_buffer_view) = create_shading_target_texture(
+//             &device,
+//             geometry.strand_count,
+//             geometry.max_segments_in_strand,
+//         );
+//         shading_resources.output_texture = Some(shading_buffer_view);
+//         shading_resources.strand_count = Some(geometry.strand_count);
+//         shading_resources.materials = Some(material_buffer.buffer.clone());
+//         shading_resources.max_segments_in_strand = Some(geometry.max_segments_in_strand);
+
+//         debug!("Created bind group for strand rasterizer");
+//     }
+
+//     // pool buffer assignment
+//     if let Some(prepass_queue) = &asset_resources.pool.prepass_queue {
+//         prepass_resources.prepass_queue = Some(prepass_queue.clone());
+//     } else {
+//         warn!("Prepass queue in asset_resources not ready.");
+//     }
+//     if let Some(prepass_queue) = &asset_resources.pool.prepass_queue {
+//         prepass_resources.prepass_queue = Some(prepass_queue.clone());
+//     } else {
+//         warn!("Prepass queue in asset_resources not ready.");
+//     }
+// }

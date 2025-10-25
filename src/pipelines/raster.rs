@@ -4,18 +4,15 @@ use bevy::{
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
-            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
-            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
-            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType, StorageTextureAccess,
+            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
+            PipelineCache, PushConstantRange, SamplerBindingType,
+            ShaderStages, StorageTextureAccess,
             Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
             TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
-        view::{ViewUniform, ViewUniformOffset},
-    },
+        view::ViewUniformOffset,
+    }, shader::ShaderDefVal,
 };
 
 use std::collections::HashMap;
@@ -293,7 +290,7 @@ impl FromWorld for StrandRasterizerPipeline {
                 stages: ShaderStages::COMPUTE,
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
             }],
-            entry_point: "rasterize_strands".into(),
+            entry_point: Some("rasterize_strands".into()),
             zero_initialize_workgroup_memory: false,
         });
 

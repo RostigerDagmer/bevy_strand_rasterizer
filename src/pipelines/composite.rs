@@ -1,27 +1,22 @@
 use bevy::{
-    core_pipeline::{
-        fullscreen_vertex_shader::fullscreen_shader_vertex_state, prepass::ViewPrepassTextures,
+    core_pipeline::{ prepass::ViewPrepassTextures,
+        FullscreenShader
     },
     prelude::*,
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
-            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            ComputePipeline, ComputePipelineDescriptor, FilterMode, FragmentState, LoadOp,
-            MultisampleState, Operations, PipelineCache, PrimitiveState, PushConstantRange,
-            RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
-            SamplerBindingType, SamplerDescriptor, ShaderDefVal, ShaderStages, ShaderType,
-            StorageTextureAccess, StoreOp, TextureFormat, TextureSampleType, TextureView,
-            TextureViewDimension,
+            BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
+            BindingType, BlendState, BufferBindingType, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            FilterMode, FragmentState, LoadOp,
+            MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
+            SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
+            StoreOp, TextureFormat, TextureSampleType, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
-        view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
     },
 };
-
-use crate::{pipelines::layouts, shader_types::PushConstants};
 
 use super::raster::StrandRasterizerResources;
 
@@ -35,6 +30,7 @@ pub struct CompositionPipeline {
 impl FromWorld for CompositionPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let fullscreen_shader = world.resource::<FullscreenShader>();
 
         let layout = render_device.create_bind_group_layout(
             "composition_layout",
@@ -113,16 +109,16 @@ impl FromWorld for CompositionPipeline {
             .resource::<AssetServer>()
             .load("shaders/strand_composite.wgsl");
 
-        let pipeline_cache = world.resource_mut::<PipelineCache>();
+        let pipeline_cache = world.resource::<PipelineCache>();
 
         let pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("composition_pipeline".into()),
             layout: vec![layout.clone()],
-            vertex: fullscreen_shader_vertex_state(),
+            vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),
                 shader_defs: vec![],
-                entry_point: "fragment".into(),
+                entry_point: Some("fragment".into()),
                 targets: vec![Some(ColorTargetState {
                     // IMPORTANT: This format must match the ViewTarget format
                     // Usually HDR first, then tonemapped. Let's assume HDR for now.
@@ -261,6 +257,7 @@ impl Node for CompositionNode {
                     load: LoadOp::Load,
                     store: StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
