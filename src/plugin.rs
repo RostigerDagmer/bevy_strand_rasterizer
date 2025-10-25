@@ -39,6 +39,7 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
             ExtractComponentPlugin::<StrandMaterial>::default(),
+            GpuPagingAllocatorPlugin
         ));
         app.init_resource::<StrandAssetResources>();
         app.add_systems(
@@ -56,7 +57,6 @@ impl Plugin for StrandRasterizerPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        // render_app.add_plugins(GetSubgroupSizePlugin);
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<StrandShadingPipeline>();
@@ -639,8 +639,8 @@ impl Node for StrandSimulationNode {
 fn set_strand_geometry(
     query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
     assets: Res<Assets<DsonAsset>>,
-    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
-    mut allocator: ResMut<GpuPagingAllocator>,
+    mut storage_buffers: ResMut<Assets<VirtualShaderStorageBuffer>>,
+    // mut allocator: ResMut<GpuPagingAllocator>,
     mut commands: Commands,
 ) {
     for (entity, strand_asset, material) in query.iter() {
@@ -713,8 +713,8 @@ fn set_strand_geometry(
                     acc
                 });
 
-        let strand_indices = packed_strand_info.0;
-        let strand_meta: Vec<StrandMeta> = packed_strand_info
+        let indices = packed_strand_info.0;
+        let meta: Vec<StrandMeta> = packed_strand_info
             .1
             .into_iter()
             .map(StrandMeta::from)
@@ -727,31 +727,24 @@ fn set_strand_geometry(
             aabb,
         )];
 
-        // let index_buffer = ShaderStorageBuffer::from(strand_indices);
-        // let meta_buffer = ShaderStorageBuffer::from(strand_meta);
-        // let geo_buffer = ShaderStorageBuffer::from(geos_data);
-        // let mut material_buffer = ShaderStorageBuffer::from(vec![material]);
-        // material_buffer.buffer_description.usage =
-        //     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        // // debug!("Index buffer: {:?}", index_buffer);
-        // let index_buffer_handle = storage_buffers.add(index_buffer);
-        // let meta_buffer_handle = storage_buffers.add(meta_buffer);
-        // let geo_buffer_handle = storage_buffers.add(geo_buffer);
-        // let material_buffer_handle = storage_buffers.add(material_buffer);
+        let vertex_buffer = VirtualShaderStorageBuffer::from((SlabKind::Vert, vertices));
+        let index_buffer = VirtualShaderStorageBuffer::from((SlabKind::Index, indices));
+        let meta_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandMeta, meta));
+        let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::Geo, geos_data));
+        let material_buffer = VirtualShaderStorageBuffer::from((SlabKind::Material, vec![material]));
 
-        let vertex_buffer = allocator.allocate(SlabKind::Index, vertices);
-        let index_buffer = allocator.allocate(SlabKind::Index, strand_indices);
-        let meta_buffer = allocator.allocate(SlabKind::StrandMeta, strand_meta);
-        let geo_buffer = allocator.allocate(SlabKind::Geo, geos_data);
-        let material_buffer = allocator.allocate(SlabKind::Material, vec![material]);
-
+        let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
+        let index_buffer_handle = storage_buffers.add(index_buffer);
+        let meta_buffer_handle = storage_buffers.add(meta_buffer);
+        let geo_buffer_handle = storage_buffers.add(geo_buffer);
+        let material_buffer_handle = storage_buffers.add(material_buffer);
 
         commands.entity(entity).insert(StrandGeometry {
-            vertices: vertex_buffer,
-            indices: index_buffer,
-            meta: meta_buffer,
-            geos: geo_buffer,
-            materials: material_buffer,
+            vertices: vertex_buffer_handle,
+            indices: index_buffer_handle,
+            meta: meta_buffer_handle,
+            geos: geo_buffer_handle,
+            materials: material_buffer_handle,
             strand_count: polyline_list.values.len() as u32,
             max_segments_in_strand,
             aabb,

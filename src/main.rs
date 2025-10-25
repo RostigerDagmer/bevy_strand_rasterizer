@@ -1,3 +1,4 @@
+#![feature(lazy_type_alias)]
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};

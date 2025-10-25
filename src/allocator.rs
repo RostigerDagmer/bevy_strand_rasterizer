@@ -1,26 +1,34 @@
 use std::{
     fmt::{self, Display, Formatter},
-    ops::{Range, RangeBounds},
+    ops::Range,
 };
 
 use bevy::{
-    ecs::resource::Resource,
+    app::Plugin,
+    asset::{Asset, AssetApp, AssetId, RenderAssetUsages},
+    ecs::{
+        resource::Resource,
+        system::{SystemParamItem, lifetimeless::SResMut},
+        world::FromWorld,
+    },
     platform::collections::HashMap,
     prelude::{Deref, DerefMut},
+    reflect::{prelude::ReflectDefault, Reflect},
     render::{
+        render_asset::RenderAsset,
         render_resource::{
-            AsBindGroup, BindGroup, BindGroupLayout, Buffer, BufferAddress, BufferDescriptor,
-            BufferUsages, ShaderType, encase::private::WriteInto,
+            Buffer, BufferAddress, BufferDescriptor, BufferUsages, ShaderType,
+            encase::{self, private::WriteInto},
         },
         renderer::{RenderDevice, RenderQueue},
     },
 };
-use offset_allocator::Allocation;
+
 use range_alloc;
 
 // Host-side row (std430 same layout in WGSL)
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct HandleRow {
     slab: u32,
     offset: u32, // in bytes
@@ -28,8 +36,9 @@ struct HandleRow {
     aux: u32,    // e.g., base index, vertex format tag, etc.
 }
 
+#[derive(Default, Debug)]
 struct HandleTable {
-    buffer: Buffer,
+    buffer: Option<Buffer>,
     rows: Vec<HandleRow>, // shadow copy; upload when dirty
 }
 
@@ -87,19 +96,38 @@ pub struct GpuPagingAllocator {
     pub device: RenderDevice,
     pub label_map: HashMap<SlabKind, &'static str>,
     // One bind group that contains a binding_array per kind (see §3)
-    pub bind_group: BindGroup,
-    pub layout: BindGroupLayout,
+    // pub bind_group: BindGroup,
+    // pub layout: BindGroupLayout,
     // GPU page/handle table (see §2)
     pub handle_table: HandleTable,
+}
+
+impl FromWorld for GpuPagingAllocator {
+    fn from_world(world: &mut bevy::ecs::world::World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        Self {
+            pools: HashMap::default(),
+            device: device.clone(),
+            label_map: HashMap::default(),
+            handle_table: HandleTable::default(),
+        }
+    }
 }
 
 pub type AllocKey = (SlabId, SlabKind);
 
 impl GpuPagingAllocator {
-    pub fn allocate<T: ShaderType + WriteInto>(&mut self, kind: SlabKind, data: T) -> AllocKey {
-        let size = data.size().get();
+    pub fn allocate<T: Into<Vec<u8>>>(&mut self, kind: SlabKind, data: T) -> AllocKey {
+        let data: Vec<u8> = data.into();
+        let size = data.len() as u64;
         let align = 4 as u64;
-        let allocation = self.pools.entry(kind).or_insert_with(|| { SlabPool::new(self.device.clone(), DEFAULT_SLAB_SIZE, BufferUsages::all()) }).allocate(size, align);
+        let allocation = self
+            .pools
+            .entry(kind)
+            .or_insert_with(|| {
+                SlabPool::new(self.device.clone(), DEFAULT_SLAB_SIZE, BufferUsages::all())
+            })
+            .allocate(size, align);
         (SlabId(allocation.slab_index as u32), kind)
     }
 
@@ -190,5 +218,107 @@ impl SlabPool {
 
         self.slabs.push(new_slab);
         ((self.slabs.len() - 1), range)
+    }
+}
+
+// Main world component
+
+#[derive(Asset, Reflect, Debug, Clone)]
+#[reflect(opaque)]
+#[reflect(Default, Debug, Clone)]
+pub struct VirtualShaderStorageBuffer {
+    /// Optional data used to initialize the buffer.
+    pub data: Option<Vec<u8>>,
+    /// kind of data
+    pub kind: SlabKind,
+    /// The asset usage of the storage buffer.
+    pub asset_usage: RenderAssetUsages,
+}
+
+impl Default for VirtualShaderStorageBuffer {
+    fn default() -> Self {
+        Self {
+            data: None,
+            kind: SlabKind::Vert,
+            asset_usage: RenderAssetUsages::default(),
+        }
+    }
+}
+
+impl VirtualShaderStorageBuffer {
+    /// Creates a new storage buffer with the given data and asset usage.
+    pub fn new(data: &[u8], kind: SlabKind, asset_usage: RenderAssetUsages) -> Self {
+        let mut storage = VirtualShaderStorageBuffer {
+            data: Some(data.to_vec()),
+            kind: kind,
+            ..Default::default()
+        };
+        storage.asset_usage = asset_usage;
+        storage
+    }
+}
+
+impl<T: ShaderType + WriteInto> From<(SlabKind, T)> for VirtualShaderStorageBuffer {
+    fn from(value: (SlabKind, T)) -> Self {
+        let (kind, value) = value;
+        let size = value.size().get() as usize;
+        let mut wrapper = encase::StorageBuffer::<Vec<u8>>::new(Vec::with_capacity(size));
+        wrapper.write(&value).unwrap();
+        Self::new(wrapper.as_ref(), kind, RenderAssetUsages::default())
+    }
+}
+
+/// A storage buffer that is prepared as a [`RenderAsset`] and uploaded to the GPU.
+pub struct GpuVirtualShaderStorageBuffer {
+    pub allocation: Option<AllocKey>,
+}
+
+impl RenderAsset for GpuVirtualShaderStorageBuffer {
+    type SourceAsset = VirtualShaderStorageBuffer;
+    type Param = SResMut<GpuPagingAllocator>;
+
+    fn asset_usage(source_asset: &Self::SourceAsset) -> RenderAssetUsages {
+        source_asset.asset_usage
+    }
+
+    fn prepare_asset(
+        source_asset: Self::SourceAsset,
+        _: AssetId<Self::SourceAsset>,
+        allocator: &mut SystemParamItem<Self::Param>,
+        _: Option<&Self>,
+    ) -> std::result::Result<
+        GpuVirtualShaderStorageBuffer,
+        bevy::render::render_asset::PrepareAssetError<VirtualShaderStorageBuffer>,
+    > {
+        match source_asset.data {
+            Some(data) => {
+                let allocation = allocator.allocate(source_asset.kind, data);
+                Ok(GpuVirtualShaderStorageBuffer {
+                    allocation: Some(allocation),
+                })
+            }
+            None => Ok(GpuVirtualShaderStorageBuffer { allocation: None }),
+        }
+    }
+    fn unload_asset(
+        _source_asset: AssetId<Self::SourceAsset>,
+        _param: &mut SystemParamItem<Self::Param>,
+    ) {
+        todo!()
+    }
+}
+
+pub struct GpuPagingAllocatorPlugin;
+
+impl Plugin for GpuPagingAllocatorPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        app.init_asset::<VirtualShaderStorageBuffer>();
+    }
+
+    fn finish(&self, app: &mut bevy::app::App) {
+        let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
+            return;
+        };
+        render_app.init_resource::<GpuPagingAllocator>();
     }
 }

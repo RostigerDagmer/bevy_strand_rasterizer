@@ -7,20 +7,20 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::{allocator::{AllocKey, SlabKind}, dson::DsonAsset};
+use crate::{allocator::{AllocKey, SlabKind, VirtualShaderStorageBuffer}, dson::DsonAsset};
 
 #[derive(Component, Reflect)]
 pub struct StrandAsset {
     pub handle: Handle<DsonAsset>,
 }
 
-#[derive(Component, ExtractComponent, Debug, Clone, Copy)]
+#[derive(Component, ExtractComponent, Debug, Clone)]
 pub struct StrandGeometry {
-    pub vertices: AllocKey,
-    pub indices: AllocKey,
-    pub meta: AllocKey,
-    pub geos: AllocKey,
-    pub materials: AllocKey,
+    pub vertices: Handle<VirtualShaderStorageBuffer>,
+    pub indices: Handle<VirtualShaderStorageBuffer>,
+    pub meta: Handle<VirtualShaderStorageBuffer>,
+    pub geos: Handle<VirtualShaderStorageBuffer>,
+    pub materials: Handle<VirtualShaderStorageBuffer>,
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
     pub aabb: Aabb3d,
