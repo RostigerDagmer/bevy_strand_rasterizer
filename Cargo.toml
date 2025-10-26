@@ -19,6 +19,8 @@ bevy_wgsl_utils = { git = "https://github.com/AllenPocketGamer/bevy_wgsl_utils.g
 bevy_panorbit_camera = "0.31.0"
 # bevy-inspector-egui = { git = "https://github.com/jakobhellermann/bevy-inspector-egui.git", rev = "8d7580b304c7202054e5d821f6269e1e32b58712" }
 bevy_egui = "0.38.0"
-offset-allocator = "0.2"
-range-alloc = "0.1.4"
+lazy_static = "1.5.0"
 nonmax = "0.5.5"
+offset-allocator = "0.2"
+phf = {version="0.13.1", features=["macros"]}
+range-alloc = "0.1.4"

@@ -11,11 +11,12 @@ use bevy::{
         system::{SystemParamItem, lifetimeless::SResMut},
         world::FromWorld,
     },
+    log::*,
     platform::collections::HashMap,
     prelude::{Deref, DerefMut},
     reflect::{Reflect, prelude::ReflectDefault},
     render::{
-        render_asset::RenderAsset,
+        render_asset::{RenderAsset, RenderAssetPlugin},
         render_resource::{
             BindGroupEntry, BindGroupLayoutEntry, BindingType, Buffer, BufferAddress,
             BufferBindingType, BufferDescriptor, BufferUsages, ShaderStages, ShaderType,
@@ -25,6 +26,7 @@ use bevy::{
     },
 };
 
+use bytemuck::{Pod, Zeroable};
 use range_alloc;
 
 // Host-side row (std430 same layout in WGSL)
@@ -84,12 +86,53 @@ pub enum SlabKind {
     Meshlet,
     MeshletCull,
     Bvh,
-    Material,
-    Geo,
+    StrandMaterial,
+    StrandGeo,
     StrandMeta,
 }
 
 const DEFAULT_SLAB_SIZE: u64 = 2048;
+
+// because phf does not support Enum variants as key types.
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref DEFAULT_BIND_MAP: HashMap<SlabKind, u32> = [
+        (SlabKind::Vert, 0),
+        (SlabKind::Index, 1),
+        (SlabKind::Meshlet, 2),
+        (SlabKind::MeshletCull, 3),
+        (SlabKind::Bvh, 4),
+        (SlabKind::StrandMaterial, 5),
+        (SlabKind::StrandGeo, 6),
+        (SlabKind::StrandMeta, 7),
+    ]
+    .iter()
+    .copied()
+    .collect();
+}
+
+lazy_static! {
+    static ref DEFAULT_LABEL_MAP: HashMap<SlabKind, &'static str> = [
+        (SlabKind::Vert, "VERTICES"),
+        (SlabKind::Index, "INDICES"),
+        (SlabKind::Meshlet, "MESHLETS"),
+        (SlabKind::MeshletCull, "MESHLET_CULL"),
+        (SlabKind::Bvh, "BVH"),
+        (SlabKind::StrandMaterial, "STRAND_MATERIALS"),
+        (SlabKind::StrandGeo, "STRAND_GEOS"),
+        (SlabKind::StrandMeta, "STRAND_METADATA"),
+    ]
+    .iter()
+    .copied()
+    .collect();
+}
+
+#[derive(Resource)]
+pub struct GpuPagingAllocatorSettings {
+    pub label_map: HashMap<SlabKind, &'static str>,
+    pub bind_map: HashMap<SlabKind, u32>,
+}
 
 #[derive(Resource)]
 pub struct GpuPagingAllocator {
@@ -97,21 +140,20 @@ pub struct GpuPagingAllocator {
     pub device: RenderDevice,
     pub label_map: HashMap<SlabKind, &'static str>,
     pub bind_map: HashMap<SlabKind, u32>,
-    // One bind group that contains a binding_array per kind (see §3)
-    // pub bind_group: BindGroup,
-    // pub layout: BindGroupLayout,
-    // GPU page/handle table (see §2)
+    // GPU page/handle table
     pub handle_table: HandleTable,
 }
 
 impl FromWorld for GpuPagingAllocator {
     fn from_world(world: &mut bevy::ecs::world::World) -> Self {
         let device = world.resource::<RenderDevice>();
+        let settings = world.resource::<GpuPagingAllocatorSettings>();
+
         Self {
             pools: HashMap::default(),
             device: device.clone(),
-            label_map: HashMap::default(),
-            bind_map: HashMap::default(),
+            label_map: settings.label_map.clone(),
+            bind_map: settings.bind_map.clone(),
             handle_table: HandleTable::default(),
         }
     }
@@ -133,47 +175,80 @@ impl GpuPagingAllocator {
             .allocate(size, align);
         (SlabId(allocation.slab_index as u32), kind)
     }
-
-    // pub fn get_slab<'a>(self, key: AllocKey) -> Option<&'a Slab> {
-
-    // }
 }
 
 pub trait BindGroupBuilder {
-    fn layout_entries(&self) -> Vec<BindGroupLayoutEntry>;
-    fn entries(&self) -> Vec<BindGroupEntry>;
+    fn layout_entries(&self) -> PagingBindGroupLayout;
+    fn entries(&self) -> PagingBindGroupEntries;
+}
+
+pub struct PagingBindGroupLayout {
+    pub pools: Vec<BindGroupLayoutEntry>,
+    pub page_tables: Vec<BindGroupLayoutEntry>,
+}
+
+pub struct PagingBindGroupEntries<'a> {
+    pub pools: Vec<BindGroupEntry<'a>>,
+    pub page_tables: Vec<BindGroupEntry<'a>>,
 }
 
 impl BindGroupBuilder for GpuPagingAllocator {
-    fn layout_entries(&self) -> Vec<BindGroupLayoutEntry> {
-        self.pools
+    fn layout_entries(&self) -> PagingBindGroupLayout {
+        let (pools, page_tables) = self
+            .pools
             .iter()
             .filter_map(|(kind, pool)| {
                 let count = pool.slabs.len();
-                (count > 0).then(|| BindGroupLayoutEntry {
-                    binding: *self.bind_map.get(kind).unwrap_or_else(|| {
-                        panic!("GpuPagingAllocator missing binding index for {:?}", kind)
-                    }),
-                    visibility: ShaderStages::COMPUTE
-                        | ShaderStages::VERTEX
-                        | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: Some(
-                        (count as u32)
-                            .try_into()
-                            .expect("bind_array_len to be NonZero"),
-                    ),
+                (count > 0).then(|| {
+                    (
+                        // Pool bind_array
+                        BindGroupLayoutEntry {
+                            binding: *self.bind_map.get(kind).unwrap_or_else(|| {
+                                panic!("GpuPagingAllocator missing binding index for {:?}", kind)
+                            }),
+                            visibility: ShaderStages::COMPUTE
+                                | ShaderStages::VERTEX
+                                | ShaderStages::FRAGMENT,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: Some(
+                                (count as u32)
+                                    .try_into()
+                                    .expect("bind_array_len to be NonZero"),
+                            ),
+                        },
+                        // Pagetable
+                        BindGroupLayoutEntry {
+                            binding: *self.bind_map.get(kind).unwrap_or_else(|| {
+                                panic!("GpuPagingAllocator missing binding index for {:?}", kind)
+                            }),
+                            visibility: ShaderStages::COMPUTE
+                                | ShaderStages::VERTEX
+                                | ShaderStages::FRAGMENT,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    )
                 })
             })
-            .collect()
+            .unzip();
+        PagingBindGroupLayout { pools, page_tables }
     }
-    fn entries(&self) -> Vec<BindGroupEntry> {
-        self.pools
+    fn entries(&self) -> PagingBindGroupEntries<'_> {
+        let pools = self
+            .pools
             .iter()
+            .filter_map(|(kind, pool)| {
+                let count = pool.slabs.len();
+                (count > 0).then(|| (kind, pool))
+            })
             .flat_map(|(kind, pool)| {
                 let binding_index = *self.bind_map.get(kind).unwrap();
                 pool.slabs
@@ -184,14 +259,31 @@ impl BindGroupBuilder for GpuPagingAllocator {
                         resource: slab.buffer.as_entire_binding(),
                     })
             })
-            .collect()
+            .collect();
+        let page_tables = self
+            .pools
+            .iter()
+            .filter_map(|(kind, pool)| {
+                let count = pool.slabs.len();
+                let binding_index = *self.bind_map.get(kind).unwrap();
+                let Some(page_table_buffer) = &pool.page_table else {
+                    return None;
+                };
+                (count > 0).then(move || BindGroupEntry {
+                    binding: binding_index,
+                    resource: page_table_buffer.as_entire_binding(),
+                })
+            })
+            .collect();
+        PagingBindGroupEntries { pools, page_tables }
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SlabId(u32);
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Zeroable, Pod)]
+#[repr(C)]
 pub struct DevicePtr {
     pub slab: u32,   // index into binding_array
     pub offset: u32, // byte offset in slab (<= 4 GB if packed in u32)
@@ -204,6 +296,7 @@ pub struct SlabPool {
     device: RenderDevice,
     default_slab_size: u64,
     usages: BufferUsages, // Optional: LRU of slabs if you want eviction later
+    page_table: Option<Buffer>,
 }
 
 impl SlabPool {
@@ -214,31 +307,73 @@ impl SlabPool {
             device,
             default_slab_size,
             usages,
+            page_table: None,
         }
     }
 
-    // pub fn get<'a>(self, slab_id: SlabId) -> Option<&'a Slab> {
-    //     self.slabs.get(slab_id.0 as usize)
-    // }
-
     pub fn allocate(&mut self, size: u64, align: u64) -> SlabAllocation {
         let (slab_index, range) = self.ensure_slab(size);
-        // let slab = &mut self.slabs[slab_index];
-
         let device_ptr = DevicePtr {
             slab: slab_index as u32,
             offset: range.start as u32,
             size: (range.end - range.start) as u32,
         };
-        SlabAllocation {
+        let alloc = SlabAllocation {
             slab_index,
             device_ptr,
             range,
+        };
+        self.ensure_page_table();
+        self.pointer_table
+            .insert(SlabId(slab_index as u32), alloc.clone());
+        alloc
+    }
+
+    pub fn free(&mut self, slab_id: SlabId, queue: &RenderQueue) {
+        if let Some(allocation) = self.pointer_table.remove(&slab_id) {
+            if let Some(buffer) = &self.page_table {
+                let invalid = DevicePtr {
+                    slab: u32::MAX,
+                    offset: 0,
+                    size: 0,
+                };
+                let offset_bytes = allocation.range.start * std::mem::size_of::<DevicePtr>() as u64;
+                queue.write_buffer(buffer, offset_bytes, bytemuck::bytes_of(&invalid));
+            } else {
+                warn!(
+                    "Free didn't find the buffer for slab {:?} with allocation {:?} in pointer table",
+                    slab_id, allocation
+                );
+            }
+            if let Some(slab) = self.slabs.get_mut(slab_id.0 as usize) {
+                slab.free.free_range(allocation.range);
+            } else {
+                warn!(
+                    "Free didn't find the slab {:?} in the slab list to free the allocation {:?}",
+                    slab_id, allocation
+                );
+            }
         }
     }
 
-    pub fn free(&mut self, ptr: DevicePtr) {}
-    pub fn write(&mut self, ticket: Range<BufferAddress>, bytes: &[u8], queue: RenderQueue) {}
+    pub fn write(&mut self, ticket: &SlabAllocation, bytes: &[u8], queue: RenderQueue) {
+        if let Some(slab) = self.slabs.get(ticket.slab_index) {
+            queue.write_buffer(&slab.buffer, ticket.range.start, bytes);
+        }
+    }
+
+    pub fn write_table(&mut self, queue: RenderQueue) {
+        self.ensure_page_table();
+        if let Some(buffer) = &self.page_table {
+            let mut table: Vec<DevicePtr> = self
+                .pointer_table
+                .iter()
+                .map(|(_, alloc)| alloc.device_ptr)
+                .collect();
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&table));
+        }
+    }
+
     /// Ensure there's at least one slab with `min_size` bytes of free capacity.
     /// Returns the index of the slab to allocate from.
     pub fn ensure_slab(&mut self, min_size: u64) -> (usize, Range<u64>) {
@@ -270,6 +405,23 @@ impl SlabPool {
 
         self.slabs.push(new_slab);
         ((self.slabs.len() - 1), range)
+    }
+
+    fn ensure_page_table(&mut self) {
+        let needed_bytes =
+            (self.pointer_table.len() as u64) * std::mem::size_of::<DevicePtr>() as u64;
+        let current_bytes = self.page_table.as_ref().map(|b| b.size()).unwrap_or(0);
+
+        if needed_bytes > current_bytes {
+            let new_size = needed_bytes.next_power_of_two().max(2 ^ 22); // start with ~4 MiB
+            let buffer = self.device.create_buffer(&BufferDescriptor {
+                label: Some("SlabPool_PageTable"),
+                size: new_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.page_table = Some(buffer);
+        }
     }
 }
 
@@ -371,6 +523,7 @@ impl Plugin for GpuPagingAllocatorPlugin {
         let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
             return;
         };
+        render_app.add_plugins(RenderAssetPlugin::<GpuVirtualShaderStorageBuffer>::default());
         render_app.init_resource::<GpuPagingAllocator>();
     }
 }

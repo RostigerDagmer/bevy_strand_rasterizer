@@ -6,29 +6,70 @@ use bevy::{
         ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers,
         ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings,
     },
+    platform::collections::HashMap,
     prelude::*,
     render::{
-        extract_component::ExtractComponentPlugin, render_asset::RenderAssets, render_graph::{
-            Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, RunSubGraphError
-        }, render_resource::{
+        Render, RenderApp, RenderSet, RenderSystems,
+        extract_component::ExtractComponentPlugin,
+        render_asset::RenderAssets,
+        render_graph::{
+            Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel,
+            RunSubGraphError,
+        },
+        render_resource::{
             BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
             ShaderType,
-        }, renderer::{RenderContext, RenderDevice, RenderQueue}, storage::{GpuShaderStorageBuffer, ShaderStorageBuffer}, view::{
-            self, prepare_view_uniforms, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms
-        }, Render, RenderApp, RenderSet, RenderSystems
+        },
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        view::{
+            self, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
+            prepare_view_uniforms,
+        },
     },
 };
 
 use crate::{
-    components::*,
     allocator::*,
+    components::*,
     dson::DsonAsset,
-    pipelines::{binning::*, composite::*, prepass::StrandPrepassResources, raster::*, shading::*, shadows::*, sim::StrandSimulatorResources},
+    pipelines::{
+        binning::*, composite::*, prepass::StrandPrepassResources, raster::*, shading::*,
+        shadows::*, sim::StrandSimulatorResources,
+    },
     resources::*,
     shader_types::*,
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
+
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref BIND_MAP: HashMap<SlabKind, u32> = [
+        (SlabKind::Vert, 0),
+        (SlabKind::Index, 1),
+        (SlabKind::StrandMaterial, 5),
+        (SlabKind::StrandGeo, 6),
+        (SlabKind::StrandMeta, 7),
+    ]
+    .iter()
+    .copied()
+    .collect();
+}
+
+lazy_static! {
+    static ref LABEL_MAP: HashMap<SlabKind, &'static str> = [
+        (SlabKind::Vert, "VERTICES"),
+        (SlabKind::Index, "INDICES"),
+        (SlabKind::StrandMaterial, "STRAND_MATERIALS"),
+        (SlabKind::StrandGeo, "STRAND_GEOS"),
+        (SlabKind::StrandMeta, "STRAND_METADATA"),
+    ]
+    .iter()
+    .copied()
+    .collect();
+}
 
 pub struct StrandRasterizerPlugin;
 
@@ -39,7 +80,7 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
             ExtractComponentPlugin::<StrandMaterial>::default(),
-            GpuPagingAllocatorPlugin
+            GpuPagingAllocatorPlugin,
         ));
         app.init_resource::<StrandAssetResources>();
         app.add_systems(
@@ -57,6 +98,10 @@ impl Plugin for StrandRasterizerPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        render_app.insert_resource(GpuPagingAllocatorSettings {
+            label_map: LABEL_MAP.clone(),
+            bind_map: BIND_MAP.clone(),
+        });
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<StrandShadingPipeline>();
@@ -730,8 +775,9 @@ fn set_strand_geometry(
         let vertex_buffer = VirtualShaderStorageBuffer::from((SlabKind::Vert, vertices));
         let index_buffer = VirtualShaderStorageBuffer::from((SlabKind::Index, indices));
         let meta_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandMeta, meta));
-        let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::Geo, geos_data));
-        let material_buffer = VirtualShaderStorageBuffer::from((SlabKind::Material, vec![material]));
+        let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandGeo, geos_data));
+        let material_buffer =
+            VirtualShaderStorageBuffer::from((SlabKind::StrandMaterial, vec![material]));
 
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
