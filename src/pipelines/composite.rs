@@ -206,7 +206,7 @@ impl Node for CompositionNode {
         // Get the input texture (result of main pass)
         // let input_texture = view_target.get_color_attachment().view; // <- this one is multisampled
         let input_texture = view_target.main_texture_view();
-        info!("Depth target {:?}", depth_target.depth_view());
+        debug!("Depth target {:?}", depth_target.depth_view());
         let scene_depth_texture = depth_target.depth_view().expect("Depth prepass enabled");
 
         let bind_group = render_context.render_device().create_bind_group(

@@ -1,6 +1,5 @@
 use bevy::{
     core_pipeline::core_3d::graph::Core3d,
-    ecs::entity,
     math::bounding::Aabb3d,
     pbr::{
         ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers,
@@ -9,22 +8,17 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSet, RenderSystems,
+        Render, RenderApp, RenderSystems,
         extract_component::ExtractComponentPlugin,
-        render_asset::RenderAssets,
         render_graph::{
-            Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel,
-            RunSubGraphError,
+            Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
         },
         render_resource::{
-            BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages, PipelineCache,
-            ShaderType,
+            Buffer, BufferDescriptor, BufferUsages, PipelineCache,
         },
-        renderer::{RenderContext, RenderDevice, RenderQueue},
-        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        renderer::{RenderContext, RenderDevice},
         view::{
-            self, ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
-            prepare_view_uniforms,
+            ExtractedView, ViewUniformOffset, ViewUniforms,
         },
     },
 };
@@ -76,7 +70,6 @@ pub struct StrandRasterizerPlugin;
 impl Plugin for StrandRasterizerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            // ExtractComponentPlugin::<Strands>::default(),
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
             ExtractComponentPlugin::<StrandMaterial>::default(),
@@ -101,6 +94,7 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.insert_resource(GpuPagingAllocatorSettings {
             label_map: LABEL_MAP.clone(),
             bind_map: BIND_MAP.clone(),
+            ..Default::default()
         });
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandRasterizerPipeline>();
@@ -123,35 +117,26 @@ impl Plugin for StrandRasterizerPlugin {
                 .in_set(RenderSystems::Prepare),),
         );
         render_app
-            // Bevy's renderer uses a render graph which is a collection of nodes in a directed acyclic graph.
-            // It currently runs on each view/camera and executes each node in the specified order.
-            // It will make sure that any node that needs a dependency from another node
-            // only runs when that dependency is done.
-            //
-            // Each node can execute arbitrary work, but it generally runs at least one render pass.
-            // A node only has access to the render world, so if you need data from the main world
-            // you need to extract it manually or with the plugin like above.
-            // Add a [`Node`] to the [`RenderGraph`]
-            // The Node needs to impl FromWorld (dealt with by derive(Default))
-            .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
-            .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
-            .add_render_graph_node::<StrandShadowRasterizerNode>(
-                Core3d,
-                StrandShadowRasterizerLabel,
-            )
+            // .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
+            // .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
+            // .add_render_graph_node::<StrandShadowRasterizerNode>(
+            //     Core3d,
+            //     StrandShadowRasterizerLabel,
+            // )
             .add_render_graph_node::<CompositionNode>(Core3d, CompositionLabel)
-            .add_render_graph_edge(
-                Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::EndPrepasses,
-                StrandShadowRasterizerLabel,
-            )
-            .add_render_graph_edge(Core3d, StrandShadowRasterizerLabel, StrandShadingLabel)
-            .add_render_graph_edge(Core3d, StrandShadingLabel, StrandRasterizerLabel) // run after ALL shadow maps are present
-            .add_render_graph_edge(
-                Core3d,
-                StrandRasterizerLabel,
-                CompositionLabel, // Run after strand rasterization
-            )
+            // connect nodes
+            // .add_render_graph_edge(
+            //     Core3d,
+            //     bevy::core_pipeline::core_3d::graph::Node3d::EndPrepasses,
+            //     StrandShadowRasterizerLabel,
+            // )
+            // .add_render_graph_edge(Core3d, StrandShadowRasterizerLabel, StrandShadingLabel)
+            // .add_render_graph_edge(Core3d, StrandShadingLabel, StrandRasterizerLabel) // run after ALL shadow maps are present
+            // .add_render_graph_edge(
+            //     Core3d,
+            //     StrandRasterizerLabel,
+            //     CompositionLabel, // Run after strand rasterization
+            // )
             .add_render_graph_edge(
                 Core3d,
                 bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass, // Run before composition
@@ -685,7 +670,6 @@ fn set_strand_geometry(
     query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
     assets: Res<Assets<DsonAsset>>,
     mut storage_buffers: ResMut<Assets<VirtualShaderStorageBuffer>>,
-    // mut allocator: ResMut<GpuPagingAllocator>,
     mut commands: Commands,
 ) {
     for (entity, strand_asset, material) in query.iter() {
@@ -779,11 +763,14 @@ fn set_strand_geometry(
         let material_buffer =
             VirtualShaderStorageBuffer::from((SlabKind::StrandMaterial, vec![material]));
 
+
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);
         let meta_buffer_handle = storage_buffers.add(meta_buffer);
         let geo_buffer_handle = storage_buffers.add(geo_buffer);
         let material_buffer_handle = storage_buffers.add(material_buffer);
+
+        info!("set strand geometry: {:?}", vertex_buffer_handle);
 
         commands.entity(entity).insert(StrandGeometry {
             vertices: vertex_buffer_handle,

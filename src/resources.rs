@@ -28,7 +28,7 @@ pub struct StrandAssetResources {
     pub pool: PoolBuffers
 }
 
-#[derive(Clone, Copy, Debug, Resource, Reflect)]
+#[derive(Clone, Copy, Debug, Resource, Reflect, PartialEq, Eq, Hash)]
 pub struct ComputeInvocationDims {
     pub threads_per_workgroup: u32,
     pub subgroup_size: u32,
