@@ -37,6 +37,14 @@
     wg_scan_storage
 }
 
+#import "shaders/task_contract.wgsl"::{
+    BINNING_NUM_LEVELS,
+    unpack_binning_level,
+    unpack_binning_shadow,
+    unpack_binning_frustum,
+    pack_binning_field,
+}
+
 const INITIAL_ROUND_ALLOC_SIZE: u32 = 32u;
 const REGULAR_ROUND_ALLOC_SIZE: u32 = 16u;
 
@@ -52,7 +60,7 @@ fn in_bounds(f: vec3<i32>, max_f: vec3<i32>) -> bool {
     return all(f >= vec3(0)) && all(f < max_f);
 }
 
-fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig, level: u32, task_hash) -> bool {
+fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig, level: u32, task_hash: u32) -> bool {
     // Check AABB (example uses screen coords, adjust if AABB is in froxel coords)
     // if (froxel_x < cfg.aabb_min_x || ... ) { return false; }
 
@@ -79,7 +87,7 @@ fn pull_chunk(task_hash: u32, local_id: u32, size: u32) -> u32 {
 fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
     // var chunk_addr = atomicLoad(&wg_chunks[local_id]);
     var chunk_addr = wg_chunks[local_id];
-    if (chunk_addr == 0u) {
+    if chunk_addr == 0u {
         chunk_addr = pull_chunk(task_hash, local_id, size);
         return chunk_pool[chunk_addr];
     } else {
@@ -92,7 +100,7 @@ fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
     }
 }
 
-fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig, level: u32) {
+fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig, level: u32, task_hash: u32) {
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
     let r_ix = 0; //i32(ceil(half_thickness_px / f32(cfg.froxel_size_x)));
@@ -164,7 +172,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
     let max_steps = u32(max_f.x + max_f.y + max_f.z + 3); // Generous upper bound
     let zero_thickness = r_ix == 0 && r_iy == 0;
 
-    var chunk = 0xFFFFFFFF;
+    var chunk = 0xFFFFFFFFu;
     var current_count = 0u;
 
     loop {
@@ -174,7 +182,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
         // Add segment count to current froxel IF it's within valid bounds
         if in_bounds(f, max_f) {
             // TODO
-            if (current_count >= CHUNK_SIZE) {
+            if current_count >= CHUNK_SIZE {
                 chunk = get_chunk(task_hash, local_id, select(INITIAL_ROUND_ALLOC_SIZE, REGULAR_ROUND_ALLOC_SIZE, level > 0u));
             }
             let froxel_id = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
@@ -187,14 +195,15 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
                 }
                 default: {
                     // next level in the hierarchy
-                    let unpacked = unpack_binning_field(task);
-                    let repacked = pack_binning_field(unpacked.x, level + 1u, unpacked.z);
-                    
+                    let is_shadow = unpack_binning_shadow(task.packed_field);
+                    let frustum_index = unpack_binning_frustum(task.packed_field);
+                    let repacked = pack_binning_field(level + 1u, is_shadow, frustum_index);
+
                     let task = BinningTask(
                         froxel_id,
-                        task.seg_id,
-                        task.seg_idx
-                        packed_field
+                        task.chunk_id,
+                        task.seg_idx,
+                        repacked
                     )
                     // 
                     chunk.items[count] = seg_idx,
@@ -202,7 +211,6 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
                 }
             }
             current_count = chunk.count;
-
         } else {
             // Stop if we step out of bounds entirely
             break;
@@ -235,8 +243,8 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 
     let num_chunks = workgroup_exclusive_scan(lid, subgroup_id, subgroup_local_id, wg_chunk_counts[lid]);
 
-    var base:u32 = 0u;
-    if (lid == WG_SIZE - 1u) {
+    var base: u32 = 0u;
+    if lid == WG_SIZE - 1u {
         // tally up work
         base = atomicAdd(&binning_queue.tail, num_chunks * BIN_TASK_SIZE / CHUNK_SIZE);
     }
@@ -244,7 +252,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 
     workgroupBarrier();
 
-    if (chunk != 0xFFFFFFFF) {
+    if chunk != 0xFFFFFFFFu {
         // submit work
         for (var i = 0u; i < num_chunks * BIN_TASK_SIZE / CHUNK_SIZE; i = i + BIN_TASK_SIZE) {
             let write_idx = base + i;
@@ -261,7 +269,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 }
 
 fn nearest_pow2(n: f32) -> f32 {
-    if (n <= 0.0) {
+    if n <= 0.0 {
         return 1.0;
     }
     return pow(2.0, round(log2(n)));
@@ -276,52 +284,54 @@ fn nearest_pow2(n: f32) -> f32 {
 @group(0) @binding(#LIGHT_UNIFORM) var<uniform> lights: types::Lights;
 @group(0) @binding(#GEO_BUFFER) var<storage, read> geos: array<StrandGeo>; // Has AABB for bounds check
 
-const NUM_LEVELS: u32 = 2u;
+// NOTE: hierarchy depth and packed-field layout are defined in task_contract.wgsl.
+const NUM_LEVELS: u32 = BINNING_NUM_LEVELS;
 
-fn process_level(task: BinningTask, local_id: vec3<u32>, subgroup_id: u32, subgroup_local_id: u32, task_hash: u32) {
-    // 1. construct froxelcfg for the current level.
-    let is_shadow = task.frustrum_id & 0x1;
-    let config_idx = task.frustrum_id >> 1u;
+fn process_level(task: BinningTask, local_id: vec3<u32>, task_hash: u32) {
+    // 1. Construct level config from packed-field contract.
+    let level = unpack_binning_level(task.packed_field);
+    let is_shadow = unpack_binning_shadow(task.packed_field);
+    let config_idx = unpack_binning_frustum(task.packed_field);
     let cfg = config[config_idx];
     let screen_xy = vec2<u32>(cfg.screen_width, cfg.screen_height);
     let fsize_xy = vec2<u32>(cfg.froxel_size_x, cfg.froxel_size_y);
-    let grid_xy = screen_xy / pow(fsize_xy, NUM_LEVELS - task.level);
+    let grid_xy = screen_xy / pow(fsize_xy, NUM_LEVELS - level);
     let z_slices = u32(nearest_pow2(sqrt(f32(cfg.depth_slices))));
     let level_cfg = FroxelConfig(grid_xy.x, grid_xy.y, fsize_xy.x, fsize_xy.y, z_slices);
-    let seg_idx = indices[task.seg_offset];
+    let seg_idx = indices[task.seg_idx];
     let p0 = vertices[seg_idx];
     let p1 = vertices[seg_idx + 1u];
-    trace_segment_through_froxels(p0, p1, level_cfg);
+    trace_segment_through_froxels(task, p0.xyz, p1.xyz, level_cfg, level, task_hash);
 }
 
 fn kickoff_queue_empty() -> bool {
-
+    return atomicLoad(&binning_queue.head) >= atomicLoad(&binning_queue.tail);
 }
 
 @compute @workgroup_size(SCAN_THREADS, 1, 1)
 fn kernel(
-    @builtin(workgroup_id) workgroup_id : vec3<u32>,
-    @builtin(num_workgroups) num_workgroups : vec3<u32>,
-    @builtin(local_invocation_id) local_id : vec3<u32>,
-    @builtin(subgroup_id) subgroup_id : u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id : u32
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32
 ) {
 
     loop {
         // 1. Get work item from queue: BinningTask
         var task_idx: u32;
         let binning_tail: u32 = atomicLoad(&binning_queue.tail);
-        if (local_id.x==0u) {
+        if local_id.x == 0u {
             task_idx = atomicAdd(&binning_queue.head, SCAN_THREADS);
         }
 
         task_idx = task_idx + local_id.x; // local task
-        if (task_idx >= binning_tail) { break; }
+        if task_idx >= binning_tail { break; }
 
         let task = binning_queue.tasks[task_idx];
         var task_hash: u32;
-        if (local_id.x==0u) {
-            task_hash = wang_hash(task.packed_field + task.strand_id + task.seg_offset);
+        if local_id.x == 0u {
+            task_hash = wang_hash(task.packed_field ^ task.id_info ^ task.seg_idx);
         }
         process_level(task, local_id, task_hash);
         // 2. switch on level -> 0u: initial pass
@@ -330,5 +340,4 @@ fn kernel(
         //      -> L(n) = (SCREEN_SIZE / FROXEL_SIZE) / WG_SIZE ^ (NUM_LAYERS - n)
         // 4. raster the segment to the current grid layer L(n)_tile_head using chunk pool.
     }
-
 }

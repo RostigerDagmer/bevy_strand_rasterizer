@@ -2,6 +2,24 @@
 //!
 //! Keep these layouts stable so host orchestration can evolve from
 //! multi-dispatch to a persistent kernel without refactoring task memory.
+//!
+//! Binning hierarchy contract (current design target):
+//! - `BinningTask.level == 0` means coarse insertion over view-level macro tiles.
+//! - `BinningTask.level > 0` means refinement using children of `id_info` from the previous level.
+//! - `BinningTask.level == BINNING_NUM_LEVELS - 1` emits raster-ready work items.
+//!
+//! Field semantics:
+//! - `id_info`
+//!   - level 0: instance/geo id for segment source
+//!   - level i>0: parent tile id from level i-1
+//! - `chunk_id`
+//!   - optional chunk-pool pointer / chain head used for batched local commit
+//! - `seg_idx`
+//!   - stable global segment identifier (index-space contract chosen by producer)
+//! - `packed_field`
+//!   - bit [0..1]: level (supports up to 4 levels)
+//!   - bit [2]: is_shadow
+//!   - bit [3..31]: frustum index
 
 /// Broad visibility/candidate generation.
 pub const PHASE_BROAD: u32 = 0;
@@ -9,6 +27,13 @@ pub const PHASE_BROAD: u32 = 0;
 pub const PHASE_FINE: u32 = 1;
 /// Binning/final work emission.
 pub const PHASE_BINNING: u32 = 2;
+/// Current hierarchy depth target for queue-based binning.
+pub const BINNING_NUM_LEVELS: u32 = 2;
+
+pub const BINNING_LEVEL_BITS: u32 = 2;
+pub const BINNING_LEVEL_MASK: u32 = (1 << BINNING_LEVEL_BITS) - 1;
+pub const BINNING_SHADOW_BIT: u32 = 1 << BINNING_LEVEL_BITS;
+pub const BINNING_FRUSTUM_SHIFT: u32 = BINNING_LEVEL_BITS + 1;
 
 /// Queue header ABI used by GPU work queues.
 ///
@@ -40,6 +65,28 @@ pub struct BinningTask {
     pub chunk_id: u32,
     pub seg_idx: u32,
     pub packed_field: u32,
+}
+
+#[inline]
+pub const fn pack_binning_field(level: u32, is_shadow: bool, frustum_index: u32) -> u32 {
+    (level & BINNING_LEVEL_MASK)
+        | ((is_shadow as u32) << BINNING_LEVEL_BITS)
+        | (frustum_index << BINNING_FRUSTUM_SHIFT)
+}
+
+#[inline]
+pub const fn unpack_binning_level(packed: u32) -> u32 {
+    packed & BINNING_LEVEL_MASK
+}
+
+#[inline]
+pub const fn unpack_binning_shadow(packed: u32) -> bool {
+    (packed & BINNING_SHADOW_BIT) != 0
+}
+
+#[inline]
+pub const fn unpack_binning_frustum(packed: u32) -> u32 {
+    packed >> BINNING_FRUSTUM_SHIFT
 }
 
 pub const QUEUE_HEADER_WORDS: usize =
