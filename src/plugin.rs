@@ -34,6 +34,9 @@ use crate::{
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
+const BINNING_POOL_CHUNK_SIZE: u32 = 32;
+const BINNING_POOL_NUM_HEADS: u32 = 64;
+const BINNING_POOL_MIN_CHUNKS: u32 = 16_384;
 
 use lazy_static::lazy_static;
 
@@ -255,6 +258,8 @@ fn use_prepass_buffers(
         || prepass_resources.visible_geos_buffer.is_none()
         || prepass_resources.geos_prefix_buffer.is_none()
         || prepass_resources.indirect_args.is_none()
+        || prepass_resources.chunk_pool.is_none()
+        || prepass_resources.free_heads.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
         || prepass_resources.geo_capacity < geo_capacity;
@@ -266,6 +271,10 @@ fn use_prepass_buffers(
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
         let geo_bytes = (geo_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let geo_prefix_bytes = ((geo_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
+        let chunk_count = binning_capacity.max(BINNING_POOL_MIN_CHUNKS);
+        let chunk_stride_bytes =
+            (2u64 + BINNING_POOL_CHUNK_SIZE as u64) * std::mem::size_of::<u32>() as u64;
+        let chunk_pool_bytes = chunk_count as u64 * chunk_stride_bytes;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -303,6 +312,18 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.chunk_pool = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_binning_chunk_pool"),
+            size: chunk_pool_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.free_heads = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_binning_free_heads"),
+            size: (BINNING_POOL_NUM_HEADS as u64) * std::mem::size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
@@ -325,6 +346,10 @@ fn use_prepass_buffers(
     }
     if let Some(indirect) = &prepass_resources.indirect_args {
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
+    }
+    if let Some(free_heads) = &prepass_resources.free_heads {
+        let zero_heads = vec![0u32; BINNING_POOL_NUM_HEADS as usize];
+        render_queue.write_buffer(free_heads, 0, bytemuck::cast_slice(&zero_heads));
     }
 }
 

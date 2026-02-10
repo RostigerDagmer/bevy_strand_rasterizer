@@ -29,6 +29,9 @@ pub struct StrandPrepassResources {
     pub binning_queue: Option<Buffer>,
     // products
     pub indirect_args: Option<Buffer>,
+    // queue-binning allocator buffers
+    pub chunk_pool: Option<Buffer>,
+    pub free_heads: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
@@ -41,6 +44,8 @@ pub struct StrandPrepassPipeline {
     pub broad_pipeline: Option<CachedComputePipelineId>,
     pub finalize_pipeline: Option<CachedComputePipelineId>,
     pub fine_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
+    pub binning_pipeline: Option<CachedComputePipelineId>,
 }
 
 impl StrandPrepassPipeline {
@@ -163,6 +168,8 @@ impl FromWorld for StrandPrepassPipeline {
             broad_pipeline: None,
             finalize_pipeline: None,
             fine_pipeline: None,
+            finalize_binning_pipeline: None,
+            binning_pipeline: None,
         }
     }
 }
@@ -279,6 +286,14 @@ pub fn run_prepass(
         warn!("Fine prepass pipeline id not ready yet");
         return;
     };
+    let Some(finalize_binning_pipeline_id) = pipeline.finalize_binning_pipeline else {
+        warn!("Finalize binning pipeline id not ready yet");
+        return;
+    };
+    let Some(binning_pipeline_id) = pipeline.binning_pipeline else {
+        warn!("Binning queue pipeline id not ready yet");
+        return;
+    };
     let Some(broad_pipeline) = pipeline_cache.get_compute_pipeline(broad_pipeline_id) else {
         warn!("Broad prepass pipeline not found");
         return;
@@ -289,6 +304,16 @@ pub fn run_prepass(
     };
     let Some(fine_pipeline) = pipeline_cache.get_compute_pipeline(fine_pipeline_id) else {
         warn!("Fine prepass pipeline not found");
+        return;
+    };
+    let Some(finalize_binning_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_binning_pipeline_id)
+    else {
+        warn!("Finalize binning pipeline not found");
+        return;
+    };
+    let Some(binning_pipeline) = pipeline_cache.get_compute_pipeline(binning_pipeline_id) else {
+        warn!("Binning queue pipeline not found");
         return;
     };
 
@@ -308,6 +333,10 @@ pub fn run_prepass(
     pass.set_pipeline(finalize_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(fine_pipeline);
+    pass.dispatch_workgroups_indirect(indirect_args, 0);
+    pass.set_pipeline(finalize_binning_pipeline);
+    pass.dispatch_workgroups(1, 1, 1);
+    pass.set_pipeline(binning_pipeline);
     pass.dispatch_workgroups_indirect(indirect_args, 0);
 }
 
@@ -335,6 +364,8 @@ pub fn update_strand_prepass_pipeline(
     let broad_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let finalize_binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
@@ -367,12 +398,38 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(finalize_binning_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_binning_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "finalize_binning",
+    ) else {
+        return;
+    };
+    let Some(binning_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        binning_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "binning_queue_pass",
+    ) else {
+        return;
+    };
 
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
     pipeline_res.fine_pipeline = Some(fine_pipeline_id);
+    pipeline_res.finalize_binning_pipeline = Some(finalize_binning_pipeline_id);
+    pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?}",
-        broad_pipeline_id, finalize_pipeline_id, fine_pipeline_id
+        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} finalize_binning={:?} binning={:?}",
+        broad_pipeline_id,
+        finalize_pipeline_id,
+        fine_pipeline_id,
+        finalize_binning_pipeline_id,
+        binning_pipeline_id
     );
 }
