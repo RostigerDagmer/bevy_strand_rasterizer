@@ -1,5 +1,5 @@
 
-#import "shaders/types.wgsl"::{
+#import "shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
 }

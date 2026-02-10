@@ -14,6 +14,9 @@
     Geos,
     Meta,
     StrandGeo,
+}
+
+#import "shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
 }

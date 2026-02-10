@@ -39,11 +39,36 @@
 
 #import "shaders/task_contract.wgsl"::{
     BINNING_NUM_LEVELS,
+    BinningTask,
+    RasterWorkItem,
     unpack_binning_level,
     unpack_binning_shadow,
     unpack_binning_frustum,
     pack_binning_field,
 }
+
+// -----------------------------------------------------------------------------
+// STATUS: queue-based hierarchical binning (WIP / design stub)
+//
+// Intent:
+// 1) Consume BinningTask items from `binning_queue` (persistent-kernel style loop)
+// 2) Trace segment through a level-dependent froxel grid
+// 3) Emit either:
+//    - child BinningTask(level+1) for refinement, or
+//    - leaf raster work at final level
+// 4) Batch global queue writes per workgroup using local chunk chains
+//
+// Current state:
+// - ABI alignment to task_contract is in progress
+// - several symbols come from allocator/chunk-pool prototypes and are unresolved
+// - algorithmic shape is preserved for reference; implementation is incomplete
+//
+// TODO tags:
+// - TODO(bin-queue/abi): field/contract wiring
+// - TODO(bin-queue/chunk): chunk pool integration
+// - TODO(bin-queue/leaf): leaf raster emission
+// - TODO(bin-queue/wg-batch): workgroup batched commit path
+// -----------------------------------------------------------------------------
 
 const INITIAL_ROUND_ALLOC_SIZE: u32 = 32u;
 const REGULAR_ROUND_ALLOC_SIZE: u32 = 16u;
@@ -78,6 +103,7 @@ fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: F
 var<workgroup> wg_chunks: array<atomic<u32>, SCAN_THREADS>;
 
 fn pull_chunk(task_hash: u32, local_id: u32, size: u32) -> u32 {
+    // TODO(bin-queue/chunk): alloc/N_HEADS contract is not finalized.
     let pool_address: u32 = alloc(task_hash % N_HEADS, size);
     // atomicStore(&wg_chunks[local_id], pool_address);
     wg_chunks[local_id] = pool_address;
@@ -85,6 +111,7 @@ fn pull_chunk(task_hash: u32, local_id: u32, size: u32) -> u32 {
 }
 
 fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
+    // TODO(bin-queue/chunk): settle chunk ownership and writeback semantics.
     // var chunk_addr = atomicLoad(&wg_chunks[local_id]);
     var chunk_addr = wg_chunks[local_id];
     if chunk_addr == 0u {
@@ -101,6 +128,7 @@ fn get_chunk(task_hash: u32, local_id: u32, size: u32) -> Chunk {
 }
 
 fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig, level: u32, task_hash: u32) {
+    // TODO(bin-queue/abi): use `task.id_info` semantics per level (L0 geo vs Li parent tile).
     // Input p0, p1 are screen-space coordinates (x, y, depth [0,1])
     if p0.x < 0.0 || p1.x < 0.0 { return; } // Skip off-screen or behind camera
     let r_ix = 0; //i32(ceil(half_thickness_px / f32(cfg.froxel_size_x)));
@@ -181,7 +209,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 
         // Add segment count to current froxel IF it's within valid bounds
         if in_bounds(f, max_f) {
-            // TODO
+            // TODO(bin-queue/chunk): finalize local chunk append path.
             if current_count >= CHUNK_SIZE {
                 chunk = get_chunk(task_hash, local_id, select(INITIAL_ROUND_ALLOC_SIZE, REGULAR_ROUND_ALLOC_SIZE, level > 0u));
             }
@@ -191,10 +219,10 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 
                 // }
                 case (NUM_LEVELS - 1u): {
-                    // emit raster work item
+                    // TODO(bin-queue/leaf): emit raster-ready leaf work item.
                 }
                 default: {
-                    // next level in the hierarchy
+                    // next level refinement task
                     let is_shadow = unpack_binning_shadow(task.packed_field);
                     let frustum_index = unpack_binning_frustum(task.packed_field);
                     let repacked = pack_binning_field(level + 1u, is_shadow, frustum_index);
@@ -241,6 +269,8 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
 
     workgroupBarrier();
 
+    // TODO(bin-queue/wg-batch): this section is intended to amortize global queue atomics
+    // by committing per-lane chunk chains in contiguous ranges reserved once per workgroup.
     let num_chunks = workgroup_exclusive_scan(lid, subgroup_id, subgroup_local_id, wg_chunk_counts[lid]);
 
     var base: u32 = 0u;
@@ -288,7 +318,10 @@ fn nearest_pow2(n: f32) -> f32 {
 const NUM_LEVELS: u32 = BINNING_NUM_LEVELS;
 
 fn process_level(task: BinningTask, local_id: vec3<u32>, task_hash: u32) {
-    // 1. Construct level config from packed-field contract.
+    // Stage contract:
+    // - unpack level/shadow/frustum from task.packed_field
+    // - derive a level-local grid config
+    // - trace one segment and emit child/leaf work
     let level = unpack_binning_level(task.packed_field);
     let is_shadow = unpack_binning_shadow(task.packed_field);
     let config_idx = unpack_binning_frustum(task.packed_field);
@@ -305,6 +338,7 @@ fn process_level(task: BinningTask, local_id: vec3<u32>, task_hash: u32) {
 }
 
 fn kickoff_queue_empty() -> bool {
+    // Queue empty predicate for persistent-kernel style loop control.
     return atomicLoad(&binning_queue.head) >= atomicLoad(&binning_queue.tail);
 }
 
@@ -316,7 +350,7 @@ fn kernel(
     @builtin(subgroup_id) subgroup_id: u32,
     @builtin(subgroup_invocation_id) subgroup_local_id: u32
 ) {
-
+    // Persistent-kernel style dequeue/execute loop (WIP).
     loop {
         // 1. Get work item from queue: BinningTask
         var task_idx: u32;
@@ -334,10 +368,7 @@ fn kernel(
             task_hash = wang_hash(task.packed_field ^ task.id_info ^ task.seg_idx);
         }
         process_level(task, local_id, task_hash);
-        // 2. switch on level -> 0u: initial pass
-        // 3. determine the current grid size: SCREEN_SIZE / FROXEL_SIZE = L_n grid_size
-        //      -> L_n-1 grid_size = L_n / WG_SIZE
-        //      -> L(n) = (SCREEN_SIZE / FROXEL_SIZE) / WG_SIZE ^ (NUM_LAYERS - n)
-        // 4. raster the segment to the current grid layer L(n)_tile_head using chunk pool.
+        // TODO(bin-queue/flow): add explicit producer/consumer termination protocol
+        // once child task emission and leaf emission are both implemented.
     }
 }
