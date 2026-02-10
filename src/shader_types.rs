@@ -1,4 +1,7 @@
-use bevy::{math::{bounding::Aabb3d, Vec3}, render::render_resource::ShaderType};
+use bevy::{
+    math::{Vec3, bounding::Aabb3d},
+    render::render_resource::ShaderType,
+};
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
@@ -6,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 pub struct PushConstants {
     // pub strand_count: u32, // stub in case we need push constants
     pub workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
-    pub num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
+    pub num_elements: u32,     // Generic count (e.g., num_strands or num_tiles)
     pub scan_load_base: u32,
     pub scan_save_base: u32,
 }
@@ -22,7 +25,12 @@ pub struct StrandMeta {
 
 impl From<(u32, u32)> for StrandMeta {
     fn from((count, offset): (u32, u32)) -> Self {
-        Self { count, offset, material_idx: 0, pad1: 0 }
+        Self {
+            count,
+            offset,
+            material_idx: 0,
+            pad1: 0,
+        }
     }
 }
 
@@ -59,18 +67,20 @@ pub struct StrandGeo {
 #[derive(Debug, Clone, ShaderType)]
 #[repr(C)]
 pub struct FinePrepassTask {
-    geo_id: u32,
-    strand_count: u32
+    pub inst_id: u32,
+    pub strand_local: u32,
 }
 
+#[derive(Debug, Clone, ShaderType)]
+#[repr(C)]
 pub struct BinningTask {
-    seg_idx: u32, // offset from beginning of strand.
-    strand_idx: u32, // offset into strand_meta buffer. (contains the base offset into index buffer + other stuff)
-    geo_idx: u32,
+    pub id_info: u32,
+    pub chunk_id: u32,
+    pub seg_idx: u32,
     // bit idx[0]: flag = 0 if view 1 if light.
     // bit ids[1:2]: light type if idx[0] is 1. (point = 0, spot = 1, directional = 2)
     // Rest: index into the corresponding light buffer.
-    view_idx: u32,
+    pub packed_field: u32,
 }
 
 impl StrandGeo {

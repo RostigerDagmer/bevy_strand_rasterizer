@@ -1,5 +1,8 @@
 use crate::shader_types::PushConstants;
-use bevy::{prelude::*, render::render_resource::{BindGroup, Buffer}};
+use bevy::{
+    prelude::*,
+    render::render_resource::{BindGroup, Buffer},
+};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -11,7 +14,7 @@ pub struct StrandAssetInstance {
 #[derive(Default, Clone)]
 pub struct GPUPoolAllocator {
     pub chunk_pool: Option<Buffer>,
-    pub free_heads: Option<Buffer>
+    pub free_heads: Option<Buffer>,
 }
 
 #[derive(Default, Clone)]
@@ -25,7 +28,7 @@ pub struct PoolBuffers {
 #[derive(Resource, Default)]
 pub struct StrandAssetResources {
     pub instances: HashMap<Entity, StrandAssetInstance>,
-    pub pool: PoolBuffers
+    pub pool: PoolBuffers,
 }
 
 #[derive(Clone, Copy, Debug, Resource, Reflect, PartialEq, Eq, Hash)]
@@ -40,7 +43,7 @@ impl Default for ComputeInvocationDims {
         Self {
             threads_per_workgroup: 256,
             subgroup_size: 32,
-            dispatch_size: (65536, 1, 1),
+            dispatch_size: (16384, 1, 1),
         }
     }
 }

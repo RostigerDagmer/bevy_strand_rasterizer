@@ -1,9 +1,10 @@
+pub mod binning;
+pub mod composite;
+pub mod ext;
 pub mod layouts;
 pub mod prepass;
-pub mod binning;
-pub mod shading;
 pub mod raster;
-pub mod composite;
+pub mod shading;
 pub mod shadows;
 pub mod sim;
-pub mod ext;
+pub mod task_contract;

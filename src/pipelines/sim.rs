@@ -9,7 +9,8 @@ use bevy::{
             ShaderStages, TextureView,
         },
         renderer::{RenderContext, RenderDevice},
-    }, shader::ShaderDefVal,
+    },
+    shader::ShaderDefVal,
 };
 
 const SIMULATOR_WORKGROUP_SIZE: u32 = 64;

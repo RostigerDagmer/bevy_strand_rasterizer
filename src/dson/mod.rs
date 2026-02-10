@@ -2,7 +2,7 @@ pub mod model;
 pub use model::*;
 
 use bevy::{
-    asset::{io::Reader, Asset, AssetLoader, LoadContext},
+    asset::{Asset, AssetLoader, LoadContext, io::Reader},
     reflect::TypePath,
 };
 

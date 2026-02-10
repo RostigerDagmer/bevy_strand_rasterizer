@@ -1,13 +1,17 @@
 use bevy::{
-    math::{bounding::Aabb3d, Vec4},
+    math::{Vec4, bounding::Aabb3d},
     prelude::*,
     render::{
-        extract_component::ExtractComponent, mesh::allocator::SlabId, render_resource::ShaderType, storage::ShaderStorageBuffer
+        extract_component::ExtractComponent, mesh::allocator::SlabId, render_resource::ShaderType,
+        storage::ShaderStorageBuffer,
     },
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::{allocator::{AllocKey, SlabKind, VirtualShaderStorageBuffer}, dson::DsonAsset};
+use crate::{
+    allocator::{AllocKey, SlabKind, VirtualShaderStorageBuffer},
+    dson::DsonAsset,
+};
 
 #[derive(Component, Reflect)]
 pub struct StrandAsset {

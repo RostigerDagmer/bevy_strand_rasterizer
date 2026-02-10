@@ -1,6 +1,4 @@
-
 use bevy::render::render_resource::ComputePass;
-
 
 pub fn dispatch_workgroup_ext(
     pass: &mut ComputePass,

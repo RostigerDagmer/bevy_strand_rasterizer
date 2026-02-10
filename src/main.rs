@@ -12,7 +12,7 @@ mod perf;
 mod pipelines;
 mod plugin;
 mod shader_types;
-mod allocator;
+use bevy_gpu_paging_allocator as allocator;
 
 fn setup(
     mut commands: Commands,
@@ -70,9 +70,9 @@ fn setup(
             ..Default::default()
         },
         Projection::from(PerspectiveProjection {
-                            fov: 20.0_f32.to_radians(),
-                            ..default()
-                        }),
+            fov: 20.0_f32.to_radians(),
+            ..default()
+        }),
         TieFroxelsToView::Native,
         bevy::core_pipeline::prepass::DepthPrepass,
     ));

@@ -4,15 +4,16 @@ use bevy::{
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
-            PipelineCache, PushConstantRange, SamplerBindingType,
-            ShaderStages, StorageTextureAccess,
-            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
+            ComputePipeline, ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange,
+            SamplerBindingType, ShaderStages, StorageTextureAccess, Texture, TextureDescriptor,
+            TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+            TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
-    }, shader::ShaderDefVal,
+    },
+    shader::ShaderDefVal,
 };
 
 use std::collections::HashMap;

@@ -1,6 +1,7 @@
-
 pub mod prepass {
     use bevy::shader::ShaderDefVal;
+
+    pub const PREPASS_GROUP: u32 = 2;
 
     // Queues
     pub const PREPASS_QUEUE: u32 = 4;
@@ -19,13 +20,17 @@ pub mod prepass {
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
+            ShaderDefVal::UInt("PREPASS_GROUP".into(), PREPASS_GROUP),
             // Queues
             ShaderDefVal::UInt("PREPASS_QUEUE".into(), PREPASS_QUEUE),
             ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
             // Internals
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
             ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
-            ShaderDefVal::UInt("CLUSTER_OFFSETS_AND_COUNTS".into(), CLUSTER_OFFSETS_AND_COUNTS),
+            ShaderDefVal::UInt(
+                "CLUSTER_OFFSETS_AND_COUNTS".into(),
+                CLUSTER_OFFSETS_AND_COUNTS,
+            ),
             ShaderDefVal::UInt("CLUSTERABLE_OBJECTS".into(), CLUSTERABLE_OBJECTS),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             // Helpers
@@ -36,7 +41,6 @@ pub mod prepass {
         ]
     }
 }
-
 
 pub mod rasterizer {
     use bevy::shader::ShaderDefVal;

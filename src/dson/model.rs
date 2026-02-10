@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use fluent_uri::UriRef;
+use serde::{Deserialize, Serialize};
 
 pub type Url = UriRef<String>;
 
@@ -117,7 +117,7 @@ pub enum ScaleMode {
 pub struct RigidityGroup {
     pub id: String,
     pub rotation_mode: Option<RotationMode>, // "none", "full", "primary", or "secondary"
-    pub scale_modes: Vec<ScaleMode>, // "none", "primary", "secondary", or "tertiary"
+    pub scale_modes: Vec<ScaleMode>,         // "none", "primary", "secondary", or "tertiary"
     pub reference_vertices: IntArray,
     pub mask_vertices: IntArray,
     pub reference: Option<Url>,
@@ -132,7 +132,7 @@ pub struct GeometryInstance {
     pub label: Option<String>,
     #[serde(rename = "type")]
     pub geo_type: Option<GeometryType>, // "polygon_mesh" or "subdivision_surface"
-    // TODO: There is more that this can override.
+                                        // TODO: There is more that this can override.
 }
 
 // --- UV Assets ---
@@ -142,11 +142,11 @@ pub struct UVSet {
     pub id: String,
     pub name: Option<String>,
     pub label: Option<String>,
-    
+
     pub source: Option<Url>,
     pub vertex_count: u32,
     pub uvs: Float2Array,
-    /// Each entry is [polygon_index, polygon_vertex_index, uv_index], 
+    /// Each entry is [polygon_index, polygon_vertex_index, uv_index],
     /// where polygon_vertex_index refers to the index of a vertex in the geometry
     /// that is used by the polygon at polygon_index.
     pub polygon_vertex_indices: Option<Vec<[u32; 3]>>,
@@ -308,9 +308,9 @@ pub struct Modifier {
     pub id: String,
     pub name: Option<String>,
     pub label: Option<String>,
-    
+
     pub source: Option<Url>,
-    
+
     pub parent: Option<Url>,
     pub presentation: Option<Presentation>,
     pub channel: Option<Channel>,
@@ -355,7 +355,7 @@ pub struct SkinBinding {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeightedJoint {
     pub id: String,
-    
+
     pub node: Url,
     pub node_weights: Option<FloatIndexedArray>,
     pub scale_weights: Option<FloatIndexedArray>,
@@ -516,7 +516,6 @@ pub struct Scene {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChannelAnimation {
-    
     pub url: Url,
     pub keys: Vec<AnimationKey>,
 }
@@ -524,8 +523,8 @@ pub struct ChannelAnimation {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum AnimationKey {
-    Simple([f32; 2]), // [time, value]
-    Vector((f32, Vec<f32>)), // [time, [values...]]
+    Simple([f32; 2]),                                                 // [time, value]
+    Vector((f32, Vec<f32>)),                                          // [time, [values...]]
     WithInterpolation((f32, f32, (String, f32, f32, f32))), // [time, value, [interpolation_type, val1, val2, val3]]
     VectorWithInterpolation((f32, Vec<f32>, Vec<serde_json::Value>)), // [time, [values...], [interpolation_type, ...]]
 }
@@ -567,7 +566,7 @@ pub struct Channel {
     pub step_size: Option<f32>,
     pub mappable: Option<bool>,
     pub enum_values: Option<Vec<String>>, // for enum
-    pub image_file: Option<Url>, // for image
+    pub image_file: Option<Url>,          // for image
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

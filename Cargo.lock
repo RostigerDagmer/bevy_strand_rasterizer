@@ -1252,6 +1252,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_gpu_paging_allocator"
+version = "0.1.0"
+dependencies = [
+ "bevy 0.17.2",
+ "bytemuck",
+ "lazy_static",
+ "range-alloc",
+ "wgpu 26.0.1",
+]
+
+[[package]]
 name = "bevy_hierarchy"
 version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6060,6 +6071,7 @@ dependencies = [
  "anyhow",
  "bevy 0.17.2",
  "bevy_egui",
+ "bevy_gpu_paging_allocator",
  "bevy_panorbit_camera",
  "bevy_wgsl_utils",
  "bytemuck",
@@ -6072,6 +6084,7 @@ dependencies = [
  "range-alloc",
  "serde",
  "serde_json",
+ "wgpu 26.0.1",
 ]
 
 [[package]]
@@ -6917,12 +6930,14 @@ dependencies = [
  "js-sys",
  "log",
  "naga 26.0.0",
+ "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core 26.0.1",
  "wgpu-hal 26.0.6",
@@ -6979,6 +6994,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.12",
  "wgpu-core-deps-apple",
+ "wgpu-core-deps-emscripten",
  "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal 26.0.6",
@@ -6990,6 +7006,15 @@ name = "wgpu-core-deps-apple"
 version = "26.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18ae5fbde6a4cbebae38358aa73fcd6e0f15c6144b67ef5dc91ded0db125dbdf"
+dependencies = [
+ "wgpu-hal 26.0.6",
+]
+
+[[package]]
+name = "wgpu-core-deps-emscripten"
+version = "26.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7670e390f416006f746b4600fdd9136455e3627f5bd763abf9a65daa216dd2d"
 dependencies = [
  "wgpu-hal 26.0.6",
 ]

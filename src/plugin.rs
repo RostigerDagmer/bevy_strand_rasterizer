@@ -10,17 +10,15 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSystems,
         extract_component::ExtractComponentPlugin,
-        render_graph::{
-            Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
-        },
+        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
         render_resource::{
-            Buffer, BufferDescriptor, BufferUsages, PipelineCache,
+            BindGroupLayout, Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId,
+            ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
         },
         renderer::{RenderContext, RenderDevice},
-        view::{
-            ExtractedView, ViewUniformOffset, ViewUniforms,
-        },
+        view::{ExtractedView, ViewUniformOffset, ViewUniforms},
     },
+    shader::ShaderDefVal,
 };
 
 use crate::{
@@ -28,8 +26,8 @@ use crate::{
     components::*,
     dson::DsonAsset,
     pipelines::{
-        binning::*, composite::*, prepass::StrandPrepassResources, raster::*, shading::*,
-        shadows::*, sim::StrandSimulatorResources,
+        binning::*, composite::*, prepass::*, raster::*, shading::*, shadows::*,
+        sim::StrandSimulatorResources, task_contract::QUEUE_HEADER_WORDS,
     },
     resources::*,
     shader_types::*,
@@ -65,6 +63,65 @@ lazy_static! {
     .collect();
 }
 
+#[derive(Resource)]
+pub struct AllocatorDebugPipeline {
+    pipeline: Option<CachedComputePipelineId>,
+    allocator_epoch: u64,
+    shader: Handle<Shader>,
+}
+
+impl FromWorld for AllocatorDebugPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let shader = world
+            .resource::<AssetServer>()
+            .load("shaders/allocator_debug_noop.wgsl");
+
+        Self {
+            pipeline: None,
+            allocator_epoch: u64::MAX,
+            shader,
+        }
+    }
+}
+
+fn prepare_allocator_debug_pipeline(
+    mut debug_pipeline: ResMut<AllocatorDebugPipeline>,
+    allocator: Res<GpuPagingAllocator>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let Some(buffer_layout) = &allocator.buffer_bind_group_layout else {
+        return;
+    };
+    let Some(table_layout) = &allocator.pagetable_bind_group_layout else {
+        return;
+    };
+    if debug_pipeline.pipeline.is_some()
+        && debug_pipeline.allocator_epoch == allocator.bindgroups_epoch
+    {
+        return;
+    }
+
+    let layout = vec![buffer_layout.clone(), table_layout.clone()];
+    info!("layout: {:?}", layout);
+
+    let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("allocator_debug_noop_pipeline".into()),
+        layout,
+        shader: debug_pipeline.shader.clone(),
+        shader_defs: allocator.shader_defs(),
+        push_constant_ranges: vec![],
+        entry_point: Some("main".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    info!(
+        "Debug pipeline queued for allocator epoch {}",
+        allocator.bindgroups_epoch
+    );
+
+    debug_pipeline.pipeline = Some(pipeline);
+    debug_pipeline.allocator_epoch = allocator.bindgroups_epoch;
+}
+
 pub struct StrandRasterizerPlugin;
 
 impl Plugin for StrandRasterizerPlugin {
@@ -94,7 +151,8 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.insert_resource(GpuPagingAllocatorSettings {
             label_map: LABEL_MAP.clone(),
             bind_map: BIND_MAP.clone(),
-            ..Default::default()
+            buffer_group_idx: 0,
+            table_group_idx: 1,
         });
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandRasterizerPipeline>();
@@ -104,19 +162,34 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandShadowResources>();
         render_app.init_resource::<StrandBinningPipeline>();
         render_app.init_resource::<StrandBinningBuffers>();
+        render_app.init_resource::<StrandPrepassResources>();
+        render_app.init_resource::<ComputeInvocationDims>();
+        render_app.init_resource::<StrandPrepassPipeline>();
         render_app.init_resource::<CompositionPipeline>();
+        render_app.init_resource::<AllocatorDebugPipeline>();
         render_app.add_systems(
             Render,
             ((
                 use_froxel_buffer,
                 use_deep_opacity_maps,
+                use_prepass_buffers,
                 // update_material_buffer,
                 // use_strand_geometry.after(prepare_view_uniforms),
             )
                 .chain()
                 .in_set(RenderSystems::Prepare),),
         );
+        // render_app.add_systems(
+        //     Render,
+        //     prepare_allocator_debug_pipeline.after(RenderSystems::PrepareBindGroups),
+        // );
+        render_app.add_systems(
+            Render,
+            update_strand_prepass_pipeline.after(RenderSystems::PrepareBindGroups),
+        );
         render_app
+            // .add_render_graph_node::<AllocatorDebugNode>(Core3d, AllocatorDebugLabel)
+            .add_render_graph_node::<WorkPreparationNode>(Core3d, WorkPreparationLabel)
             // .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
             // .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
             // .add_render_graph_node::<StrandShadowRasterizerNode>(
@@ -140,13 +213,269 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass, // Run before composition
-                CompositionLabel,
+                WorkPreparationLabel,
             )
+            // .add_render_graph_edge(Core3d, AllocatorDebugLabel, CompositionLabel)
+            .add_render_graph_edge(Core3d, WorkPreparationLabel, CompositionLabel)
             .add_render_graph_edge(
                 Core3d,
                 CompositionLabel, // Run after composition
                 bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing, // Before standard post-processing
             );
+    }
+}
+
+fn use_prepass_buffers(
+    geometry_query: Query<&StrandGeometry>,
+    device: Res<RenderDevice>,
+    render_queue: Res<bevy::render::renderer::RenderQueue>,
+    mut prepass_resources: ResMut<StrandPrepassResources>,
+    mut raster_resources: ResMut<StrandRasterizerResources>,
+) {
+    let mut total_strands = 0u32;
+    let mut geo_count = 0u32;
+    for geom in &geometry_query {
+        total_strands = total_strands.saturating_add(geom.strand_count);
+        geo_count = geo_count.saturating_add(1);
+    }
+
+    if total_strands == 0 {
+        return;
+    }
+
+    raster_resources.strand_count = Some(total_strands);
+
+    let prepass_capacity = total_strands.next_power_of_two().max(1024);
+    let binning_capacity = prepass_capacity;
+    let geo_capacity = geo_count.next_power_of_two().max(1024);
+
+    let needs_realloc = prepass_resources.prepass_queue.is_none()
+        || prepass_resources.binning_queue.is_none()
+        || prepass_resources.visibility_flags_buffer.is_none()
+        || prepass_resources.visible_geos_buffer.is_none()
+        || prepass_resources.geos_prefix_buffer.is_none()
+        || prepass_resources.indirect_args.is_none()
+        || prepass_resources.prepass_task_capacity < prepass_capacity
+        || prepass_resources.binning_task_capacity < binning_capacity
+        || prepass_resources.geo_capacity < geo_capacity;
+
+    if needs_realloc {
+        let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (prepass_capacity as u64) * (std::mem::size_of::<FinePrepassTask>() as u64);
+        let binning_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
+        let geo_bytes = (geo_capacity as u64) * (std::mem::size_of::<u32>() as u64);
+        let geo_prefix_bytes = ((geo_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
+
+        prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_queue"),
+            size: prepass_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.binning_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_binning_queue"),
+            size: binning_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.visibility_flags_buffer = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_visible_flags"),
+            size: geo_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.visible_geos_buffer = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_visible_geos"),
+            size: geo_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.geos_prefix_buffer = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_geo_prefix"),
+            size: geo_prefix_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.indirect_args = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_indirect_args"),
+            size: (3 * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        prepass_resources.prepass_task_capacity = prepass_capacity;
+        prepass_resources.binning_task_capacity = binning_capacity;
+        prepass_resources.geo_capacity = geo_capacity;
+
+        info!(
+            "Allocated prepass buffers: strands={} geos={} prepass_cap={} binning_cap={}",
+            total_strands, geo_count, prepass_capacity, binning_capacity
+        );
+    }
+
+    let zero_queue_hdr = [0u32, 0u32];
+    let zero_dispatch = [0u32, 1u32, 1u32];
+
+    if let Some(queue_buf) = &prepass_resources.prepass_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(queue_buf) = &prepass_resources.binning_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(indirect) = &prepass_resources.indirect_args {
+        render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkPreparationNode;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct WorkPreparationLabel;
+
+impl Node for WorkPreparationNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let view_entity = graph.view_entity();
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let render_device = world.resource::<RenderDevice>();
+        let allocator = world.resource::<GpuPagingAllocator>();
+        let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
+        let prepass_resources = world.resource::<StrandPrepassResources>();
+        let invocation_dims = world.resource::<ComputeInvocationDims>();
+        let view_uniforms = world.resource::<ViewUniforms>();
+        let light_meta = world.resource::<LightMeta>();
+        let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
+
+        let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
+            return Ok(());
+        };
+
+        let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity)
+        else {
+            return Ok(());
+        };
+
+        let Some(view_binding) = view_uniforms.uniforms.binding() else {
+            return Ok(());
+        };
+
+        let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
+            return Ok(());
+        };
+
+        let Some(clusterable_objects) = global_clusterable_object_meta
+            .gpu_clusterable_objects
+            .binding()
+        else {
+            return Ok(());
+        };
+
+        let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
+            return Ok(());
+        };
+
+        let Some(cluster_indices_binding) =
+            view_cluster_bindings.clusterable_object_index_lists_binding()
+        else {
+            return Ok(());
+        };
+
+        let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding()
+        else {
+            return Ok(());
+        };
+
+        let Ok((prepass_bind_group, dynamic_offsets)) = create_prepass_bind_group(
+            render_device,
+            prepass_pipeline,
+            &prepass_resources,
+            &view_binding,
+            &light_binding,
+            view_uniform_offset,
+            view_light_uniform_offset,
+            &cluster_indices_binding,
+            &cluster_offsets_binding,
+            &clusterable_objects,
+        ) else {
+            warn!("Failed to create prepass bind groups.");
+            return Ok(());
+        };
+        let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
+            return Ok(());
+        };
+        info!("Running prepass");
+        run_prepass(
+            render_context,
+            pipeline_cache,
+            prepass_pipeline,
+            allocator,
+            invocation_dims,
+            &prepass_bind_group,
+            &dynamic_offsets,
+            indirect_args,
+        );
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AllocatorDebugNode;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
+pub struct AllocatorDebugLabel;
+
+impl Node for AllocatorDebugNode {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let allocator = world.resource::<GpuPagingAllocator>();
+        let debug_pipeline = world.resource::<AllocatorDebugPipeline>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        let Some(buffer_bind_group) = allocator.buffer_bind_group.as_ref() else {
+            warn!("buffer bind group not present");
+            return Ok(());
+        };
+        let Some(table_bind_group) = allocator.pagetable_bind_group.as_ref() else {
+            warn!("table bind group not present");
+            return Ok(());
+        };
+        let Some(pipeline_id) = debug_pipeline.pipeline else {
+            warn!("debug pipeline id not present");
+            return Ok(());
+        };
+
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
+            warn!("debug pipeline not present");
+            return Ok(());
+        };
+        info!("Allocator: {:?}", allocator);
+        // info!("Buffer bind group: {:?}", buffer_bind_group);
+        // info!("Table bind group: {:?}", table_bind_group);
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Allocator Debug Noop"),
+                    ..default()
+                });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(allocator.buffer_group_idx, buffer_bind_group, &[]);
+        pass.set_bind_group(allocator.table_group_idx, table_bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        info!("Debug dispatch");
+        Ok(())
     }
 }
 
@@ -762,7 +1091,6 @@ fn set_strand_geometry(
         let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandGeo, geos_data));
         let material_buffer =
             VirtualShaderStorageBuffer::from((SlabKind::StrandMaterial, vec![material]));
-
 
         let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
         let index_buffer_handle = storage_buffers.add(index_buffer);

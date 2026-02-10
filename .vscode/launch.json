@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug allocator crate tests",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "-p",
+          "bevy_gpu_paging_allocator",
+          "--no-run"
+        ],
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug allocator single test",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "-p",
+          "bevy_gpu_paging_allocator",
+          "--no-run",
+          "${input:testName}"
+        ],
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "args": [
+        "${input:testName}",
+        "--exact",
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Exact test name (e.g. allocator::tests::churn_does_not_overlap_and_respects_alignment)"
+    }
+  ]
+}

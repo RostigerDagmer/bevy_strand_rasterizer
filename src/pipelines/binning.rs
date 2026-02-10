@@ -10,7 +10,8 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, shader::ShaderDefVal,
+    },
+    shader::ShaderDefVal,
 };
 
 use std::collections::HashMap;

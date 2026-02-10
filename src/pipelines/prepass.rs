@@ -1,6 +1,8 @@
 use crate::{
-    allocator::GpuPagingAllocator, pipelines::layouts, resources::ComputeInvocationDims,
-    shader_types::PushConstants,
+    allocator::GpuPagingAllocator,
+    pipelines::layouts,
+    resources::ComputeInvocationDims,
+    shader_types::{PushConstants, StrandGeo, StrandMeta},
 };
 use bevy::{
     pbr::ViewLightsUniformOffset,
@@ -17,8 +19,6 @@ use bevy::{
     shader::ShaderDefVal,
 };
 
-const SIMULATOR_WORKGROUP_SIZE: u32 = 64;
-
 #[derive(Resource, Default)]
 pub struct StrandPrepassResources {
     // inputs
@@ -29,90 +29,126 @@ pub struct StrandPrepassResources {
     pub binning_queue: Option<Buffer>,
     // products
     pub indirect_args: Option<Buffer>,
-    // pub aabbs: Option<Buffer>,
+    // capacities
+    pub prepass_task_capacity: u32,
+    pub binning_task_capacity: u32,
+    pub geo_capacity: u32,
 }
 
 #[derive(Resource)]
 pub struct StrandPrepassPipeline {
     pub bind_group_layout: BindGroupLayout,
-    pub pipeline: CachedComputePipelineId,
+    pub broad_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_pipeline: Option<CachedComputePipelineId>,
+    pub fine_pipeline: Option<CachedComputePipelineId>,
 }
 
 impl StrandPrepassPipeline {
+    fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
+    fn uniform_entry(binding: u32, has_dynamic_offset: bool) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         device.create_bind_group_layout(
             "strand_prepass_bind_group_layout",
             &[
-                // Light Uniform Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::LIGHT_UNIFORM,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Cluster Indices
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::CLUSTER_INDICES,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Cluster Offsets and Counts
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::CLUSTER_OFFSETS_AND_COUNTS,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Clusterable Objects
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::CLUSTERABLE_OBJECTS,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // View Uniform Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::VIEW_UNIFORM,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                ///////////////////////////////////////////////////////////
-                // Indirect Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::prepass::INDIRECT_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                Self::storage_entry(layouts::prepass::PREPASS_QUEUE, false),
+                Self::storage_entry(layouts::prepass::BINNING_QUEUE, false),
+                Self::uniform_entry(layouts::prepass::LIGHT_UNIFORM, true),
+                Self::storage_entry(layouts::prepass::CLUSTER_INDICES, true),
+                Self::storage_entry(layouts::prepass::CLUSTER_OFFSETS_AND_COUNTS, true),
+                Self::storage_entry(layouts::prepass::CLUSTERABLE_OBJECTS, true),
+                Self::uniform_entry(layouts::prepass::VIEW_UNIFORM, true),
+                Self::storage_entry(layouts::prepass::VISIBLE_FLAGS, false),
+                Self::storage_entry(layouts::prepass::VISIBLE_GEO, false),
+                Self::storage_entry(layouts::prepass::GEO_PREFIX, false),
+                Self::storage_entry(layouts::prepass::INDIRECT_BUFFER, false),
             ],
         )
     }
+}
+
+fn queue_prepass_pipeline(
+    pipeline_cache: &PipelineCache,
+    shader: Handle<Shader>,
+    bind_group_layout: BindGroupLayout,
+    allocator: &GpuPagingAllocator,
+    invocation_dims: &ComputeInvocationDims,
+    entry_point: &'static str,
+) -> Option<CachedComputePipelineId> {
+    let (Some(buffer_layout), Some(table_layout)) = (
+        allocator.buffer_bind_group_layout.clone(),
+        allocator.pagetable_bind_group_layout.clone(),
+    ) else {
+        return None;
+    };
+
+    let mut shader_defs = vec![layouts::prepass::shader_defs(), allocator.shader_defs()].concat();
+    shader_defs.extend([
+        ShaderDefVal::UInt(
+            "WORKGROUP_SIZE".into(),
+            invocation_dims.threads_per_workgroup,
+        ),
+        ShaderDefVal::UInt(
+            "NUMBER_OF_THREADS_PER_SUBGROUP".into(),
+            invocation_dims.subgroup_size,
+        ),
+        ShaderDefVal::UInt(
+            "FINE_WORKGROUP_SIZE".into(),
+            invocation_dims.threads_per_workgroup,
+        ),
+        ShaderDefVal::UInt(
+            "SIZEOF_METADATA".into(),
+            std::mem::size_of::<StrandMeta>() as u32,
+        ),
+        ShaderDefVal::UInt("SIZEOF_GEO".into(), std::mem::size_of::<StrandGeo>() as u32),
+    ]);
+
+    let max_group = allocator
+        .buffer_group_idx
+        .max(allocator.table_group_idx)
+        .max(layouts::prepass::PREPASS_GROUP);
+    let mut layout = vec![bind_group_layout.clone(); (max_group + 1) as usize];
+    layout[allocator.buffer_group_idx as usize] = buffer_layout;
+    layout[allocator.table_group_idx as usize] = table_layout;
+    layout[layouts::prepass::PREPASS_GROUP as usize] = bind_group_layout;
+
+    Some(
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_prepass_pipeline".into()),
+            layout,
+            shader,
+            shader_defs,
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: Some(entry_point.into()),
+            zero_initialize_workgroup_memory: false,
+        }),
+    )
 }
 
 impl FromWorld for StrandPrepassPipeline {
@@ -120,49 +156,13 @@ impl FromWorld for StrandPrepassPipeline {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
 
-        let invocation_dims = world.resource::<ComputeInvocationDims>();
-
-        let shader_loader = world.resource::<AssetServer>();
-        let rasterize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-
-        let cdefs = [
-            vec![
-                ShaderDefVal::UInt(
-                    "WORKGROUP_SIZE".into(),
-                    invocation_dims.threads_per_workgroup,
-                ),
-                ShaderDefVal::UInt(
-                    "NUMBER_OF_THREADS_PER_SUBGROUP".into(),
-                    invocation_dims.subgroup_size, // Use detected subgroup size
-                ),
-            ],
-            layouts::binning::shader_defs(),
-        ]
-        .concat();
-
-        let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("strand_prepass_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
-            shader: rasterize_shader,
-            shader_defs: vec![layouts::prepass::shader_defs(), cdefs].concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
-            entry_point: Some("broad_phase".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-
-        debug!(
-            "Created strand prepass compute pipelines: prepass={:?}",
-            pipeline
-        );
+        let _invocation_dims = *world.resource::<ComputeInvocationDims>();
 
         StrandPrepassPipeline {
             bind_group_layout,
-            pipeline,
+            broad_pipeline: None,
+            finalize_pipeline: None,
+            fine_pipeline: None,
         }
     }
 }
@@ -175,8 +175,10 @@ pub fn create_prepass_bind_group(
     light_buffer: &BindingResource,
     view_offsets: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
+    cluster_indices: &BindingResource,
+    cluster_offsets_and_counts: &BindingResource,
+    clusterable_objects: &BindingResource,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
-
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
     let binning_queue = resources.binning_queue.as_ref().ok_or(())?;
@@ -203,6 +205,18 @@ pub fn create_prepass_bind_group(
                     resource: light_buffer.clone().into_binding(),
                 },
                 BindGroupEntry {
+                    binding: layouts::prepass::CLUSTER_INDICES,
+                    resource: cluster_indices.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::CLUSTER_OFFSETS_AND_COUNTS,
+                    resource: cluster_offsets_and_counts.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::CLUSTERABLE_OBJECTS,
+                    resource: clusterable_objects.clone().into_binding(),
+                },
+                BindGroupEntry {
                     binding: layouts::prepass::VIEW_UNIFORM,
                     resource: view_buffer.clone().into_binding(),
                 },
@@ -224,7 +238,8 @@ pub fn create_prepass_bind_group(
                 },
             ],
         ),
-        vec![view_offsets.offset, view_light_uniform_offset.offset],
+        // Dynamic offsets order follows bind-group layout declaration order.
+        vec![view_light_uniform_offset.offset, view_offsets.offset],
     ))
 }
 
@@ -236,6 +251,7 @@ pub fn run_prepass(
     settings: &ComputeInvocationDims,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
+    indirect_args: &Buffer,
 ) {
     let encoder = render_context.command_encoder();
     let Some(allocator_buffer_bind_group) = &allocator.buffer_bind_group else {
@@ -246,74 +262,117 @@ pub fn run_prepass(
         warn!("allocator pagetable bind group is not ready yet.");
         return;
     };
-    // --- Prepass ---
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("Strand Prepass"),
-            ..default()
-        });
-        let Some(prepass_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline) else {
-            warn!("Prepass pipeline not found");
-            return;
-        };
-        pass.set_pipeline(prepass_pipeline);
-        pass.set_bind_group(
-            0,
-            bind_group, // Assume correctly populated bind group
-            uniform_offsets,
-        );
-        pass.set_bind_group(
-            allocator.buffer_group_idx,
-            allocator_buffer_bind_group,
-            &[]
-        );
-        pass.set_bind_group(
-            allocator.table_group_idx,
-            allocator_pagetable_bind_group,
-            &[]
-        );
 
-        pass.dispatch_workgroups(settings.dispatch_size.0, settings.dispatch_size.1, settings.dispatch_size.2);
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("Strand Prepass"),
+        ..default()
+    });
+    let Some(broad_pipeline_id) = pipeline.broad_pipeline else {
+        warn!("Broad prepass pipeline id not ready yet");
+        return;
+    };
+    let Some(finalize_pipeline_id) = pipeline.finalize_pipeline else {
+        warn!("Finalize prepass pipeline id not ready yet");
+        return;
+    };
+    let Some(fine_pipeline_id) = pipeline.fine_pipeline else {
+        warn!("Fine prepass pipeline id not ready yet");
+        return;
+    };
+    let Some(broad_pipeline) = pipeline_cache.get_compute_pipeline(broad_pipeline_id) else {
+        warn!("Broad prepass pipeline not found");
+        return;
+    };
+    let Some(finalize_pipeline) = pipeline_cache.get_compute_pipeline(finalize_pipeline_id) else {
+        warn!("Finalize prepass pipeline not found");
+        return;
+    };
+    let Some(fine_pipeline) = pipeline_cache.get_compute_pipeline(fine_pipeline_id) else {
+        warn!("Fine prepass pipeline not found");
+        return;
+    };
 
-    }
+    pass.set_pipeline(broad_pipeline);
+    pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
+    pass.set_bind_group(
+        allocator.table_group_idx,
+        allocator_pagetable_bind_group,
+        &[],
+    );
+    pass.set_bind_group(layouts::prepass::PREPASS_GROUP, bind_group, uniform_offsets);
+    pass.dispatch_workgroups(
+        settings.dispatch_size.0,
+        settings.dispatch_size.1,
+        settings.dispatch_size.2,
+    );
+    pass.set_pipeline(finalize_pipeline);
+    pass.dispatch_workgroups(1, 1, 1);
+    pass.set_pipeline(fine_pipeline);
+    pass.dispatch_workgroups_indirect(indirect_args, 0);
 }
 
-
-fn update_strand_prepass_pipeline(
+pub fn update_strand_prepass_pipeline(
     pipeline_cache: Res<PipelineCache>,
     mut pipeline_res: ResMut<StrandPrepassPipeline>,
     dims: Res<ComputeInvocationDims>,
-    mut last_dims: Local<Option<ComputeInvocationDims>>,
+    mut last_state: Local<Option<(ComputeInvocationDims, u64)>>,
     shader_loader: Res<AssetServer>,
+    allocator: Res<GpuPagingAllocator>,
 ) {
-    if last_dims.as_ref() == Some(&*dims) {
-        return; // same as before
+    let current_state = (*dims, allocator.bindgroups_epoch);
+    if last_state.as_ref() == Some(&current_state) {
+        return;
     }
-    *last_dims = Some(dims.clone());
 
-    let bind_group_layout = pipeline_res.bind_group_layout.clone();
-    let shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    if allocator.buffer_bind_group_layout.is_none()
+        || allocator.pagetable_bind_group_layout.is_none()
+    {
+        return;
+    }
 
-    let shader_defs = vec![
-        ShaderDefVal::UInt("WORKGROUP_SIZE".into(), dims.threads_per_workgroup),
-        ShaderDefVal::UInt("NUMBER_OF_THREADS_PER_SUBGROUP".into(), dims.subgroup_size),
-    ];
+    *last_state = Some(current_state);
 
-    let pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("strand_prepass_pipeline".into()),
-        layout: vec![bind_group_layout.clone()],
-        shader,
-        shader_defs,
-        push_constant_ranges: vec![PushConstantRange {
-            stages: ShaderStages::COMPUTE,
-            range: 0..std::mem::size_of::<PushConstants>() as u32,
-        }],
-        entry_point: Some("broad_phase".into()),
-        zero_initialize_workgroup_memory: false,
-    });
+    let broad_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let finalize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
-    // Update resource to use the new pipeline handle
-    pipeline_res.pipeline = pipeline_id;
+    let Some(broad_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        broad_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "broad_prepass",
+    ) else {
+        warn!("Could not queue broad prepass pipeline");
+        return;
+    };
+    let Some(finalize_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "finalize_prepass",
+    ) else {
+        return;
+    };
+    let Some(fine_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        fine_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "fine_prepass",
+    ) else {
+        return;
+    };
 
-    debug!("Rebuilt strand prepass pipeline: {:?}", pipeline_id);
+    pipeline_res.broad_pipeline = Some(broad_pipeline_id);
+    pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
+    pipeline_res.fine_pipeline = Some(fine_pipeline_id);
+    debug!(
+        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?}",
+        broad_pipeline_id, finalize_pipeline_id, fine_pipeline_id
+    );
 }

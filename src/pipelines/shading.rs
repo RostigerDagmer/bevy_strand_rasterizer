@@ -9,13 +9,14 @@ use bevy::{
             ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
             FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
             PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess,
-            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess, Texture,
+            TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+            TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, shader::ShaderDefVal,
+    },
+    shader::ShaderDefVal,
 };
 
 use crate::{

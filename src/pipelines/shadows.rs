@@ -4,15 +4,17 @@ use bevy::{
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, FilterMode, PipelineCache, PushConstantRange, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess,
-            Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
+            ComputePipelineDescriptor, Extent3d, FilterMode, PipelineCache, PushConstantRange,
+            Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
+            StorageTextureAccess, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+            TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
             TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
-    }, shader::ShaderDefVal,
+    },
+    shader::ShaderDefVal,
 };
 use std::collections::HashMap;
 
@@ -44,7 +46,6 @@ pub struct StrandShadowPipeline {
 pub const DOM_FORMAT: TextureFormat = TextureFormat::R32Float;
 
 impl StrandShadowPipeline {
-
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         // We shade in strand space so we only need the vertex, index and meta buffers in terms of geometry.
         // We also need the View and light buffers and an output buffer containing the shading data along line segments.

@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "test: allocator crate",
+      "type": "shell",
+      "command": "cargo test -p bevy_gpu_paging_allocator",
+      "options": {
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "group": "test",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "test: allocator crate (single test)",
+      "type": "shell",
+      "command": "cargo test -p bevy_gpu_paging_allocator ${input:testName}",
+      "options": {
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Test filter (e.g. allocator::tests::churn_does_not_overlap_and_respects_alignment)"
+    }
+  ]
+}
