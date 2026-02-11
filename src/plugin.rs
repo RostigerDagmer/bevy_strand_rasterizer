@@ -1,26 +1,17 @@
 use bevy::{
     core_pipeline::core_3d::graph::Core3d,
     math::bounding::Aabb3d,
-    pbr::{
-        ExtractedDirectionalLight, GlobalClusterableObjectMeta, LightMeta, ShadowSamplers,
-        ViewClusterBindings, ViewLightsUniformOffset, ViewShadowBindings,
-    },
+    pbr::ExtractedDirectionalLight,
     platform::collections::HashMap,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems,
-        extract_component::ExtractComponentPlugin,
-        extract_resource::ExtractResourcePlugin,
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
-        render_resource::{
-            Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, PipelineCache,
-        },
-        renderer::{RenderContext, RenderDevice},
-        view::{ExtractedView, ViewUniformOffset, ViewUniforms},
+        Render, RenderApp, RenderSystems, extract_component::ExtractComponentPlugin,
+        extract_resource::ExtractResourcePlugin, render_graph::RenderGraphExt,
+        render_resource::Buffer, renderer::RenderDevice, view::ExtractedView,
     },
 };
 use bytemuck::{Pod, Zeroable};
+use wgpu::{BufferDescriptor, BufferUsages};
 
 use crate::{
     allocator::*,
@@ -34,7 +25,6 @@ use crate::{
         raster::*,
         shading::*,
         shadows::*,
-        sim::StrandSimulatorResources,
         task_contract::{
             BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MIN_CHUNKS, BINNING_POOL_NUM_HEADS,
             QUEUE_HEADER_WORDS, RasterWorkItem,
@@ -136,10 +126,6 @@ impl Plugin for StrandRasterizerPlugin {
                 .chain()
                 .in_set(RenderSystems::Prepare),),
         );
-        // render_app.add_systems(
-        //     Render,
-        //     prepare_allocator_debug_pipeline.after(RenderSystems::PrepareBindGroups),
-        // );
         render_app.add_systems(
             Render,
             update_strand_prepass_pipeline.after(RenderSystems::PrepareBindGroups),
@@ -149,7 +135,6 @@ impl Plugin for StrandRasterizerPlugin {
             update_strand_raster_pipeline.after(RenderSystems::PrepareBindGroups),
         );
         render_app
-            // .add_render_graph_node::<AllocatorDebugNode>(Core3d, AllocatorDebugLabel)
             .add_render_graph_node::<nodes::prepass::WorkPreparationNode>(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
@@ -189,7 +174,6 @@ impl Plugin for StrandRasterizerPlugin {
                 bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass, // Run before composition
                 nodes::prepass::WorkPreparationLabel,
             )
-            // .add_render_graph_edge(Core3d, AllocatorDebugLabel, CompositionLabel)
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
