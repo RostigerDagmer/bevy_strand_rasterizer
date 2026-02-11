@@ -132,7 +132,7 @@ impl Node for WorkPreparationNode {
         let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
             return Ok(());
         };
-        info!("Running prepass");
+        debug!("Running prepass");
         run_prepass(
             render_context,
             pipeline_cache,

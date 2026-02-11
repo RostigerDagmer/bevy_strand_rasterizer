@@ -28,7 +28,12 @@ use crate::{
     dson::DsonAsset,
     nodes,
     pipelines::{
-        binning::*, composite::*, prepass::*, raster::*, shading::*, shadows::*,
+        binning::*,
+        composite::*,
+        prepass::*,
+        raster::*,
+        shading::*,
+        shadows::*,
         sim::StrandSimulatorResources,
         task_contract::{
             BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MIN_CHUNKS, BINNING_POOL_NUM_HEADS,
@@ -233,11 +238,11 @@ fn use_prepass_buffers(
 
     raster_resources.strand_count = Some(total_strands);
 
-    let prepass_capacity = total_strands.next_power_of_two().max(1024);
+    let prepass_capacity = total_strands.next_power_of_two().max(2048);
     let binning_capacity = total_segment_budget
         .next_power_of_two()
         .max(prepass_capacity);
-    let geo_capacity = geo_count.next_power_of_two().max(1024);
+    let geo_capacity = geo_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
     let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
@@ -301,7 +306,7 @@ fn use_prepass_buffers(
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
         let geo_bytes = (geo_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let geo_prefix_bytes = ((geo_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
-        let chunk_count = binning_capacity.max(BINNING_POOL_MIN_CHUNKS);
+        let chunk_count = raster_work_capacity.max(BINNING_POOL_MIN_CHUNKS);
         let chunk_stride_bytes =
             (2u64 + BINNING_POOL_CHUNK_SIZE as u64) * std::mem::size_of::<u32>() as u64;
         let chunk_pool_bytes = chunk_count as u64 * chunk_stride_bytes;

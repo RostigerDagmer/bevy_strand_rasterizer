@@ -30,7 +30,7 @@ pub const PHASE_BINNING: u32 = 2;
 /// Current hierarchy depth target for queue-based binning.
 pub const BINNING_NUM_LEVELS: u32 = 2;
 /// Sparse binning chunk size in u32 payload entries.
-pub const BINNING_POOL_CHUNK_SIZE: u32 = 32;
+pub const BINNING_POOL_CHUNK_SIZE: u32 = 16;
 /// Number of allocator heads used to spread atomic pressure.
 pub const BINNING_POOL_NUM_HEADS: u32 = 64;
 /// Minimum number of chunks reserved for sparse binning.
@@ -77,6 +77,7 @@ pub struct BinningTask {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RasterWorkItem {
     pub seg_id: u32,
+    pub strand_id: u32,
     pub frustum_id: u32,
     pub tile_id: u32,
 }

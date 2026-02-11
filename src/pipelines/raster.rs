@@ -19,10 +19,13 @@ use std::collections::HashMap;
 
 use crate::{
     allocator::GpuPagingAllocator, components::FroxelConfig, pipelines::layouts,
-    plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants,
+    pipelines::task_contract::BINNING_POOL_CHUNK_SIZE, plugin::MAX_TEXTURE_EXTENT,
+    shader_types::PushConstants,
 };
 
-use super::{binning::StrandBinningBuffers, shading::StrandShadingResources};
+use super::{
+    binning::StrandBinningBuffers, prepass::StrandPrepassResources, shading::StrandShadingResources,
+};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -137,6 +140,50 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                // Frustum descriptor table
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::FRUSTUM_TABLE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Sparse froxel bucket heads
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::FROXEL_BUCKET_HEADS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Sparse chunk pool payload
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::CHUNK_POOL,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Raster work queue items
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::RASTER_WORK_QUEUE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // Disabled for correctness-only raster pass:
                 // BindGroupLayoutEntry {
                 //     binding: layouts::rasterizer::SHADING_BUFFER,
@@ -231,6 +278,7 @@ pub fn update_strand_raster_pipeline(
                 "SIZEOF_GEO".into(),
                 std::mem::size_of::<crate::shader_types::StrandGeo>() as u32,
             ),
+            ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
         ],
         layouts::rasterizer::shader_defs(),
         allocator.shader_defs(),
@@ -273,6 +321,7 @@ pub fn create_strand_raster_bind_group(
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
     buffers: &StrandBinningBuffers,
+    prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
     view_offsets: &ViewUniformOffset,
@@ -286,6 +335,10 @@ pub fn create_strand_raster_bind_group(
     let artifacts = buffers.artifacts.get(entity).ok_or(())?;
     let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
     let tile_counts_buffer = &artifacts.tile_counts_buffer;
+    let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
+    let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
+    let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
+    let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -323,6 +376,22 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::LIGHT_UNIFORM,
                     resource: light_buffer.clone(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FRUSTUM_TABLE,
+                    resource: frustum_table.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FROXEL_BUCKET_HEADS,
+                    resource: froxel_bucket_heads.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::CHUNK_POOL,
+                    resource: chunk_pool.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::RASTER_WORK_QUEUE,
+                    resource: raster_work_queue.as_entire_binding(),
                 },
                 // Disabled for correctness-only raster pass:
                 // BindGroupEntry {
@@ -420,7 +489,6 @@ pub fn run_raster_pass(
             warn!("Raster pipeline id not ready yet");
             return;
         };
-        info!("raster pipeline_id: {:?}", raster_pipeline_id);
         let Some(raster_pipeline) = pipeline_cache.get_compute_pipeline(raster_pipeline_id) else {
             warn!("Raster pipeline not found");
             return;
@@ -433,7 +501,6 @@ pub fn run_raster_pass(
             warn!("allocator pagetable bind group is not ready yet.");
             return;
         };
-        info!("encoding: {:?}", raster_pipeline);
         pass.set_pipeline(raster_pipeline);
         pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
         pass.set_bind_group(

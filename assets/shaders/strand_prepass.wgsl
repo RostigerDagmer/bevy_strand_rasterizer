@@ -175,7 +175,7 @@ fn chunk_store_item(chunk_idx: u32, local_idx: u32, item: u32) {
     chunk_pool_words[chunk_word_base(chunk_idx) + 2u + local_idx] = item;
 }
 
-fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, seg_idx: u32) {
+fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, strand_idx: u32, seg_idx: u32) {
     if frustum_id >= arrayLength(&frustum_table) {
         return;
     }
@@ -188,16 +188,16 @@ fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, seg_idx: u32
         return;
     }
 
-    let work_idx = atomicAdd(&raster_work_queue.tail, 1u);
-    if work_idx >= arrayLength(&raster_work_queue.items) {
-        return;
-    }
-    raster_work_queue.items[work_idx] = RasterWorkItem(seg_idx, frustum_id, local_froxel_idx);
-
     let chunk_idx = alloc_chunk(bucket_idx ^ seg_idx);
     if chunk_idx == INVALID_PTR {
         return;
     }
+    let work_idx = atomicAdd(&raster_work_queue.tail, 1u);
+    if work_idx >= arrayLength(&raster_work_queue.items) {
+        return;
+    }
+    raster_work_queue.items[work_idx] = RasterWorkItem(seg_idx, strand_idx, frustum_id, local_froxel_idx);
+
     let prev = atomicExchange(&froxel_bucket_heads[bucket_idx], chunk_idx);
     chunk_store_next(chunk_idx, prev);
     chunk_store_count(chunk_idx, 1u);
@@ -484,6 +484,7 @@ fn trace_segment_through_froxels_sparse(
     p1: vec3<f32>,
     cfg: FroxelConfig,
     frustum_id: u32,
+    strand_idx: u32,
     seg_idx: u32,
 ) {
     if !isValid(p0) || !isValid(p1) {
@@ -567,7 +568,7 @@ fn trace_segment_through_froxels_sparse(
                 break;
             }
             let froxel_idx = (fz * num_tiles_y + fy) * num_tiles_x + fx;
-            append_sparse_froxel_ref(frustum_id, froxel_idx, seg_idx);
+            append_sparse_froxel_ref(frustum_id, froxel_idx, strand_idx, seg_idx);
         } else {
             break;
         }
@@ -766,6 +767,7 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
         p1,
         frustum_cfg,
         frustum_id,
+        task.chunk_id,
         task.seg_idx,
     );
 }

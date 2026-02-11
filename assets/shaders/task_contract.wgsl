@@ -65,7 +65,8 @@ fn unpack_binning_frustum(packed: u32) -> u32 {
 
 struct RasterWorkItem {
     seg_id: u32,
-    frustrum_id: u32,
+    strand_id: u32,
+    frustum_id: u32,
     tile_id: u32,
 }
 

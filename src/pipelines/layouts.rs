@@ -95,6 +95,10 @@ pub mod rasterizer {
     pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 22;
     pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 23;
     pub const MATERIAL_BUFFER: u32 = 24;
+    pub const FRUSTUM_TABLE: u32 = 25;
+    pub const FROXEL_BUCKET_HEADS: u32 = 26;
+    pub const CHUNK_POOL: u32 = 27;
+    pub const RASTER_WORK_QUEUE: u32 = 28;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -137,6 +141,10 @@ pub mod rasterizer {
             ),
             ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
             ShaderDefVal::UInt("MATERIAL_BUFFER".into(), MATERIAL_BUFFER),
+            ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
+            ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
+            ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
+            ShaderDefVal::UInt("RASTER_WORK_QUEUE".into(), RASTER_WORK_QUEUE),
         ]
     }
 }
