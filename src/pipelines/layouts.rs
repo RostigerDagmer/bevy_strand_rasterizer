@@ -22,6 +22,11 @@ pub mod prepass {
     pub const TILE_OFFSETS_BUFFER: u32 = 18;
     pub const CURRENT_TILE_WRITE_INDICES: u32 = 19;
     pub const FROXEL_TILE_BUFFER: u32 = 20;
+    pub const FRUSTUM_TABLE: u32 = 21;
+    pub const FROXEL_BUCKET_HEADS: u32 = 22;
+    pub const CHUNK_POOL: u32 = 23;
+    pub const FREE_HEADS: u32 = 24;
+    pub const RASTER_WORK_QUEUE: u32 = 25;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -51,6 +56,11 @@ pub mod prepass {
                 CURRENT_TILE_WRITE_INDICES,
             ),
             ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
+            ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
+            ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
+            ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
+            ShaderDefVal::UInt("FREE_HEADS".into(), FREE_HEADS),
+            ShaderDefVal::UInt("RASTER_WORK_QUEUE".into(), RASTER_WORK_QUEUE),
         ]
     }
 }

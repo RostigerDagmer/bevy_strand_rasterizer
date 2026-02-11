@@ -29,16 +29,18 @@ use crate::{
     nodes,
     pipelines::{
         binning::*, composite::*, prepass::*, raster::*, shading::*, shadows::*,
-        sim::StrandSimulatorResources, task_contract::QUEUE_HEADER_WORDS, tile_debug::*,
+        sim::StrandSimulatorResources,
+        task_contract::{
+            BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MIN_CHUNKS, BINNING_POOL_NUM_HEADS,
+            QUEUE_HEADER_WORDS, RasterWorkItem,
+        },
+        tile_debug::*,
     },
     resources::*,
     shader_types::*,
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
-const BINNING_POOL_CHUNK_SIZE: u32 = 32;
-const BINNING_POOL_NUM_HEADS: u32 = 64;
-const BINNING_POOL_MIN_CHUNKS: u32 = 16_384;
 
 use lazy_static::lazy_static;
 
@@ -236,6 +238,43 @@ fn use_prepass_buffers(
         .next_power_of_two()
         .max(prepass_capacity);
     let geo_capacity = geo_count.next_power_of_two().max(1024);
+    let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
+    let mut bucket_base = 0u32;
+    let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
+    frusta.sort_by_key(|(entity, _)| entity.index());
+    for (_, cfg) in frusta {
+        let (_, _, bucket_count) = cfg.get_num_tiles();
+        frustum_descs.push(GpuFrustumDesc {
+            screen_width: cfg.screen_width,
+            screen_height: cfg.screen_height,
+            froxel_size_x: cfg.froxel_size_x,
+            froxel_size_y: cfg.froxel_size_y,
+            depth_slices: cfg.depth_slices,
+            bucket_base,
+            bucket_count,
+            kind: 0, // 0 = camera
+        });
+        bucket_base = bucket_base.saturating_add(bucket_count);
+    }
+    if frustum_descs.is_empty() {
+        frustum_descs.push(GpuFrustumDesc {
+            screen_width: 1,
+            screen_height: 1,
+            froxel_size_x: 1,
+            froxel_size_y: 1,
+            depth_slices: 1,
+            bucket_base: 0,
+            bucket_count: 1,
+            kind: 0,
+        });
+        bucket_base = 1;
+    }
+    let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
+    let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
+    let raster_work_capacity = binning_capacity
+        .saturating_mul(8)
+        .next_power_of_two()
+        .max(binning_capacity.max(1024));
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -245,9 +284,15 @@ fn use_prepass_buffers(
         || prepass_resources.indirect_args.is_none()
         || prepass_resources.chunk_pool.is_none()
         || prepass_resources.free_heads.is_none()
+        || prepass_resources.frustum_table.is_none()
+        || prepass_resources.froxel_bucket_heads.is_none()
+        || prepass_resources.raster_work_queue.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
-        || prepass_resources.geo_capacity < geo_capacity;
+        || prepass_resources.geo_capacity < geo_capacity
+        || prepass_resources.frustum_capacity < frustum_capacity
+        || prepass_resources.froxel_bucket_capacity < froxel_bucket_capacity
+        || prepass_resources.raster_work_capacity < raster_work_capacity;
 
     if needs_realloc {
         let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -260,6 +305,12 @@ fn use_prepass_buffers(
         let chunk_stride_bytes =
             (2u64 + BINNING_POOL_CHUNK_SIZE as u64) * std::mem::size_of::<u32>() as u64;
         let chunk_pool_bytes = chunk_count as u64 * chunk_stride_bytes;
+        let frustum_table_bytes =
+            (frustum_capacity as u64) * (std::mem::size_of::<GpuFrustumDesc>() as u64);
+        let froxel_bucket_heads_bytes =
+            (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
+        let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (raster_work_capacity as u64) * (std::mem::size_of::<RasterWorkItem>() as u64);
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -309,14 +360,42 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.frustum_table = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_frustum_table"),
+            size: frustum_table_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.froxel_bucket_heads = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_froxel_bucket_heads"),
+            size: froxel_bucket_heads_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.raster_work_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_raster_work_queue"),
+            size: raster_work_queue_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
         prepass_resources.geo_capacity = geo_capacity;
+        prepass_resources.frustum_capacity = frustum_capacity;
+        prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
+        prepass_resources.raster_work_capacity = raster_work_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} geos={} prepass_cap={} binning_cap={}",
-            total_strands, total_segment_budget, geo_count, prepass_capacity, binning_capacity
+            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} raster_work_cap={}",
+            total_strands,
+            total_segment_budget,
+            geo_count,
+            frustum_descs.len(),
+            prepass_capacity,
+            binning_capacity,
+            froxel_bucket_capacity,
+            raster_work_capacity,
         );
     }
 
@@ -329,12 +408,22 @@ fn use_prepass_buffers(
     if let Some(queue_buf) = &prepass_resources.binning_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
+    if let Some(queue_buf) = &prepass_resources.raster_work_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
     if let Some(indirect) = &prepass_resources.indirect_args {
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
     }
     if let Some(free_heads) = &prepass_resources.free_heads {
         let zero_heads = vec![0u32; BINNING_POOL_NUM_HEADS as usize];
         render_queue.write_buffer(free_heads, 0, bytemuck::cast_slice(&zero_heads));
+    }
+    if let Some(bucket_heads) = &prepass_resources.froxel_bucket_heads {
+        let invalid_heads = vec![u32::MAX; prepass_resources.froxel_bucket_capacity as usize];
+        render_queue.write_buffer(bucket_heads, 0, bytemuck::cast_slice(&invalid_heads));
+    }
+    if let Some(frustum_table) = &prepass_resources.frustum_table {
+        render_queue.write_buffer(frustum_table, 0, bytemuck::cast_slice(&frustum_descs));
     }
 }
 
@@ -491,6 +580,19 @@ struct GpuFroxelConfigStd140 {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct GpuFrustumDesc {
+    screen_width: u32,
+    screen_height: u32,
+    froxel_size_x: u32,
+    froxel_size_y: u32,
+    depth_slices: u32,
+    bucket_base: u32,
+    bucket_count: u32,
+    kind: u32,
 }
 
 pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {

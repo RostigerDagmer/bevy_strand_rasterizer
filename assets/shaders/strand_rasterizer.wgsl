@@ -19,25 +19,14 @@
     PushConstants,
 }
 
+const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
+const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
+const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
+const SIZEOF_GEO: u32 = #SIZEOF_GEO;
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const MAX_TEXTURE_EXT: u32 = #{MAX_TEXTURE_EXTENT};
-const SIZEOF_METADATA: u32 = #{SIZEOF_METADATA};
-const SIZEOF_MATERIAL: u32 = #{SIZEOF_MATERIAL};
-const SIZEOF_GEO: u32 = #{SIZEOF_GEO};
 const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
 const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
-
 var<push_constant> pc: PushConstants;
-@group(#{RASTER_GROUP}) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read> tile_offsets_buffer: array<u32>;
-@group(#{RASTER_GROUP}) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
-@group(#{RASTER_GROUP}) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
-@group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
-@group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
-@group(#{RASTER_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
-@group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
-@group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
-// Disabled for correctness-only raster pass:
-// @group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
 @group(#{BIND_ARRAYS}) @binding(#{INDICES}) var<storage, read_write> indices: binding_array<Indices>;
@@ -50,6 +39,17 @@ var<push_constant> pc: PushConstants;
 @group(#{PAGE_TABLES}) @binding(#{STRAND_METADATA}) var<storage, read_write> t_strand_metadata: array<DevicePtr>;
 @group(#{PAGE_TABLES}) @binding(#{STRAND_MATERIALS}) var<storage, read_write> t_materials: array<DevicePtr>;
 @group(#{PAGE_TABLES}) @binding(#{STRAND_GEOS}) var<storage, read_write> t_geos: array<DevicePtr>;
+
+@group(#{RASTER_GROUP}) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read> tile_offsets_buffer: array<u32>;
+@group(#{RASTER_GROUP}) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read> tile_counts_buffer: array<atomic<u32>>;
+@group(#{RASTER_GROUP}) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read> packed_segments_buffer: array<SegmentRef>; // Read only
+@group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
+@group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
+@group(#{RASTER_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
+@group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
+@group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+// Disabled for correctness-only raster pass:
+// @group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`

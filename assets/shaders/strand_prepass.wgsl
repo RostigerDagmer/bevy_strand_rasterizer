@@ -27,6 +27,9 @@
 #import "shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
+    RasterWorkItem,
+    pack_binning_field,
+    unpack_binning_frustum,
 }
 
 #import "shaders/queues.wgsl"::{
@@ -38,7 +41,28 @@ const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const FINE_WORKGROUP_SIZE: u32 = #FINE_WORKGROUP_SIZE;
 const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
 const SIZEOF_GEO: u32 = #SIZEOF_GEO;
+const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
+const POOL_NUM_HEADS: u32 = #POOL_NUM_HEADS;
+const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
+const INVALID_PTR: u32 = 0xFFFFFFFFu;
 var<push_constant> pc: PushConstants;
+
+struct FrustumDesc {
+    screen_width: u32,
+    screen_height: u32,
+    froxel_size_x: u32,
+    froxel_size_y: u32,
+    depth_slices: u32,
+    bucket_base: u32,
+    bucket_count: u32,
+    kind: u32,
+}
+
+struct RasterWorkQueue {
+    head: atomic<u32>,
+    tail: atomic<u32>,
+    items: array<RasterWorkItem>,
+}
 
 // TODO: adjust allocator api so we can actually bind this as read only where no writes are required.
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
@@ -67,6 +91,11 @@ var<push_constant> pc: PushConstants;
 @group(#{PREPASS_GROUP}) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read_write> tile_offsets_buffer: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{CURRENT_TILE_WRITE_INDICES}) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read_write> packed_segments_buffer: array<SegmentRef>;
+@group(#{PREPASS_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
+@group(#{PREPASS_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read_write> froxel_bucket_heads: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read_write> chunk_pool_words: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
 
 #import "shaders/prefix_sum.wgsl"::{
     get_scan_workgroup_index,
@@ -96,6 +125,84 @@ fn stochastic_cull_camera(cam: View, aabb: Aabb, sample_threshold: f32) -> bool 
 
 fn ceil_div_u32(x: u32, y: u32) -> u32 {
     return (x + y - 1u) / y;
+}
+
+fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
+    return FroxelConfig(
+        desc.screen_width,
+        desc.screen_height,
+        desc.froxel_size_x,
+        desc.froxel_size_y,
+        desc.depth_slices,
+    );
+}
+
+fn chunk_capacity() -> u32 {
+    return arrayLength(&chunk_pool_words) / CHUNK_WORD_STRIDE;
+}
+
+fn alloc_chunk(head_id: u32) -> u32 {
+    let cap = chunk_capacity();
+    if cap == 0u {
+        return INVALID_PTR;
+    }
+    let per_head = max(1u, cap / POOL_NUM_HEADS);
+    let head = head_id % POOL_NUM_HEADS;
+    let local = atomicAdd(&free_heads[head], 1u);
+    if local >= per_head {
+        return INVALID_PTR;
+    }
+    let idx = head * per_head + local;
+    if idx >= cap {
+        return INVALID_PTR;
+    }
+    return idx;
+}
+
+fn chunk_word_base(chunk_idx: u32) -> u32 {
+    return chunk_idx * CHUNK_WORD_STRIDE;
+}
+
+fn chunk_store_next(chunk_idx: u32, next_ptr: u32) {
+    chunk_pool_words[chunk_word_base(chunk_idx)] = next_ptr;
+}
+
+fn chunk_store_count(chunk_idx: u32, count: u32) {
+    chunk_pool_words[chunk_word_base(chunk_idx) + 1u] = count;
+}
+
+fn chunk_store_item(chunk_idx: u32, local_idx: u32, item: u32) {
+    chunk_pool_words[chunk_word_base(chunk_idx) + 2u + local_idx] = item;
+}
+
+fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, seg_idx: u32) {
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let desc = frustum_table[frustum_id];
+    if local_froxel_idx >= desc.bucket_count {
+        return;
+    }
+    let bucket_idx = desc.bucket_base + local_froxel_idx;
+    if bucket_idx >= arrayLength(&froxel_bucket_heads) {
+        return;
+    }
+
+    let work_idx = atomicAdd(&raster_work_queue.tail, 1u);
+    if work_idx >= arrayLength(&raster_work_queue.items) {
+        return;
+    }
+    raster_work_queue.items[work_idx] = RasterWorkItem(seg_idx, frustum_id, local_froxel_idx);
+
+    let chunk_idx = alloc_chunk(bucket_idx ^ seg_idx);
+    if chunk_idx == INVALID_PTR {
+        return;
+    }
+    let prev = atomicExchange(&froxel_bucket_heads[bucket_idx], chunk_idx);
+    chunk_store_next(chunk_idx, prev);
+    chunk_store_count(chunk_idx, 1u);
+    // Payload [0] stores raster_work_queue item index.
+    chunk_store_item(chunk_idx, 0u, work_idx);
 }
 
 fn sgn_i32(f: f32) -> i32 {
@@ -205,8 +312,8 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Camera frustum only for now.
-    let packed_field_camera = 0u;
+    // Camera frustum only for now (frustum_id = 0, level = 0, non-shadow).
+    let packed_field_camera = pack_binning_field(0u, 0u, 0u);
     let segment_count = strand_meta.count - 1u;
 
     for (var i = 0u; i < segment_count; i = i + 1u) {
@@ -372,6 +479,119 @@ fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, cfg: Froxe
     }
 }
 
+fn trace_segment_through_froxels_sparse(
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    cfg: FroxelConfig,
+    frustum_id: u32,
+    seg_idx: u32,
+) {
+    if !isValid(p0) || !isValid(p1) {
+        return;
+    }
+    if p0.x < 0.0 || p1.x < 0.0 {
+        return;
+    }
+
+    let screen = vec2<f32>(f32(cfg.screen_width), f32(cfg.screen_height));
+    let seg_xy_min = min(p0.xy, p1.xy);
+    let seg_xy_max = max(p0.xy, p1.xy);
+    if seg_xy_max.x < 0.0 || seg_xy_max.y < 0.0 || seg_xy_min.x >= screen.x || seg_xy_min.y >= screen.y {
+        return;
+    }
+    let seg_z_min = min(p0.z, p1.z);
+    let seg_z_max = max(p0.z, p1.z);
+    if seg_z_max < 0.0 || seg_z_min > 1.0 {
+        return;
+    }
+
+    let f0 = vec3<i32>(
+        i32(floor(p0.x / f32(cfg.froxel_size_x))),
+        i32(floor(p0.y / f32(cfg.froxel_size_y))),
+        clamp(i32(floor(p0.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
+    );
+    let f1 = vec3<i32>(
+        i32(floor(p1.x / f32(cfg.froxel_size_x))),
+        i32(floor(p1.y / f32(cfg.froxel_size_y))),
+        clamp(i32(floor(p1.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
+    );
+
+    var f = f0;
+    let dir = p1 - p0;
+    let step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z));
+    let froxel_dim = vec3<f32>(
+        f32(cfg.froxel_size_x),
+        f32(cfg.froxel_size_y),
+        1.0 / f32(cfg.depth_slices)
+    );
+    let safe_dir = select(
+        dir,
+        vec3<f32>(1e-6, 1e-6, 1e-6) * vec3<f32>(step),
+        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
+    );
+    let delta_dist = abs(froxel_dim / safe_dir);
+    let fract_p0 = p0 / froxel_dim;
+    var t_max = select(
+        (floor(fract_p0) * froxel_dim - p0) / safe_dir,
+        ((floor(fract_p0) + 1.0) * froxel_dim - p0) / safe_dir,
+        step > vec3(0)
+    );
+    t_max = select(
+        t_max,
+        vec3<f32>(1e38, 1e38, 1e38),
+        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
+    );
+
+    let max_f = vec3<i32>(
+        i32((cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x),
+        i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y),
+        i32(cfg.depth_slices)
+    );
+    let num_tiles_x = (cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x;
+    let num_tiles_y = (cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y;
+
+    var safety = 0u;
+    let max_steps = u32(max_f.x + max_f.y + max_f.z + 3);
+
+    loop {
+        safety = safety + 1u;
+        if safety > max_steps {
+            break;
+        }
+
+        if in_bounds(f, max_f) {
+            let fx = u32(f.x);
+            let fy = u32(f.y);
+            let fz = u32(f.z);
+            if !add_segment_ref_to_froxel(fx, fy, fz, cfg) {
+                break;
+            }
+            let froxel_idx = (fz * num_tiles_y + fy) * num_tiles_x + fx;
+            append_sparse_froxel_ref(frustum_id, froxel_idx, seg_idx);
+        } else {
+            break;
+        }
+
+        if all(f == f1) {
+            break;
+        }
+
+        let a_min = canonical_min_mask(t_max);
+        let fd = select(vec3<i32>(0), step, a_min);
+        let dist = select(vec3<f32>(0), delta_dist, a_min);
+        f += fd;
+        t_max += dist;
+
+        let pos_step = step > vec3(0);
+        let neg_step = step < vec3(0);
+        let g_f1 = f > f1;
+        let l_f1 = f < f1;
+        if any(l_and(pos_step, g_f1)) || any(l_and(neg_step, l_f1)) {
+            break;
+        }
+    }
+}
+
 fn trace_segment_through_froxels_linear_place(
     p0: vec3<f32>,
     p1: vec3<f32>,
@@ -486,6 +706,12 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let task = binning_queue.tasks[task_idx];
+    let frustum_id = unpack_binning_frustum(task.packed_field);
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    let frustum_cfg = frustum_to_config(frustum);
     let inst_id = task.id_info;
     if inst_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&t_indices) || inst_id >= arrayLength(&t_geos) {
         return;
@@ -521,21 +747,27 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p0 = world_to_screen(
         p0_world,
         clip_from_world,
-        f32(config.screen_width),
-        f32(config.screen_height),
+        f32(frustum_cfg.screen_width),
+        f32(frustum_cfg.screen_height),
         aabb_znear_zfar,
     );
     let p1 = world_to_screen(
         p1_world,
         clip_from_world,
-        f32(config.screen_width),
-        f32(config.screen_height),
+        f32(frustum_cfg.screen_width),
+        f32(frustum_cfg.screen_height),
         aabb_znear_zfar,
     );
 
-    // First non-placeholder queue binning path:
-    // consume BinningTask and directly emit leaf occupancy.
-    trace_segment_through_froxels_linear(p0, p1, config);
+    // Sparse queue binning path:
+    // consume BinningTask and append leaf references into froxel bucket chains.
+    trace_segment_through_froxels_sparse(
+        p0,
+        p1,
+        frustum_cfg,
+        frustum_id,
+        task.seg_idx,
+    );
 }
 
 @compute @workgroup_size(SCAN_THREADS, 1, 1)

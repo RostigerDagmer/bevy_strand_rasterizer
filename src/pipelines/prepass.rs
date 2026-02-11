@@ -3,6 +3,7 @@ use crate::{
     pipelines::layouts,
     resources::ComputeInvocationDims,
     shader_types::{PushConstants, StrandGeo, StrandMeta},
+    pipelines::task_contract::{BINNING_POOL_CHUNK_SIZE, BINNING_POOL_NUM_HEADS},
 };
 use bevy::{
     pbr::ViewLightsUniformOffset,
@@ -32,10 +33,16 @@ pub struct StrandPrepassResources {
     // queue-binning allocator buffers
     pub chunk_pool: Option<Buffer>,
     pub free_heads: Option<Buffer>,
+    pub frustum_table: Option<Buffer>,
+    pub froxel_bucket_heads: Option<Buffer>,
+    pub raster_work_queue: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
     pub geo_capacity: u32,
+    pub frustum_capacity: u32,
+    pub froxel_bucket_capacity: u32,
+    pub raster_work_capacity: u32,
 }
 
 #[derive(Resource)]
@@ -100,6 +107,11 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::TILE_OFFSETS_BUFFER, false),
                 Self::storage_entry(layouts::prepass::CURRENT_TILE_WRITE_INDICES, false),
                 Self::storage_entry(layouts::prepass::FROXEL_TILE_BUFFER, false),
+                Self::storage_entry(layouts::prepass::FRUSTUM_TABLE, true),
+                Self::storage_entry(layouts::prepass::FROXEL_BUCKET_HEADS, false),
+                Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
+                Self::storage_entry(layouts::prepass::FREE_HEADS, false),
+                Self::storage_entry(layouts::prepass::RASTER_WORK_QUEUE, false),
             ],
         )
     }
@@ -143,6 +155,8 @@ fn queue_prepass_pipeline(
             std::mem::size_of::<StrandMeta>() as u32,
         ),
         ShaderDefVal::UInt("SIZEOF_GEO".into(), std::mem::size_of::<StrandGeo>() as u32),
+        ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
+        ShaderDefVal::UInt("POOL_NUM_HEADS".into(), BINNING_POOL_NUM_HEADS),
     ]);
 
     let max_group = allocator
@@ -217,6 +231,11 @@ pub fn create_prepass_bind_group(
     let visible_geos_buffer = resources.visible_geos_buffer.as_ref().ok_or(())?;
     let geos_prefix_buffer = resources.geos_prefix_buffer.as_ref().ok_or(())?;
     let dispatch_args = resources.indirect_args.as_ref().ok_or(())?;
+    let frustum_table = resources.frustum_table.as_ref().ok_or(())?;
+    let froxel_bucket_heads = resources.froxel_bucket_heads.as_ref().ok_or(())?;
+    let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
+    let free_heads = resources.free_heads.as_ref().ok_or(())?;
+    let raster_work_queue = resources.raster_work_queue.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -286,6 +305,26 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::FROXEL_TILE_BUFFER,
                     resource: froxel_tile_buffer.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FRUSTUM_TABLE,
+                    resource: frustum_table.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FROXEL_BUCKET_HEADS,
+                    resource: froxel_bucket_heads.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::CHUNK_POOL,
+                    resource: chunk_pool.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FREE_HEADS,
+                    resource: free_heads.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::RASTER_WORK_QUEUE,
+                    resource: raster_work_queue.as_entire_binding(),
                 },
             ],
         ),

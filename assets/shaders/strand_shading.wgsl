@@ -32,6 +32,8 @@
     world_to_screen_aabbnorm
 }
 
+const SQRT_2_PI = SQRT_2_PI;
+
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 
