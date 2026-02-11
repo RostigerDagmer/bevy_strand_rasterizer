@@ -17,6 +17,8 @@ pub mod prepass {
     pub const VISIBLE_GEO: u32 = 12;
     pub const GEO_PREFIX: u32 = 13;
     pub const INDIRECT_BUFFER: u32 = 15;
+    pub const TILE_COUNTS_BUFFER: u32 = 16;
+    pub const FROXEL_CONFIG: u32 = 17;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -38,6 +40,8 @@ pub mod prepass {
             ShaderDefVal::UInt("VISIBLE_GEO".into(), VISIBLE_GEO),
             ShaderDefVal::UInt("GEO_PREFIX".into(), GEO_PREFIX),
             ShaderDefVal::UInt("INDIRECT_BUFFER".into(), INDIRECT_BUFFER),
+            ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
+            ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
         ]
     }
 }
@@ -236,4 +240,20 @@ pub mod shading {
 pub mod post_process {
     pub const INPUT_TEXTURE: u32 = 0;
     pub const PARAMS_BUFFER: u32 = 1;
+}
+
+pub mod tile_debug {
+    use bevy::shader::ShaderDefVal;
+
+    pub const TILE_COUNTS_BUFFER: u32 = 0;
+    pub const FROXEL_CONFIG: u32 = 1;
+    pub const PARAMS: u32 = 2;
+
+    pub fn shader_defs() -> Vec<ShaderDefVal> {
+        vec![
+            ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
+            ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
+            ShaderDefVal::UInt("PARAMS".into(), PARAMS),
+        ]
+    }
 }

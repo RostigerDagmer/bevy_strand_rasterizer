@@ -511,6 +511,7 @@ pub fn run_raster_pass(
             workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
             scan_load_base: 0,
             scan_save_base: 0,
+            ..Default::default()
         };
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 

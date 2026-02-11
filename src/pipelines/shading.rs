@@ -452,6 +452,7 @@ pub fn run_shading_pass(
             workgroup_offset: resources.max_segments_in_strand.unwrap_or(0),
             scan_load_base: 0,
             scan_save_base: 0,
+            ..Default::default()
         };
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 

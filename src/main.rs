@@ -7,6 +7,7 @@ use dson::*;
 mod components;
 use components::*;
 mod resources;
+use resources::{StochasticCullSettings, TileDebugSettings};
 use plugin::StrandRasterizerPlugin;
 mod perf;
 mod pipelines;
@@ -124,7 +125,12 @@ fn setup(
 }
 
 /// The egui panel that edits all StrandMaterial components in the world.
-fn strand_material_ui_system(mut contexts: EguiContexts, mut query: Query<&mut StrandMaterial>) {
+fn strand_material_ui_system(
+    mut contexts: EguiContexts,
+    mut query: Query<&mut StrandMaterial>,
+    mut tile_debug: ResMut<TileDebugSettings>,
+    mut stochastic_cull: ResMut<StochasticCullSettings>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -132,6 +138,28 @@ fn strand_material_ui_system(mut contexts: EguiContexts, mut query: Query<&mut S
         .default_width(300.0)
         .show(ctx, |ui| {
             for mut mat in query.iter_mut() {
+                ui.separator();
+                ui.label("Tile Occupancy Debug");
+                ui.checkbox(&mut tile_debug.enabled, "Enable Heatmap Overlay");
+                ui.add(egui::Slider::new(&mut tile_debug.gain, 0.1..=32.0).text("Heatmap Gain"));
+                ui.add(egui::Slider::new(&mut tile_debug.alpha, 0.0..=1.0).text("Heatmap Alpha"));
+                ui.separator();
+                ui.label("Stochastic Culling");
+                ui.checkbox(&mut stochastic_cull.enabled, "Enable Stochastic Culling");
+                ui.add(
+                    egui::Slider::new(&mut stochastic_cull.min_dist, 0.0..=300.0)
+                        .text("Cull Min Dist"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut stochastic_cull.max_dist, 0.001..=500.0)
+                        .text("Cull Max Dist"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut stochastic_cull.exponent, 0.01..=2.0)
+                        .text("Cull Exponent"),
+                );
+                ui.separator();
+
                 // --- Absorption Color ---
                 let mut ab = [
                     mat.absorption_color.x,

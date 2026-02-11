@@ -43,7 +43,7 @@ fn find_clip_bounds(clip_from_world: mat4x4<f32>, world_aabb_min: vec3<f32>, wor
     for (var i = 0u; i < 8u; i = i + 1u) {
         let clip_pos = clip_from_world * corners[i];
         // For orthographic projections, w will usually be 1.0;
-        if (clip_pos.w > 0.0) {
+        if clip_pos.w > 0.0 {
             let view_pos = clip_pos.xyz / clip_pos.w;
             min_clip = min(min_clip, view_pos);
             max_clip = max(max_clip, view_pos);
@@ -108,7 +108,7 @@ fn world_to_screen_aabbnorm(position: vec4<f32>, clip_from_world: mat4x4<f32>, s
 
     // Check if the point is behind the camera (w <= 0 typically indicates this)
     // Using a small epsilon might be safer depending on the projection matrix, but w < 0 is common.
-    if (clip_pos.w <= 0.0) {
+    if clip_pos.w <= 0.0 {
         // Point is behind the camera or exactly on the near plane in a way that causes issues.
         return vec3<f32>(-1.0, -1.0, -1.0); // Indicate an invalid screen position
     }
@@ -160,13 +160,13 @@ fn screen_to_world(
     aabb_znear_zfar: vec2<f32>,      // (z_near, z_far)
 ) -> vec3<f32> {
     // 1) Unpack viewport & near/far
-    let screen_width  = view.viewport.z;
+    let screen_width = view.viewport.z;
     let screen_height = view.viewport.w;
     let z_near = aabb_znear_zfar.x;
-    let z_far  = aabb_znear_zfar.y;
+    let z_far = aabb_znear_zfar.y;
 
     // 2) Reconstruct NDC x/y from screen coords
-    let ndc_x = (screen_pos.x / screen_width)  * 2.0 - 1.0;
+    let ndc_x = (screen_pos.x / screen_width) * 2.0 - 1.0;
     let ndc_y = 1.0 - (screen_pos.y / screen_height) * 2.0;
     let ndc_z = (1.0 - screen_pos.z) * (z_far - z_near) + z_near;
 
@@ -253,5 +253,8 @@ fn canonical_min_mask(v: vec3<f32>) -> vec3<bool> {
         vec3(true, false, false),
         is_min.x
     );
+}
 
-  }
+fn l_and(v1: vec3<bool>, v2: vec3<bool>) -> vec3<bool> {
+    return vec3<bool>(v1.x && v2.x, v1.y && v2.y, v1.z && v2.z);
+}

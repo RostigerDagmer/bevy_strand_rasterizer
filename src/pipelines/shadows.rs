@@ -614,6 +614,7 @@ pub fn run_shadow_pass(
             workgroup_offset: 0, // TODO: maybe its time to make this its own field
             scan_load_base: 0,
             scan_save_base: 0,
+            ..Default::default()
         };
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 

@@ -8,3 +8,4 @@ pub mod shading;
 pub mod shadows;
 pub mod sim;
 pub mod task_contract;
+pub mod tile_debug;

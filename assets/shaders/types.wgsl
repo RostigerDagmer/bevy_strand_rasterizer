@@ -75,5 +75,8 @@ struct PushConstants {
     num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
     scan_load_base: u32,
     scan_save_base: u32,
-    // Add other needed constants
+    stochastic_cull_enabled: u32,
+    cull_min_dist: f32,
+    cull_max_dist: f32,
+    cull_exponent: f32,
 }

@@ -90,6 +90,8 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::VISIBLE_GEO, false),
                 Self::storage_entry(layouts::prepass::GEO_PREFIX, false),
                 Self::storage_entry(layouts::prepass::INDIRECT_BUFFER, false),
+                Self::storage_entry(layouts::prepass::TILE_COUNTS_BUFFER, false),
+                Self::uniform_entry(layouts::prepass::FROXEL_CONFIG, false),
             ],
         )
     }
@@ -185,6 +187,8 @@ pub fn create_prepass_bind_group(
     cluster_indices: &BindingResource,
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
+    tile_counts: &BindingResource,
+    froxel_config: &BindingResource,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
@@ -243,6 +247,14 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::INDIRECT_BUFFER,
                     resource: dispatch_args.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::TILE_COUNTS_BUFFER,
+                    resource: tile_counts.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FROXEL_CONFIG,
+                    resource: froxel_config.clone().into_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -256,6 +268,7 @@ pub fn run_prepass(
     pipeline: &StrandPrepassPipeline,
     allocator: &GpuPagingAllocator,
     settings: &ComputeInvocationDims,
+    cull_settings: &crate::resources::StochasticCullSettings,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
@@ -270,10 +283,6 @@ pub fn run_prepass(
         return;
     };
 
-    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("Strand Prepass"),
-        ..default()
-    });
     let Some(broad_pipeline_id) = pipeline.broad_pipeline else {
         warn!("Broad prepass pipeline id not ready yet");
         return;
@@ -317,7 +326,19 @@ pub fn run_prepass(
         return;
     };
 
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("Strand Prepass"),
+        ..default()
+    });
+    let pushconstants = PushConstants {
+        stochastic_cull_enabled: u32::from(cull_settings.enabled),
+        cull_min_dist: cull_settings.min_dist,
+        cull_max_dist: cull_settings.max_dist,
+        cull_exponent: cull_settings.exponent,
+        ..Default::default()
+    };
     pass.set_pipeline(broad_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
     pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
     pass.set_bind_group(
         allocator.table_group_idx,

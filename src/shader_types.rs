@@ -4,7 +4,7 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-#[derive(Copy, Clone, Pod, Zeroable, Debug)]
+#[derive(Copy, Clone, Pod, Zeroable, Debug, Default)]
 #[repr(C)]
 pub struct PushConstants {
     // pub strand_count: u32, // stub in case we need push constants
@@ -12,6 +12,10 @@ pub struct PushConstants {
     pub num_elements: u32,     // Generic count (e.g., num_strands or num_tiles)
     pub scan_load_base: u32,
     pub scan_save_base: u32,
+    pub stochastic_cull_enabled: u32,
+    pub cull_min_dist: f32,
+    pub cull_max_dist: f32,
+    pub cull_exponent: f32,
 }
 
 #[derive(Debug, Clone, ShaderType)]

@@ -1,6 +1,7 @@
 use crate::shader_types::PushConstants;
 use bevy::{
     prelude::*,
+    render::extract_resource::ExtractResource,
     render::render_resource::{BindGroup, Buffer},
 };
 use std::collections::HashMap;
@@ -44,6 +45,42 @@ impl Default for ComputeInvocationDims {
             threads_per_workgroup: 256,
             subgroup_size: 32,
             dispatch_size: (16384, 1, 1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Resource, Reflect, ExtractResource)]
+pub struct TileDebugSettings {
+    pub enabled: bool,
+    pub gain: f32,
+    pub alpha: f32,
+}
+
+impl Default for TileDebugSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            gain: 8.0,
+            alpha: 0.35,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Resource, Reflect, ExtractResource)]
+pub struct StochasticCullSettings {
+    pub enabled: bool,
+    pub min_dist: f32,
+    pub max_dist: f32,
+    pub exponent: f32,
+}
+
+impl Default for StochasticCullSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_dist: 12.0,
+            max_dist: 100.0,
+            exponent: 0.15,
         }
     }
 }

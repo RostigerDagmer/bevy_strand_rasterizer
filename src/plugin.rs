@@ -10,6 +10,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSystems,
         extract_component::ExtractComponentPlugin,
+        extract_resource::ExtractResourcePlugin,
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
         render_resource::{
             BindGroupLayout, Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId,
@@ -27,7 +28,7 @@ use crate::{
     dson::DsonAsset,
     pipelines::{
         binning::*, composite::*, prepass::*, raster::*, shading::*, shadows::*,
-        sim::StrandSimulatorResources, task_contract::QUEUE_HEADER_WORDS,
+        sim::StrandSimulatorResources, task_contract::QUEUE_HEADER_WORDS, tile_debug::*,
     },
     resources::*,
     shader_types::*,
@@ -133,8 +134,12 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
             ExtractComponentPlugin::<StrandMaterial>::default(),
+            ExtractResourcePlugin::<TileDebugSettings>::default(),
+            ExtractResourcePlugin::<StochasticCullSettings>::default(),
             GpuPagingAllocatorPlugin,
         ));
+        app.init_resource::<TileDebugSettings>();
+        app.init_resource::<StochasticCullSettings>();
         app.init_resource::<StrandAssetResources>();
         app.add_systems(
             Update,
@@ -169,6 +174,7 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<ComputeInvocationDims>();
         render_app.init_resource::<StrandPrepassPipeline>();
         render_app.init_resource::<CompositionPipeline>();
+        render_app.init_resource::<TileDebugPipeline>();
         render_app.init_resource::<AllocatorDebugPipeline>();
         render_app.add_systems(
             Render,
@@ -193,6 +199,7 @@ impl Plugin for StrandRasterizerPlugin {
         render_app
             // .add_render_graph_node::<AllocatorDebugNode>(Core3d, AllocatorDebugLabel)
             .add_render_graph_node::<WorkPreparationNode>(Core3d, WorkPreparationLabel)
+            .add_render_graph_node::<TileDebugNode>(Core3d, TileDebugLabel)
             // .add_render_graph_node::<StrandRasterizerNode>(Core3d, StrandRasterizerLabel)
             // .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
             // .add_render_graph_node::<StrandShadowRasterizerNode>(
@@ -220,9 +227,10 @@ impl Plugin for StrandRasterizerPlugin {
             )
             // .add_render_graph_edge(Core3d, AllocatorDebugLabel, CompositionLabel)
             .add_render_graph_edge(Core3d, WorkPreparationLabel, CompositionLabel)
+            .add_render_graph_edge(Core3d, CompositionLabel, TileDebugLabel)
             .add_render_graph_edge(
                 Core3d,
-                CompositionLabel, // Run after composition
+                TileDebugLabel, // Run after composition
                 bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing, // Before standard post-processing
             );
     }
@@ -236,9 +244,12 @@ fn use_prepass_buffers(
     mut raster_resources: ResMut<StrandRasterizerResources>,
 ) {
     let mut total_strands = 0u32;
+    let mut total_segment_budget = 0u32;
     let mut geo_count = 0u32;
     for geom in &geometry_query {
         total_strands = total_strands.saturating_add(geom.strand_count);
+        total_segment_budget = total_segment_budget
+            .saturating_add(geom.strand_count.saturating_mul(geom.max_segments_in_strand));
         geo_count = geo_count.saturating_add(1);
     }
 
@@ -249,7 +260,7 @@ fn use_prepass_buffers(
     raster_resources.strand_count = Some(total_strands);
 
     let prepass_capacity = total_strands.next_power_of_two().max(1024);
-    let binning_capacity = prepass_capacity;
+    let binning_capacity = total_segment_budget.next_power_of_two().max(prepass_capacity);
     let geo_capacity = geo_count.next_power_of_two().max(1024);
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
@@ -330,8 +341,8 @@ fn use_prepass_buffers(
         prepass_resources.geo_capacity = geo_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} geos={} prepass_cap={} binning_cap={}",
-            total_strands, geo_count, prepass_capacity, binning_capacity
+            "Allocated prepass buffers: strands={} segment_budget={} geos={} prepass_cap={} binning_cap={}",
+            total_strands, total_segment_budget, geo_count, prepass_capacity, binning_capacity
         );
     }
 
@@ -373,7 +384,10 @@ impl Node for WorkPreparationNode {
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
+        let binning_buffers = world.resource::<StrandBinningBuffers>();
+        let raster_resources = world.resource::<StrandRasterizerResources>();
         let invocation_dims = world.resource::<ComputeInvocationDims>();
+        let cull_settings = world.resource::<StochasticCullSettings>();
         let view_uniforms = world.resource::<ViewUniforms>();
         let light_meta = world.resource::<LightMeta>();
         let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -416,6 +430,17 @@ impl Node for WorkPreparationNode {
         else {
             return Ok(());
         };
+        let Some(artifacts) = binning_buffers.artifacts.get(&view_entity) else {
+            return Ok(());
+        };
+        let Some(froxel_config) = raster_resources.froxel_config_buffer.get(&view_entity) else {
+            return Ok(());
+        };
+        render_context
+            .command_encoder()
+            .clear_buffer(&artifacts.tile_counts_buffer, 0, None);
+        let tile_counts_binding = artifacts.tile_counts_buffer.as_entire_binding();
+        let froxel_config_binding = froxel_config.as_entire_binding();
 
         let Ok((prepass_bind_group, dynamic_offsets)) = create_prepass_bind_group(
             render_device,
@@ -428,6 +453,8 @@ impl Node for WorkPreparationNode {
             &cluster_indices_binding,
             &cluster_offsets_binding,
             &clusterable_objects,
+            &tile_counts_binding,
+            &froxel_config_binding,
         ) else {
             warn!("Failed to create prepass bind groups.");
             return Ok(());
@@ -442,6 +469,7 @@ impl Node for WorkPreparationNode {
             prepass_pipeline,
             allocator,
             invocation_dims,
+            cull_settings,
             &prepass_bind_group,
             &dynamic_offsets,
             indirect_args,
