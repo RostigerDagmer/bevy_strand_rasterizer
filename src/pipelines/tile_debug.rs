@@ -16,8 +16,7 @@ use bevy::{
 };
 
 use crate::{
-    pipelines::{binning::StrandBinningBuffers, layouts, raster::StrandRasterizerResources},
-    resources::TileDebugSettings,
+    pipelines::layouts,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -27,7 +26,7 @@ pub struct TileDebugParams {
     pub inv_norm: f32,
     pub gain: f32,
     pub alpha: f32,
-    pub _pad: f32,
+    pub frustum_id: u32,
 }
 
 #[derive(Resource)]
@@ -45,7 +44,7 @@ impl FromWorld for TileDebugPipeline {
             "tile_debug_layout",
             &[
                 BindGroupLayoutEntry {
-                    binding: layouts::tile_debug::TILE_COUNTS_BUFFER,
+                    binding: layouts::tile_debug::FRUSTUM_TABLE,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -55,10 +54,20 @@ impl FromWorld for TileDebugPipeline {
                     count: None,
                 },
                 BindGroupLayoutEntry {
-                    binding: layouts::tile_debug::FROXEL_CONFIG,
+                    binding: layouts::tile_debug::FROXEL_BUCKET_HEADS,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::tile_debug::CHUNK_POOL,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

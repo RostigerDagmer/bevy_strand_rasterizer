@@ -23,9 +23,7 @@ use crate::{
     shader_types::PushConstants,
 };
 
-use super::{
-    binning::StrandBinningBuffers, prepass::StrandPrepassResources, shading::StrandShadingResources,
-};
+use super::{prepass::StrandPrepassResources, shading::StrandShadingResources};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -52,39 +50,6 @@ impl StrandRasterizerPipeline {
         device.create_bind_group_layout(
             "strand_rasterizer_bind_group_layout",
             &[
-                // Tile offsets buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Tile counts buffer (for debug; read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Froxel buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
                 // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::OUTPUT_TEXTURE,
@@ -320,7 +285,6 @@ pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
-    buffers: &StrandBinningBuffers,
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -328,13 +292,9 @@ pub fn create_strand_raster_bind_group(
     view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
-    let packed_segments = resources.froxel_buffer.get(entity).ok_or(())?;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
     let output_depth = resources.output_depth.as_ref().ok_or(())?;
     let froxel_config_buffer = resources.froxel_config_buffer.get(entity).ok_or(())?;
-    let artifacts = buffers.artifacts.get(entity).ok_or(())?;
-    let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
-    let tile_counts_buffer = &artifacts.tile_counts_buffer;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
@@ -345,18 +305,6 @@ pub fn create_strand_raster_bind_group(
             Some("strand_rasterizer_bind_group"),
             layout,
             &[
-                BindGroupEntry {
-                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
-                    resource: tile_offsets_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
-                    resource: tile_counts_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
-                    resource: packed_segments.as_entire_binding(),
-                },
                 BindGroupEntry {
                     binding: layouts::rasterizer::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),

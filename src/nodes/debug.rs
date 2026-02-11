@@ -14,8 +14,8 @@ use wgpu::{
 
 use crate::{
     pipelines::{
-        binning::StrandBinningBuffers,
         layouts,
+        prepass::StrandPrepassResources,
         raster::StrandRasterizerResources,
         tile_debug::{TileDebugParams, TileDebugPipeline},
     },
@@ -46,14 +46,27 @@ impl Node for TileDebugNode {
         };
 
         let raster_resources = world.resource::<StrandRasterizerResources>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>();
+        let prepass_resources = world.resource::<StrandPrepassResources>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline_res = world.resource::<TileDebugPipeline>();
 
-        let Some(artifacts) = binning_buffers.artifacts.get(&view_entity) else {
+        let Some(frustum_table) = prepass_resources.frustum_table.as_ref() else {
             return Ok(());
         };
-        let Some(froxel_config) = raster_resources.froxel_config_buffer.get(&view_entity) else {
+        let Some(froxel_bucket_heads) = prepass_resources.froxel_bucket_heads.as_ref() else {
+            return Ok(());
+        };
+        let Some(chunk_pool) = prepass_resources.chunk_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let mut frusta: Vec<_> = raster_resources.frustrum_config.keys().copied().collect();
+        frusta.sort_by_key(|e| e.index());
+        let Some(frustum_id) = frusta
+            .iter()
+            .position(|entity| *entity == view_entity)
+            .map(|idx| idx as u32)
+        else {
             return Ok(());
         };
 
@@ -66,7 +79,7 @@ impl Node for TileDebugNode {
             inv_norm: 1.0 / norm,
             gain: settings.gain,
             alpha: settings.alpha,
-            _pad: 0.0,
+            frustum_id,
         };
         let params_buffer =
             render_context
@@ -82,12 +95,16 @@ impl Node for TileDebugNode {
             &pipeline_res.layout,
             &[
                 BindGroupEntry {
-                    binding: layouts::tile_debug::TILE_COUNTS_BUFFER,
-                    resource: artifacts.tile_counts_buffer.as_entire_binding(),
+                    binding: layouts::tile_debug::FRUSTUM_TABLE,
+                    resource: frustum_table.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::tile_debug::FROXEL_CONFIG,
-                    resource: froxel_config.as_entire_binding(),
+                    binding: layouts::tile_debug::FROXEL_BUCKET_HEADS,
+                    resource: froxel_bucket_heads.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::tile_debug::CHUNK_POOL,
+                    resource: chunk_pool.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::tile_debug::PARAMS,

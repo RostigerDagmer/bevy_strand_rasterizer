@@ -12,7 +12,6 @@ use bevy::{
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::pipelines::{
-    binning::StrandBinningBuffers,
     prepass::StrandPrepassResources,
     raster::{
         StrandRasterizerPipeline, StrandRasterizerResources, create_strand_raster_bind_group,
@@ -46,7 +45,6 @@ impl Node for StrandRasterizerNode {
         // let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
         let allocator = world.resource::<GpuPagingAllocator>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
@@ -101,7 +99,6 @@ impl Node for StrandRasterizerNode {
             render_device,
             &raster_pipeline,
             &raster_resources,
-            &binning_buffers,
             &prepass_resources,
             &view_binding,
             &light_binding,

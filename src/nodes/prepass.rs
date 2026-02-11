@@ -13,11 +13,9 @@ use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::{
     pipelines::{
-        binning::StrandBinningBuffers,
         prepass::{
             StrandPrepassPipeline, StrandPrepassResources, create_prepass_bind_group, run_prepass,
         },
-        raster::StrandRasterizerResources,
     },
     resources::{ComputeInvocationDims, StochasticCullSettings},
 };
@@ -42,8 +40,6 @@ impl Node for WorkPreparationNode {
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>();
-        let raster_resources = world.resource::<StrandRasterizerResources>();
         let invocation_dims = world.resource::<ComputeInvocationDims>();
         let cull_settings = world.resource::<StochasticCullSettings>();
         let view_uniforms = world.resource::<ViewUniforms>();
@@ -88,27 +84,6 @@ impl Node for WorkPreparationNode {
         else {
             return Ok(());
         };
-        let Some(artifacts) = binning_buffers.artifacts.get(&view_entity) else {
-            return Ok(());
-        };
-        let Some(froxel_config_buf) = raster_resources.froxel_config_buffer.get(&view_entity)
-        else {
-            return Ok(());
-        };
-        let Some(froxel_config) = raster_resources.frustrum_config.get(&view_entity) else {
-            return Ok(());
-        };
-        render_context
-            .command_encoder()
-            .clear_buffer(&artifacts.tile_counts_buffer, 0, None);
-        let tile_counts_binding = artifacts.tile_counts_buffer.as_entire_binding();
-        let froxel_config_binding = froxel_config_buf.as_entire_binding();
-        let tile_offsets_binding = artifacts.tile_offsets_buffer.as_entire_binding();
-        let current_tile_write_indices_binding = artifacts
-            .current_tile_write_indices_buffer
-            .as_entire_binding();
-        let froxel_tile_binding = artifacts.packed_segments_buffer.as_entire_binding();
-
         let Ok((prepass_bind_group, dynamic_offsets)) = create_prepass_bind_group(
             render_device,
             prepass_pipeline,
@@ -120,11 +95,6 @@ impl Node for WorkPreparationNode {
             &cluster_indices_binding,
             &cluster_offsets_binding,
             &clusterable_objects,
-            &tile_counts_binding,
-            &froxel_config_binding,
-            &tile_offsets_binding,
-            &current_tile_write_indices_binding,
-            &froxel_tile_binding,
         ) else {
             warn!("Failed to create prepass bind groups.");
             return Ok(());
@@ -139,7 +109,6 @@ impl Node for WorkPreparationNode {
             prepass_pipeline,
             allocator,
             invocation_dims,
-            froxel_config,
             cull_settings,
             &prepass_bind_group,
             &dynamic_offsets,

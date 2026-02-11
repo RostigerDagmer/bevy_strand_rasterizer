@@ -4,7 +4,6 @@
 #import "shaders/common.wgsl"::{
     find_clip_bounds,
     world_to_screen,
-    calculate_froxel_index,
     canonical_min_mask,
     wang_hash,
     hash_to_unit_float,
@@ -20,7 +19,6 @@
     Meta,
     StrandGeo,
     FroxelConfig,
-    SegmentRef,
     PushConstants,
 }
 
@@ -86,27 +84,11 @@ struct RasterWorkQueue {
 @group(#{PREPASS_GROUP}) @binding(#{VISIBLE_GEO}) var<storage, read_write> visible_geos: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{GEO_PREFIX}) var<storage, read_write> geo_prefix: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{INDIRECT_BUFFER}) var<storage, read_write> dispatch_args: array<u32, 3u>;
-@group(#{PREPASS_GROUP}) @binding(#{TILE_COUNTS_BUFFER}) var<storage, read_write> tile_counts_buffer: array<atomic<u32>>;
-@group(#{PREPASS_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
-@group(#{PREPASS_GROUP}) @binding(#{TILE_OFFSETS_BUFFER}) var<storage, read_write> tile_offsets_buffer: array<u32>;
-@group(#{PREPASS_GROUP}) @binding(#{CURRENT_TILE_WRITE_INDICES}) var<storage, read_write> current_tile_write_indices_buffer: array<atomic<u32>>;
-@group(#{PREPASS_GROUP}) @binding(#{FROXEL_TILE_BUFFER}) var<storage, read_write> packed_segments_buffer: array<SegmentRef>;
 @group(#{PREPASS_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
 @group(#{PREPASS_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read_write> froxel_bucket_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read_write> chunk_pool_words: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
-
-#import "shaders/prefix_sum.wgsl"::{
-    get_scan_workgroup_index,
-    workgroup_inclusive_scan_blelloch,
-    workgroup_exclusive_scan,
-    SCAN_THREADS,
-    SCAN_SUBGROUP_THREADS,
-    SCAN_SUBGROUPS,
-    subgroup_partials,
-    wg_scan_storage
-}
 
 fn is_valid_ptr(_ptr: DevicePtr) -> bool {
     return _ptr.slab != 0xFFFFFFFFu;
@@ -331,34 +313,6 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 
-fn add_segment_ref_to_froxel(froxel_x: u32, froxel_y: u32, froxel_z: u32, cfg: FroxelConfig) -> bool {
-    let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
-    if froxel_idx < arrayLength(&tile_counts_buffer) {
-        atomicAdd(&tile_counts_buffer[froxel_idx], 1u);
-        return true;
-    }
-    return false;
-}
-
-fn add_segment_to_packed_froxel(
-    froxel_x: u32,
-    froxel_y: u32,
-    froxel_z: u32,
-    seg_ref: SegmentRef,
-    cfg: FroxelConfig,
-) -> bool {
-    let froxel_idx = calculate_froxel_index(froxel_x, froxel_y, froxel_z, cfg);
-    if froxel_idx >= arrayLength(&current_tile_write_indices_buffer) {
-        return false;
-    }
-    let write_index = atomicAdd(&current_tile_write_indices_buffer[froxel_idx], 1u);
-    if write_index >= arrayLength(&packed_segments_buffer) {
-        return false;
-    }
-    packed_segments_buffer[write_index] = seg_ref;
-    return true;
-}
-
 // Returns true if the float is NaN
 fn isNan(val: f32) -> bool {
     let u_val = bitcast<u32>(val);
@@ -376,107 +330,6 @@ fn isInf(val: f32) -> bool {
 // Helper: Check a vec3 for any bad values
 fn isValid(v: vec3<f32>) -> bool {
     return !(isNan(v.x) || isNan(v.y) || isNan(v.z) || isInf(v.x) || isInf(v.y) || isInf(v.z));
-}
-
-fn trace_segment_through_froxels_linear(p0: vec3<f32>, p1: vec3<f32>, cfg: FroxelConfig) {
-    if !isValid(p0) || !isValid(p1) {
-        return;
-    }
-    if p0.x < 0.0 || p1.x < 0.0 {
-        return;
-    }
-
-    let screen = vec2<f32>(f32(cfg.screen_width), f32(cfg.screen_height));
-    let seg_xy_min = min(p0.xy, p1.xy);
-    let seg_xy_max = max(p0.xy, p1.xy);
-    // Segment does not touch the raster screen rect in XY.
-    if seg_xy_max.x < 0.0 || seg_xy_max.y < 0.0 || seg_xy_min.x >= screen.x || seg_xy_min.y >= screen.y {
-        return;
-    }
-    let seg_z_min = min(p0.z, p1.z);
-    let seg_z_max = max(p0.z, p1.z);
-    // Segment does not touch normalized [0,1] depth interval.
-    if seg_z_max < 0.0 || seg_z_min > 1.0 {
-        return;
-    }
-
-    let f0 = vec3<i32>(
-        i32(floor(p0.x / f32(cfg.froxel_size_x))),
-        i32(floor(p0.y / f32(cfg.froxel_size_y))),
-        clamp(i32(floor(p0.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
-    );
-    let f1 = vec3<i32>(
-        i32(floor(p1.x / f32(cfg.froxel_size_x))),
-        i32(floor(p1.y / f32(cfg.froxel_size_y))),
-        clamp(i32(floor(p1.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
-    );
-
-    var f = f0;
-    let dir = p1 - p0;
-    let step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z));
-    let froxel_dim = vec3<f32>(
-        f32(cfg.froxel_size_x),
-        f32(cfg.froxel_size_y),
-        1.0 / f32(cfg.depth_slices)
-    );
-    let safe_dir = select(
-        dir,
-        vec3<f32>(1e-6, 1e-6, 1e-6) * vec3<f32>(step),
-        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
-    );
-    let delta_dist = abs(froxel_dim / safe_dir);
-    let fract_p0 = p0 / froxel_dim;
-    var t_max = select(
-        (floor(fract_p0) * froxel_dim - p0) / safe_dir,
-        ((floor(fract_p0) + 1.0) * froxel_dim - p0) / safe_dir,
-        step > vec3(0)
-    );
-    t_max = select(
-        t_max,
-        vec3<f32>(1e38, 1e38, 1e38),
-        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
-    );
-
-    let max_f = vec3<i32>(
-        i32((cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x),
-        i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y),
-        i32(cfg.depth_slices)
-    );
-    var safety = 0u;
-    let max_steps = u32(max_f.x + max_f.y + max_f.z + 3);
-
-    loop {
-        safety = safety + 1u;
-        if safety > max_steps {
-            break;
-        }
-
-        if in_bounds(f, max_f) {
-            if !add_segment_ref_to_froxel(u32(f.x), u32(f.y), u32(f.z), cfg) {
-                break;
-            }
-        } else {
-            break;
-        }
-
-        if all(f == f1) {
-            break;
-        }
-
-        let a_min = canonical_min_mask(t_max);
-        let fd = select(vec3<i32>(0), step, a_min);
-        let dist = select(vec3<f32>(0), delta_dist, a_min);
-        f += fd;
-        t_max += dist;
-
-        let pos_step = step > vec3(0);
-        let neg_step = step < vec3(0);
-        let g_f1 = f > f1;
-        let l_f1 = f < f1;
-        if any(l_and(pos_step, g_f1)) || any(l_and(neg_step, l_f1)) {
-            break;
-        }
-    }
 }
 
 fn trace_segment_through_froxels_sparse(
@@ -564,9 +417,6 @@ fn trace_segment_through_froxels_sparse(
             let fx = u32(f.x);
             let fy = u32(f.y);
             let fz = u32(f.z);
-            if !add_segment_ref_to_froxel(fx, fy, fz, cfg) {
-                break;
-            }
             let froxel_idx = (fz * num_tiles_y + fy) * num_tiles_x + fx;
             append_sparse_froxel_ref(frustum_id, froxel_idx, strand_idx, seg_idx);
         } else {
@@ -592,111 +442,6 @@ fn trace_segment_through_froxels_sparse(
         }
     }
 }
-
-fn trace_segment_through_froxels_linear_place(
-    p0: vec3<f32>,
-    p1: vec3<f32>,
-    seg_ref: SegmentRef,
-    cfg: FroxelConfig,
-) {
-    if !isValid(p0) || !isValid(p1) {
-        return;
-    }
-    if p0.x < 0.0 || p1.x < 0.0 {
-        return;
-    }
-
-    let screen = vec2<f32>(f32(cfg.screen_width), f32(cfg.screen_height));
-    let seg_xy_min = min(p0.xy, p1.xy);
-    let seg_xy_max = max(p0.xy, p1.xy);
-    if seg_xy_max.x < 0.0 || seg_xy_max.y < 0.0 || seg_xy_min.x >= screen.x || seg_xy_min.y >= screen.y {
-        return;
-    }
-    let seg_z_min = min(p0.z, p1.z);
-    let seg_z_max = max(p0.z, p1.z);
-    if seg_z_max < 0.0 || seg_z_min > 1.0 {
-        return;
-    }
-
-    let f0 = vec3<i32>(
-        i32(floor(p0.x / f32(cfg.froxel_size_x))),
-        i32(floor(p0.y / f32(cfg.froxel_size_y))),
-        clamp(i32(floor(p0.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
-    );
-    let f1 = vec3<i32>(
-        i32(floor(p1.x / f32(cfg.froxel_size_x))),
-        i32(floor(p1.y / f32(cfg.froxel_size_y))),
-        clamp(i32(floor(p1.z * f32(cfg.depth_slices))), 0, i32(cfg.depth_slices) - 1)
-    );
-
-    var f = f0;
-    let dir = p1 - p0;
-    let step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z));
-    let froxel_dim = vec3<f32>(
-        f32(cfg.froxel_size_x),
-        f32(cfg.froxel_size_y),
-        1.0 / f32(cfg.depth_slices)
-    );
-    let safe_dir = select(
-        dir,
-        vec3<f32>(1e-6, 1e-6, 1e-6) * vec3<f32>(step),
-        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
-    );
-    let delta_dist = abs(froxel_dim / safe_dir);
-    let fract_p0 = p0 / froxel_dim;
-    var t_max = select(
-        (floor(fract_p0) * froxel_dim - p0) / safe_dir,
-        ((floor(fract_p0) + 1.0) * froxel_dim - p0) / safe_dir,
-        step > vec3(0)
-    );
-    t_max = select(
-        t_max,
-        vec3<f32>(1e38, 1e38, 1e38),
-        abs(dir) < vec3<f32>(1e-6, 1e-6, 1e-6)
-    );
-
-    let max_f = vec3<i32>(
-        i32((cfg.screen_width + cfg.froxel_size_x - 1u) / cfg.froxel_size_x),
-        i32((cfg.screen_height + cfg.froxel_size_y - 1u) / cfg.froxel_size_y),
-        i32(cfg.depth_slices)
-    );
-    var safety = 0u;
-    let max_steps = u32(max_f.x + max_f.y + max_f.z + 3);
-
-    loop {
-        safety = safety + 1u;
-        if safety > max_steps {
-            break;
-        }
-
-        if in_bounds(f, max_f) {
-            if !add_segment_to_packed_froxel(u32(f.x), u32(f.y), u32(f.z), seg_ref, cfg) {
-                break;
-            }
-        } else {
-            break;
-        }
-
-        if all(f == f1) {
-            break;
-        }
-
-        let a_min = canonical_min_mask(t_max);
-        let fd = select(vec3<i32>(0), step, a_min);
-        let dist = select(vec3<f32>(0), delta_dist, a_min);
-        f += fd;
-        t_max += dist;
-
-        let pos_step = step > vec3(0);
-        let neg_step = step < vec3(0);
-        let g_f1 = f > f1;
-        let l_f1 = f < f1;
-        if any(l_and(pos_step, g_f1)) || any(l_and(neg_step, l_f1)) {
-            break;
-        }
-    }
-}
-
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
 fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -769,172 +514,5 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
         frustum_id,
         task.chunk_id,
         task.seg_idx,
-    );
-}
-
-@compute @workgroup_size(SCAN_THREADS, 1, 1)
-fn scan_sums(
-    @builtin(workgroup_id) workgroup_id: vec3u,
-    @builtin(num_workgroups) num_workgroups: vec3u,
-    @builtin(local_invocation_id) local_id: vec3u,
-    @builtin(subgroup_id) subgroup_id: u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id: u32
-) {
-    let wg_idx = get_scan_workgroup_index(workgroup_id, num_workgroups, pc);
-    let element_idx_in_pass = wg_idx * SCAN_THREADS + local_id.x;
-    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base;
-    let read_idx = pc.scan_load_base + element_idx_in_pass;
-
-    var value = 0u;
-    if element_idx_in_pass < num_elements_this_pass {
-        if pc.scan_load_base == 0u {
-            value = atomicLoad(&tile_counts_buffer[read_idx]);
-        } else {
-            value = tile_offsets_buffer[read_idx];
-        }
-    }
-
-    let total_wg_sum = workgroup_inclusive_scan_blelloch(local_id, subgroup_id, subgroup_local_id, value);
-
-    if element_idx_in_pass < num_elements_this_pass {
-        tile_offsets_buffer[read_idx] = wg_scan_storage[local_id.x];
-    }
-
-    if local_id.x == SCAN_THREADS - 1u {
-        let first_element_idx_in_pass = wg_idx * SCAN_THREADS;
-        if first_element_idx_in_pass < num_elements_this_pass {
-            let sum_write_idx = pc.scan_save_base + wg_idx;
-            tile_offsets_buffer[sum_write_idx] = total_wg_sum;
-        }
-    }
-}
-
-@compute @workgroup_size(SCAN_THREADS, 1, 1)
-fn scan_last(
-    @builtin(local_invocation_id) local_id: vec3u,
-    @builtin(subgroup_id) subgroup_id: u32,
-    @builtin(subgroup_invocation_id) subgroup_local_id: u32
-) {
-    let element_idx_in_pass = local_id.x;
-    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base;
-    let read_idx = pc.scan_load_base + element_idx_in_pass;
-
-    var value = 0u;
-    if element_idx_in_pass < num_elements_this_pass {
-        value = tile_offsets_buffer[read_idx];
-    }
-
-    let _total_sum_from_helper = workgroup_exclusive_scan(local_id, subgroup_id, subgroup_local_id, value);
-
-    if element_idx_in_pass < num_elements_this_pass {
-        tile_offsets_buffer[read_idx] = wg_scan_storage[local_id.x];
-    }
-
-    if (element_idx_in_pass == num_elements_this_pass - 1u) && (num_elements_this_pass > 0u) {
-        let last_element_exclusive_sum = wg_scan_storage[element_idx_in_pass];
-        tile_offsets_buffer[pc.scan_save_base] = last_element_exclusive_sum + value;
-    } else if local_id.x == 0u && num_elements_this_pass == 0u {
-        tile_offsets_buffer[pc.scan_save_base] = 0u;
-    }
-}
-
-@compute @workgroup_size(SCAN_THREADS, 1, 1)
-fn scan_prfx(
-    @builtin(workgroup_id) workgroup_id: vec3u,
-    @builtin(num_workgroups) num_workgroups: vec3u,
-    @builtin(local_invocation_id) local_id: vec3u,
-    @builtin(subgroup_id) _subgroup_id: u32,
-    @builtin(subgroup_invocation_id) _subgroup_local_id: u32
-) {
-    let wg_idx = get_scan_workgroup_index(workgroup_id, num_workgroups, pc);
-    let element_idx_in_pass = wg_idx * SCAN_THREADS + local_id.x;
-    let num_elements_this_pass = pc.scan_save_base - pc.scan_load_base;
-
-    let prefix_read_idx = pc.scan_load_base + wg_idx;
-    let block_prefix_sum = tile_offsets_buffer[prefix_read_idx];
-
-    if element_idx_in_pass < num_elements_this_pass {
-        let data_rw_idx = pc.scan_save_base + element_idx_in_pass;
-        let y_i = tile_offsets_buffer[data_rw_idx];
-
-        wg_scan_storage[local_id.x] = y_i;
-        workgroupBarrier();
-
-        let y_im1 = select(0u, wg_scan_storage[local_id.x - 1u], local_id.x > 0u);
-        tile_offsets_buffer[data_rw_idx] = block_prefix_sum + y_im1;
-    }
-}
-
-@compute @workgroup_size(256, 1, 1)
-fn init_placement_idx(@builtin(global_invocation_id) id: vec3<u32>) {
-    let tile_idx = id.x;
-    let num_tiles = arrayLength(&current_tile_write_indices_buffer);
-    if tile_idx >= num_tiles {
-        return;
-    }
-    atomicStore(&current_tile_write_indices_buffer[tile_idx], tile_offsets_buffer[tile_idx]);
-}
-
-@compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
-fn binning_queue_place_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let task_idx = gid.x;
-    let binning_task_count = atomicLoad(&binning_queue.tail);
-    if task_idx >= binning_task_count {
-        return;
-    }
-
-    let task = binning_queue.tasks[task_idx];
-    let inst_id = task.id_info;
-    if inst_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&t_indices) || inst_id >= arrayLength(&t_geos) {
-        return;
-    }
-
-    let vertex_ptr = t_vertices[inst_id];
-    let index_ptr = t_indices[inst_id];
-    let geo_ptr = t_geos[inst_id];
-    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(geo_ptr) {
-        return;
-    }
-
-    let index_count = index_ptr.size / 4u;
-    if task.seg_idx + 1u >= index_count {
-        return;
-    }
-
-    let geo = geos[geo_ptr.slab].gs[geo_ptr.offset / SIZEOF_GEO];
-    let clip_from_world = view.unjittered_clip_from_world;
-    let clip_bounds = find_clip_bounds(clip_from_world, geo.aabb.min, geo.aabb.max);
-    if !isValid(clip_bounds[0]) || !isValid(clip_bounds[1]) {
-        return;
-    }
-    if abs(clip_bounds[1].z - clip_bounds[0].z) < 1e-6 {
-        return;
-    }
-    let aabb_znear_zfar = vec2<f32>(clip_bounds[0].z, clip_bounds[1].z);
-
-    let vi0 = indices[index_ptr.slab].is[task.seg_idx];
-    let vi1 = indices[index_ptr.slab].is[task.seg_idx + 1u];
-    let p0_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vi0], 1.0);
-    let p1_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vi1], 1.0);
-    let p0 = world_to_screen(
-        p0_world,
-        clip_from_world,
-        f32(config.screen_width),
-        f32(config.screen_height),
-        aabb_znear_zfar,
-    );
-    let p1 = world_to_screen(
-        p1_world,
-        clip_from_world,
-        f32(config.screen_width),
-        f32(config.screen_height),
-        aabb_znear_zfar,
-    );
-
-    trace_segment_through_froxels_linear_place(
-        p0,
-        p1,
-        SegmentRef(task.chunk_id, task.seg_idx),
-        config,
     );
 }

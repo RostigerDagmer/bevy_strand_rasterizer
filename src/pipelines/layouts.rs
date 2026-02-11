@@ -17,11 +17,6 @@ pub mod prepass {
     pub const VISIBLE_GEO: u32 = 12;
     pub const GEO_PREFIX: u32 = 13;
     pub const INDIRECT_BUFFER: u32 = 15;
-    pub const TILE_COUNTS_BUFFER: u32 = 16;
-    pub const FROXEL_CONFIG: u32 = 17;
-    pub const TILE_OFFSETS_BUFFER: u32 = 18;
-    pub const CURRENT_TILE_WRITE_INDICES: u32 = 19;
-    pub const FROXEL_TILE_BUFFER: u32 = 20;
     pub const FRUSTUM_TABLE: u32 = 21;
     pub const FROXEL_BUCKET_HEADS: u32 = 22;
     pub const CHUNK_POOL: u32 = 23;
@@ -48,14 +43,6 @@ pub mod prepass {
             ShaderDefVal::UInt("VISIBLE_GEO".into(), VISIBLE_GEO),
             ShaderDefVal::UInt("GEO_PREFIX".into(), GEO_PREFIX),
             ShaderDefVal::UInt("INDIRECT_BUFFER".into(), INDIRECT_BUFFER),
-            ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
-            ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
-            ShaderDefVal::UInt("TILE_OFFSETS_BUFFER".into(), TILE_OFFSETS_BUFFER),
-            ShaderDefVal::UInt(
-                "CURRENT_TILE_WRITE_INDICES".into(),
-                CURRENT_TILE_WRITE_INDICES,
-            ),
-            ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
             ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
@@ -274,16 +261,20 @@ pub mod post_process {
 
 pub mod tile_debug {
     use bevy::shader::ShaderDefVal;
+    use crate::pipelines::task_contract::BINNING_POOL_CHUNK_SIZE;
 
-    pub const TILE_COUNTS_BUFFER: u32 = 0;
-    pub const FROXEL_CONFIG: u32 = 1;
-    pub const PARAMS: u32 = 2;
+    pub const FRUSTUM_TABLE: u32 = 0;
+    pub const FROXEL_BUCKET_HEADS: u32 = 1;
+    pub const CHUNK_POOL: u32 = 2;
+    pub const PARAMS: u32 = 3;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
-            ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
-            ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
+            ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
+            ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
+            ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
             ShaderDefVal::UInt("PARAMS".into(), PARAMS),
+            ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
         ]
     }
 }

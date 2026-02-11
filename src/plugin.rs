@@ -186,7 +186,7 @@ impl Plugin for StrandRasterizerPlugin {
             // )
             .add_render_graph_edge(
                 Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass, // Run before composition
+                bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass, // Run before composition
                 nodes::prepass::WorkPreparationLabel,
             )
             // .add_render_graph_edge(Core3d, AllocatorDebugLabel, CompositionLabel)
@@ -679,16 +679,9 @@ fn use_froxel_buffer(
     query: Query<(Entity, &FroxelConfig), Or<(Added<FroxelConfig>, With<NeedsRealloc>)>>,
     device: Res<RenderDevice>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
-    mut binning_resources: ResMut<StrandBinningBuffers>,
 ) {
     for (entity, config) in query.iter() {
         let config_buffer = create_froxel_config_buffer(&device, config);
-        let (
-            tile_counts_buffer,
-            tile_offsets_buffer,
-            current_tile_write_indices_buffer,
-            packed_segments_buffer,
-        ) = prepare_binning_buffers(&device, config);
 
         let (target_texture, target_view) = recreate_render_target_texture(&device, config);
         let (depth_texture, depth_view) = recreate_render_target_depth_texture(&device, config);
@@ -699,27 +692,13 @@ fn use_froxel_buffer(
         raster_resources.output_depth_resource = Some(depth_texture);
         raster_resources.output_texture = Some(target_view);
         raster_resources.output_depth = Some(depth_view);
-        // modify the resource
-        raster_resources
-            .froxel_buffer
-            .insert(entity, packed_segments_buffer.clone());
         raster_resources
             .froxel_config_buffer
             .insert(entity, config_buffer);
         raster_resources
             .frustrum_config
             .insert(entity, config.clone());
-
-        let artifact_buffers = StrandBinningArtifactBuffers {
-            tile_counts_buffer,
-            tile_offsets_buffer,
-            current_tile_write_indices_buffer,
-            packed_segments_buffer,
-        };
-
-        binning_resources.artifacts.insert(entity, artifact_buffers);
-
-        debug!("Added froxel buffers to resource");
+        debug!("Updated froxel config + render targets");
     }
 }
 

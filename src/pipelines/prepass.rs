@@ -1,9 +1,9 @@
 use crate::{
     allocator::GpuPagingAllocator,
     pipelines::layouts,
+    pipelines::task_contract::{BINNING_POOL_CHUNK_SIZE, BINNING_POOL_NUM_HEADS},
     resources::ComputeInvocationDims,
     shader_types::{PushConstants, StrandGeo, StrandMeta},
-    pipelines::task_contract::{BINNING_POOL_CHUNK_SIZE, BINNING_POOL_NUM_HEADS},
 };
 use bevy::{
     pbr::ViewLightsUniformOffset,
@@ -97,11 +97,6 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::VISIBLE_GEO, false),
                 Self::storage_entry(layouts::prepass::GEO_PREFIX, false),
                 Self::storage_entry(layouts::prepass::INDIRECT_BUFFER, false),
-                Self::storage_entry(layouts::prepass::TILE_COUNTS_BUFFER, false),
-                Self::uniform_entry(layouts::prepass::FROXEL_CONFIG, false),
-                Self::storage_entry(layouts::prepass::TILE_OFFSETS_BUFFER, false),
-                Self::storage_entry(layouts::prepass::CURRENT_TILE_WRITE_INDICES, false),
-                Self::storage_entry(layouts::prepass::FROXEL_TILE_BUFFER, false),
                 Self::storage_entry(layouts::prepass::FRUSTUM_TABLE, true),
                 Self::storage_entry(layouts::prepass::FROXEL_BUCKET_HEADS, false),
                 Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
@@ -208,11 +203,6 @@ pub fn create_prepass_bind_group(
     cluster_indices: &BindingResource,
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
-    tile_counts: &BindingResource,
-    froxel_config: &BindingResource,
-    tile_offsets: &BindingResource,
-    current_tile_write_indices: &BindingResource,
-    froxel_tile_buffer: &BindingResource,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
@@ -277,26 +267,6 @@ pub fn create_prepass_bind_group(
                     resource: dispatch_args.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::prepass::TILE_COUNTS_BUFFER,
-                    resource: tile_counts.clone().into_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::FROXEL_CONFIG,
-                    resource: froxel_config.clone().into_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::TILE_OFFSETS_BUFFER,
-                    resource: tile_offsets.clone().into_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::CURRENT_TILE_WRITE_INDICES,
-                    resource: current_tile_write_indices.clone().into_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::FROXEL_TILE_BUFFER,
-                    resource: froxel_tile_buffer.clone().into_binding(),
-                },
-                BindGroupEntry {
                     binding: layouts::prepass::FRUSTUM_TABLE,
                     resource: frustum_table.as_entire_binding(),
                 },
@@ -329,7 +299,6 @@ pub fn run_prepass(
     pipeline: &StrandPrepassPipeline,
     allocator: &GpuPagingAllocator,
     settings: &ComputeInvocationDims,
-    froxel_config: &crate::components::FroxelConfig,
     cull_settings: &crate::resources::StochasticCullSettings,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
@@ -387,8 +356,6 @@ pub fn run_prepass(
         warn!("Binning queue pipeline not found");
         return;
     };
-    let _ = froxel_config;
-
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("Strand Prepass"),
         ..default()
