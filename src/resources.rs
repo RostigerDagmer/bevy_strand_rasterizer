@@ -77,10 +77,10 @@ pub struct StochasticCullSettings {
 impl Default for StochasticCullSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
-            min_dist: 12.0,
+            enabled: true,
+            min_dist: 2.0,
             max_dist: 100.0,
-            exponent: 0.15,
+            exponent: 0.10,
         }
     }
 }

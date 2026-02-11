@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use crate::{
     components::{FroxelCapacity, FroxelConfig, TieFroxelsToView},
-    pipelines::{ext::dispatch_workgroup_ext, layouts, raster::recreate_render_target_texture},
+    pipelines::{ext::dispatch_workgroup_ext, layouts},
     shader_types::PushConstants,
 };
 
@@ -140,7 +140,7 @@ impl FromWorld for StrandBinningPipeline {
                 Self::uniform_buffer_entry(
                     layouts::binning::FROXEL_CONFIG,
                     false,
-                    Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
+                    Some(BufferSize::new(std::mem::size_of::<[u32; 8]>() as u64).unwrap()),
                 ), // config
                 Self::uniform_buffer_entry(
                     layouts::binning::VIEW_UNIFORM,
@@ -190,7 +190,7 @@ impl FromWorld for StrandBinningPipeline {
                 Self::uniform_buffer_entry(
                     layouts::binning::FROXEL_CONFIG,
                     false,
-                    Some(BufferSize::new(std::mem::size_of::<FroxelConfig>() as u64).unwrap()),
+                    Some(BufferSize::new(std::mem::size_of::<[u32; 8]>() as u64).unwrap()),
                 ), // config
                 Self::uniform_buffer_entry(
                     layouts::binning::VIEW_UNIFORM,

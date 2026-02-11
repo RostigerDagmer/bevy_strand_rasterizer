@@ -29,6 +29,8 @@ pub struct StrandRasterizerResources {
     pub pipeline: Option<ComputePipeline>,
     pub froxel_buffer: HashMap<Entity, Buffer>,
     pub froxel_config_buffer: HashMap<Entity, Buffer>,
+    pub output_texture_resource: Option<Texture>,
+    pub output_depth_resource: Option<Texture>,
     pub output_texture: Option<TextureView>,
     pub output_depth: Option<TextureView>,
     pub strand_count: Option<u32>,
@@ -277,11 +279,6 @@ pub fn create_strand_raster_bind_group(
     view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
-    // let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
-    // let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
-    // let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    // let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
-    // let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
     let packed_segments = resources.froxel_buffer.get(entity).ok_or(())?;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
     let output_depth = resources.output_depth.as_ref().ok_or(())?;
@@ -295,26 +292,6 @@ pub fn create_strand_raster_bind_group(
             Some("strand_rasterizer_bind_group"),
             layout,
             &[
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::VERTEX_BUFFER,
-                //     resource: vertex_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::INDEX_BUFFER,
-                //     resource: index_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::META_BUFFER,
-                //     resource: meta_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::GEO_BUFFER,
-                //     resource: geos_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::MATERIAL_BUFFER,
-                //     resource: material_buffer.as_entire_binding(),
-                // },
                 BindGroupEntry {
                     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
                     resource: tile_offsets_buffer.as_entire_binding(),
