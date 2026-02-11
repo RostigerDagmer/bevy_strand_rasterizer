@@ -16,6 +16,10 @@ struct Meta {
     ms: array<StrandMeta>
 }
 
+struct Materials {
+    mats: array<StrandMaterial>
+}
+
 struct DevicePtr {
     slab: u32,   // index into binding_array
     offset: u32, // byte offset in slab (<= 4 GB if packed in u32)

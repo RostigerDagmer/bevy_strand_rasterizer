@@ -6,9 +6,8 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
             ComputePipeline, ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange,
-            SamplerBindingType, ShaderStages, StorageTextureAccess, Texture, TextureDescriptor,
-            TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-            TextureViewDescriptor, TextureViewDimension,
+            ShaderStages, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
+            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -19,13 +18,11 @@ use bevy::{
 use std::collections::HashMap;
 
 use crate::{
-    components::FroxelConfig, pipelines::layouts, plugin::MAX_TEXTURE_EXTENT,
-    shader_types::PushConstants,
+    allocator::GpuPagingAllocator, components::FroxelConfig, pipelines::layouts,
+    plugin::MAX_TEXTURE_EXTENT, shader_types::PushConstants,
 };
 
-use super::{
-    binning::StrandBinningBuffers, shading::StrandShadingResources, shadows::StrandShadowResources,
-};
+use super::{binning::StrandBinningBuffers, shading::StrandShadingResources};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -41,7 +38,8 @@ pub struct StrandRasterizerResources {
 #[derive(Resource)]
 pub struct StrandRasterizerPipeline {
     pub bind_group_layout: BindGroupLayout,
-    pub rasterize_pipeline: CachedComputePipelineId,
+    pub rasterize_pipeline: Option<CachedComputePipelineId>,
+    pub allocator_epoch: u64,
 }
 
 impl StrandRasterizerPipeline {
@@ -49,61 +47,6 @@ impl StrandRasterizerPipeline {
         device.create_bind_group_layout(
             "strand_rasterizer_bind_group_layout",
             &[
-                // Vertex buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::VERTEX_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Index Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::INDEX_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Meta buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::META_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Geos buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::GEO_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Material buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::MATERIAL_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
                 // Tile offsets buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
@@ -192,53 +135,49 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Shading Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::SHADING_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::ReadOnly,
-                        format: TextureFormat::Rgba8Unorm,
-                        view_dimension: TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                // Deep Opacity Texture Array (Opacity layers)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Deep Opacity Texture View
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Deep Opacity Texture Array (Depth)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Deep Opacity Texture View
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                // Disabled for correctness-only raster pass:
+                // BindGroupLayoutEntry {
+                //     binding: layouts::rasterizer::SHADING_BUFFER,
+                //     visibility: ShaderStages::COMPUTE,
+                //     ty: BindingType::StorageTexture {
+                //         access: StorageTextureAccess::ReadOnly,
+                //         format: TextureFormat::Rgba8Unorm,
+                //         view_dimension: TextureViewDimension::D2,
+                //     },
+                //     count: None,
+                // },
+                // BindGroupLayoutEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
+                //     visibility: ShaderStages::COMPUTE,
+                //     ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                //     count: None,
+                // },
+                // BindGroupLayoutEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                //     visibility: ShaderStages::COMPUTE,
+                //     ty: BindingType::Texture {
+                //         sample_type: TextureSampleType::Float { filterable: true },
+                //         view_dimension: TextureViewDimension::D3,
+                //         multisampled: false,
+                //     },
+                //     count: None,
+                // },
+                // BindGroupLayoutEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                //     visibility: ShaderStages::COMPUTE,
+                //     ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                //     count: None,
+                // },
+                // BindGroupLayoutEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                //     visibility: ShaderStages::COMPUTE,
+                //     ty: BindingType::Texture {
+                //         sample_type: TextureSampleType::Float { filterable: true },
+                //         view_dimension: TextureViewDimension::D2,
+                //         multisampled: false,
+                //     },
+                //     count: None,
+                // },
             ],
         )
     }
@@ -248,63 +187,81 @@ impl FromWorld for StrandRasterizerPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
-        let use_spline = false;
-
-        let shader_loader = world.resource::<AssetServer>();
-        let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let mut cdefs = [
-            vec![ShaderDefVal::UInt(
-                "MAX_TEXTURE_EXTENT".into(),
-                MAX_TEXTURE_EXTENT,
-            )],
-            layouts::rasterizer::shader_defs(),
-        ]
-        .concat();
-        if use_spline {
-            // TODO: fix spline shader (also optimize spline shader)
-            cdefs.push("SPLINE".into());
-        } else {
-            cdefs.push("LINEAR".into());
-        }
-
-        let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("strand_rasterize_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
-            shader: rasterize_shader,
-            shader_defs: [
-                cdefs.as_slice(),
-                &[
-                    ShaderDefVal::UInt(
-                        "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
-                        layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    ),
-                    ShaderDefVal::UInt(
-                        "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
-                        layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    ),
-                ],
-            ]
-            .concat(),
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
-            entry_point: Some("rasterize_strands".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-
-        debug!(
-            "Created strand raster compute pipelines: rasterize={:?}",
-            rasterize_pipeline
-        );
 
         StrandRasterizerPipeline {
             bind_group_layout,
-            rasterize_pipeline,
+            rasterize_pipeline: None,
+            allocator_epoch: u64::MAX,
         }
     }
+}
+
+pub fn update_strand_raster_pipeline(
+    mut pipeline: ResMut<StrandRasterizerPipeline>,
+    allocator: Res<GpuPagingAllocator>,
+    shader_loader: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let current_state = allocator.bindgroups_epoch;
+    if pipeline.rasterize_pipeline.is_some() && pipeline.allocator_epoch == current_state {
+        return;
+    }
+
+    let (Some(buffer_layout), Some(table_layout)) = (
+        allocator.buffer_bind_group_layout.clone(),
+        allocator.pagetable_bind_group_layout.clone(),
+    ) else {
+        return;
+    };
+
+    let mut cdefs = [
+        vec![
+            ShaderDefVal::UInt("MAX_TEXTURE_EXTENT".into(), MAX_TEXTURE_EXTENT),
+            ShaderDefVal::UInt(
+                "SIZEOF_METADATA".into(),
+                std::mem::size_of::<crate::shader_types::StrandMeta>() as u32,
+            ),
+            ShaderDefVal::UInt(
+                "SIZEOF_MATERIAL".into(),
+                std::mem::size_of::<crate::components::StrandMaterial>() as u32,
+            ),
+            ShaderDefVal::UInt(
+                "SIZEOF_GEO".into(),
+                std::mem::size_of::<crate::shader_types::StrandGeo>() as u32,
+            ),
+        ],
+        layouts::rasterizer::shader_defs(),
+        allocator.shader_defs(),
+    ]
+    .concat();
+    cdefs.push("LINEAR".into());
+
+    let max_group = allocator
+        .buffer_group_idx
+        .max(allocator.table_group_idx)
+        .max(layouts::rasterizer::RASTER_GROUP);
+    let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
+    layout[allocator.buffer_group_idx as usize] = buffer_layout;
+    layout[allocator.table_group_idx as usize] = table_layout;
+    layout[layouts::rasterizer::RASTER_GROUP as usize] = pipeline.bind_group_layout.clone();
+
+    let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
+    let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("strand_rasterize_pipeline".into()),
+        layout,
+        shader: rasterize_shader,
+        shader_defs: cdefs,
+        push_constant_ranges: vec![PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            range: 0..std::mem::size_of::<PushConstants>() as u32,
+        }],
+        entry_point: Some("rasterize_strands".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+
+    pipeline.rasterize_pipeline = Some(rasterize_pipeline);
+    pipeline.allocator_epoch = current_state;
+    info!("Updated rasterizer pipeline.")
 }
 
 // Create the bind group for the strand rasterizer
@@ -314,8 +271,6 @@ pub fn create_strand_raster_bind_group(
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
     buffers: &StrandBinningBuffers,
-    shading_resources: &StrandShadingResources,
-    shadow_resources: &StrandShadowResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
     view_offsets: &ViewUniformOffset,
@@ -331,19 +286,6 @@ pub fn create_strand_raster_bind_group(
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
     let output_depth = resources.output_depth.as_ref().ok_or(())?;
     let froxel_config_buffer = resources.froxel_config_buffer.get(entity).ok_or(())?;
-    let shading_buffer = shading_resources.output_texture.as_ref().ok_or(())?;
-
-    // TODO: we have to bind all maps created for lights.
-    let light_entities = resources
-        .froxel_config_buffer
-        .keys()
-        .find(|k| *k != entity)
-        .ok_or(())?;
-    let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
-    let dom_sampler = shadow_resources
-        .dom_samplers
-        .get(light_entities)
-        .ok_or(())?;
     let artifacts = buffers.artifacts.get(entity).ok_or(())?;
     let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
     let tile_counts_buffer = &artifacts.tile_counts_buffer;
@@ -394,39 +336,42 @@ pub fn create_strand_raster_bind_group(
                     resource: BindingResource::TextureView(output_depth),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::VIEW_UNIFORM,
-                    resource: view_buffer.clone(),
-                },
-                BindGroupEntry {
                     binding: layouts::rasterizer::FROXEL_CONFIG,
                     resource: froxel_config_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::VIEW_UNIFORM,
+                    resource: view_buffer.clone(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::LIGHT_UNIFORM,
                     resource: light_buffer.clone(),
                 },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::SHADING_BUFFER,
-                    resource: BindingResource::TextureView(shading_buffer),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
-                    resource: BindingResource::Sampler(&dom_sampler.0),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    resource: BindingResource::TextureView(&dom_texture.0),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
-                    resource: BindingResource::Sampler(&dom_sampler.1),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    resource: BindingResource::TextureView(&dom_texture.1),
-                },
+                // Disabled for correctness-only raster pass:
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::SHADING_BUFFER,
+                //     resource: BindingResource::TextureView(shading_buffer),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
+                //     resource: BindingResource::Sampler(&dom_sampler.0),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                //     resource: BindingResource::TextureView(&dom_texture.0),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
+                //     resource: BindingResource::Sampler(&dom_sampler.1),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                //     resource: BindingResource::TextureView(&dom_texture.1),
+                // },
             ],
         ),
+        // Dynamic offsets must follow bind-group layout declaration order.
+        // Raster layout declares LIGHT_UNIFORM before VIEW_UNIFORM.
         vec![view_offsets.offset, view_light_uniform_offset.offset],
     ))
 }
@@ -480,6 +425,7 @@ pub fn run_raster_pass(
     render_context: &mut RenderContext,
     pipeline_cache: &PipelineCache,
     pipeline: &StrandRasterizerPipeline,
+    allocator: &GpuPagingAllocator,
     froxel_config: &FroxelConfig,
     resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
@@ -493,15 +439,33 @@ pub fn run_raster_pass(
             label: Some("Strand Rasterize"),
             ..default()
         });
-        let Some(raster_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipeline.rasterize_pipeline)
-        else {
+        let Some(raster_pipeline_id) = pipeline.rasterize_pipeline else {
+            warn!("Raster pipeline id not ready yet");
+            return;
+        };
+        info!("raster pipeline_id: {:?}", raster_pipeline_id);
+        let Some(raster_pipeline) = pipeline_cache.get_compute_pipeline(raster_pipeline_id) else {
             warn!("Raster pipeline not found");
             return;
         };
+        let Some(allocator_buffer_bind_group) = allocator.buffer_bind_group.as_ref() else {
+            warn!("allocator buffer bind group is not ready yet.");
+            return;
+        };
+        let Some(allocator_pagetable_bind_group) = allocator.pagetable_bind_group.as_ref() else {
+            warn!("allocator pagetable bind group is not ready yet.");
+            return;
+        };
+        info!("encoding: {:?}", raster_pipeline);
         pass.set_pipeline(raster_pipeline);
+        pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
         pass.set_bind_group(
-            0,
+            allocator.table_group_idx,
+            allocator_pagetable_bind_group,
+            &[],
+        );
+        pass.set_bind_group(
+            layouts::rasterizer::RASTER_GROUP,
             bind_group, // Assume correctly populated bind group
             uniform_offsets,
         );

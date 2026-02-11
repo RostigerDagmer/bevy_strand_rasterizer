@@ -46,6 +46,11 @@ pub struct StrandPrepassPipeline {
     pub fine_pipeline: Option<CachedComputePipelineId>,
     pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
     pub binning_pipeline: Option<CachedComputePipelineId>,
+    pub scan_sums_pipeline: Option<CachedComputePipelineId>,
+    pub scan_last_pipeline: Option<CachedComputePipelineId>,
+    pub scan_prfx_pipeline: Option<CachedComputePipelineId>,
+    pub init_place_pipeline: Option<CachedComputePipelineId>,
+    pub place_pipeline: Option<CachedComputePipelineId>,
 }
 
 impl StrandPrepassPipeline {
@@ -92,6 +97,9 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::INDIRECT_BUFFER, false),
                 Self::storage_entry(layouts::prepass::TILE_COUNTS_BUFFER, false),
                 Self::uniform_entry(layouts::prepass::FROXEL_CONFIG, false),
+                Self::storage_entry(layouts::prepass::TILE_OFFSETS_BUFFER, false),
+                Self::storage_entry(layouts::prepass::CURRENT_TILE_WRITE_INDICES, false),
+                Self::storage_entry(layouts::prepass::FROXEL_TILE_BUFFER, false),
             ],
         )
     }
@@ -114,6 +122,10 @@ fn queue_prepass_pipeline(
 
     let mut shader_defs = vec![layouts::prepass::shader_defs(), allocator.shader_defs()].concat();
     shader_defs.extend([
+        ShaderDefVal::UInt(
+            "NUMBER_OF_THREADS_PER_WORKGROUP".into(),
+            invocation_dims.threads_per_workgroup,
+        ),
         ShaderDefVal::UInt(
             "WORKGROUP_SIZE".into(),
             invocation_dims.threads_per_workgroup,
@@ -172,6 +184,11 @@ impl FromWorld for StrandPrepassPipeline {
             fine_pipeline: None,
             finalize_binning_pipeline: None,
             binning_pipeline: None,
+            scan_sums_pipeline: None,
+            scan_last_pipeline: None,
+            scan_prfx_pipeline: None,
+            init_place_pipeline: None,
+            place_pipeline: None,
         }
     }
 }
@@ -189,6 +206,9 @@ pub fn create_prepass_bind_group(
     clusterable_objects: &BindingResource,
     tile_counts: &BindingResource,
     froxel_config: &BindingResource,
+    tile_offsets: &BindingResource,
+    current_tile_write_indices: &BindingResource,
+    froxel_tile_buffer: &BindingResource,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
@@ -255,6 +275,18 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::FROXEL_CONFIG,
                     resource: froxel_config.clone().into_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::TILE_OFFSETS_BUFFER,
+                    resource: tile_offsets.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::CURRENT_TILE_WRITE_INDICES,
+                    resource: current_tile_write_indices.clone().into_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FROXEL_TILE_BUFFER,
+                    resource: froxel_tile_buffer.clone().into_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -268,6 +300,7 @@ pub fn run_prepass(
     pipeline: &StrandPrepassPipeline,
     allocator: &GpuPagingAllocator,
     settings: &ComputeInvocationDims,
+    froxel_config: &crate::components::FroxelConfig,
     cull_settings: &crate::resources::StochasticCullSettings,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
@@ -303,6 +336,26 @@ pub fn run_prepass(
         warn!("Binning queue pipeline id not ready yet");
         return;
     };
+    let Some(scan_sums_pipeline_id) = pipeline.scan_sums_pipeline else {
+        warn!("Scan sums pipeline id not ready yet");
+        return;
+    };
+    let Some(scan_last_pipeline_id) = pipeline.scan_last_pipeline else {
+        warn!("Scan last pipeline id not ready yet");
+        return;
+    };
+    let Some(scan_prfx_pipeline_id) = pipeline.scan_prfx_pipeline else {
+        warn!("Scan prefix pipeline id not ready yet");
+        return;
+    };
+    let Some(init_place_pipeline_id) = pipeline.init_place_pipeline else {
+        warn!("Init place pipeline id not ready yet");
+        return;
+    };
+    let Some(place_pipeline_id) = pipeline.place_pipeline else {
+        warn!("Queue place pipeline id not ready yet");
+        return;
+    };
     let Some(broad_pipeline) = pipeline_cache.get_compute_pipeline(broad_pipeline_id) else {
         warn!("Broad prepass pipeline not found");
         return;
@@ -325,6 +378,38 @@ pub fn run_prepass(
         warn!("Binning queue pipeline not found");
         return;
     };
+    let Some(scan_sums_pipeline) = pipeline_cache.get_compute_pipeline(scan_sums_pipeline_id)
+    else {
+        warn!("Scan sums pipeline not found");
+        return;
+    };
+    let Some(scan_last_pipeline) = pipeline_cache.get_compute_pipeline(scan_last_pipeline_id) else {
+        warn!("Scan last pipeline not found");
+        return;
+    };
+    let Some(scan_prfx_pipeline) = pipeline_cache.get_compute_pipeline(scan_prfx_pipeline_id)
+    else {
+        warn!("Scan prefix pipeline not found");
+        return;
+    };
+    let Some(init_place_pipeline) = pipeline_cache.get_compute_pipeline(init_place_pipeline_id)
+    else {
+        warn!("Init place pipeline not found");
+        return;
+    };
+    let Some(place_pipeline) = pipeline_cache.get_compute_pipeline(place_pipeline_id) else {
+        warn!("Queue place pipeline not found");
+        return;
+    };
+
+    let num_tiles_x =
+        (froxel_config.screen_width + froxel_config.froxel_size_x - 1) / froxel_config.froxel_size_x;
+    let num_tiles_y =
+        (froxel_config.screen_height + froxel_config.froxel_size_y - 1) / froxel_config.froxel_size_y;
+    let num_tiles = num_tiles_x * num_tiles_y * froxel_config.depth_slices;
+    let scan_threads = settings.threads_per_workgroup.max(1);
+    const SCAN_LOAD_BASE_OFFSET: u32 = 8;
+    const SCAN_SAVE_BASE_OFFSET: u32 = 12;
 
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("Strand Prepass"),
@@ -359,6 +444,42 @@ pub fn run_prepass(
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(binning_pipeline);
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+
+    // Prefix-sum over tile counts -> tile offsets.
+    let mut load_base = 0u32;
+    let mut save_base = num_tiles;
+    let mut rounds: std::vec::Vec<(u32, u32, u32)> = std::vec::Vec::new();
+    while save_base - load_base > scan_threads {
+        let number_of_workgroups = (save_base - load_base).div_ceil(scan_threads);
+        rounds.push((load_base, save_base, number_of_workgroups));
+        load_base = save_base;
+        save_base += number_of_workgroups;
+    }
+
+    pass.set_pipeline(scan_sums_pipeline);
+    for (load_base, save_base, number_of_workgroups) in rounds.iter() {
+        pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(load_base));
+        pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(save_base));
+        pass.dispatch_workgroups(*number_of_workgroups, 1, 1);
+    }
+
+    pass.set_pipeline(scan_last_pipeline);
+    pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(&load_base));
+    pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(&save_base));
+    pass.dispatch_workgroups(1, 1, 1);
+
+    pass.set_pipeline(scan_prfx_pipeline);
+    for (load_base, save_base, number_of_workgroups) in rounds.iter().rev() {
+        pass.set_push_constants(SCAN_LOAD_BASE_OFFSET, bytemuck::bytes_of(save_base));
+        pass.set_push_constants(SCAN_SAVE_BASE_OFFSET, bytemuck::bytes_of(load_base));
+        pass.dispatch_workgroups(*number_of_workgroups, 1, 1);
+    }
+
+    pass.set_pipeline(init_place_pipeline);
+    pass.dispatch_workgroups(num_tiles.div_ceil(256), 1, 1);
+
+    pass.set_pipeline(place_pipeline);
+    pass.dispatch_workgroups_indirect(indirect_args, 0);
 }
 
 pub fn update_strand_prepass_pipeline(
@@ -387,6 +508,11 @@ pub fn update_strand_prepass_pipeline(
     let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let scan_sums_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let scan_last_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let scan_prfx_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let init_place_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let place_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
@@ -439,18 +565,78 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(scan_sums_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        scan_sums_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "scan_sums",
+    ) else {
+        return;
+    };
+    let Some(scan_last_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        scan_last_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "scan_last",
+    ) else {
+        return;
+    };
+    let Some(scan_prfx_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        scan_prfx_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "scan_prfx",
+    ) else {
+        return;
+    };
+    let Some(init_place_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        init_place_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "init_placement_idx",
+    ) else {
+        return;
+    };
+    let Some(place_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        place_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "binning_queue_place_pass",
+    ) else {
+        return;
+    };
 
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
     pipeline_res.fine_pipeline = Some(fine_pipeline_id);
     pipeline_res.finalize_binning_pipeline = Some(finalize_binning_pipeline_id);
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
+    pipeline_res.scan_sums_pipeline = Some(scan_sums_pipeline_id);
+    pipeline_res.scan_last_pipeline = Some(scan_last_pipeline_id);
+    pipeline_res.scan_prfx_pipeline = Some(scan_prfx_pipeline_id);
+    pipeline_res.init_place_pipeline = Some(init_place_pipeline_id);
+    pipeline_res.place_pipeline = Some(place_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} finalize_binning={:?} binning={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} finalize_binning={:?} binning_count={:?} scan_sums={:?} scan_last={:?} scan_prfx={:?} init_place={:?} binning_place={:?}",
         broad_pipeline_id,
         finalize_pipeline_id,
         fine_pipeline_id,
         finalize_binning_pipeline_id,
-        binning_pipeline_id
+        binning_pipeline_id,
+        scan_sums_pipeline_id,
+        scan_last_pipeline_id,
+        scan_prfx_pipeline_id,
+        init_place_pipeline_id,
+        place_pipeline_id
     );
 }

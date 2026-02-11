@@ -19,6 +19,9 @@ pub mod prepass {
     pub const INDIRECT_BUFFER: u32 = 15;
     pub const TILE_COUNTS_BUFFER: u32 = 16;
     pub const FROXEL_CONFIG: u32 = 17;
+    pub const TILE_OFFSETS_BUFFER: u32 = 18;
+    pub const CURRENT_TILE_WRITE_INDICES: u32 = 19;
+    pub const FROXEL_TILE_BUFFER: u32 = 20;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -42,12 +45,20 @@ pub mod prepass {
             ShaderDefVal::UInt("INDIRECT_BUFFER".into(), INDIRECT_BUFFER),
             ShaderDefVal::UInt("TILE_COUNTS_BUFFER".into(), TILE_COUNTS_BUFFER),
             ShaderDefVal::UInt("FROXEL_CONFIG".into(), FROXEL_CONFIG),
+            ShaderDefVal::UInt("TILE_OFFSETS_BUFFER".into(), TILE_OFFSETS_BUFFER),
+            ShaderDefVal::UInt(
+                "CURRENT_TILE_WRITE_INDICES".into(),
+                CURRENT_TILE_WRITE_INDICES,
+            ),
+            ShaderDefVal::UInt("FROXEL_TILE_BUFFER".into(), FROXEL_TILE_BUFFER),
         ]
     }
 }
 
 pub mod rasterizer {
     use bevy::shader::ShaderDefVal;
+
+    pub const RASTER_GROUP: u32 = 2;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
@@ -77,6 +88,7 @@ pub mod rasterizer {
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
+            ShaderDefVal::UInt("RASTER_GROUP".into(), RASTER_GROUP),
             ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
             ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
             ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),

@@ -262,7 +262,7 @@ fn trace_segment_through_froxels(task: BinningTask, p0: vec3<f32>, p1: vec3<f32>
         let g_f1 = f > f1;
         let l_f1 = f < f1;
 
-        if any(pos_step && g_f1) || any(neg_step && l_f1) {
+        if any(l_and(pos_step, g_f1)) || any(l_and(neg_step, l_f1)) {
              break;
         }
     }

@@ -213,29 +213,7 @@ fn hash_to_unit_float(x: u32) -> f32 {
     return f32(x) / 4294967296.0;
 }
 
-// fn canonical_min(v: vec4<f32>) -> f32 {
-//     return min(min(v.x, v.y), min(v.z, v.w));
-// }
 
-// fn canonical_min_mask(v: vec4<f32>) -> vec4<bool> {
-//     // 1. Find the minimum value across all components
-//     let min_val = canonical_min(v);
-
-//     // 2. Create a mask identifying ALL components equal to the minimum value
-//     //    Comparison operators on vectors return boolean vectors in WGSL.
-//     let is_min: vec4<bool> = (v == vec4(min_val)); // e.g., (false, true, true, false)
-
-//     var prev_cum_mask = vec4<bool>(false);
-//     var current_cum = is_min.x;     // Start with cum up to x
-//     prev_cum_mask.y = current_cum;  // Set prev for y
-//     current_cum = current_cum | is_min.y; // Update cum up to y
-//     prev_cum_mask.z = current_cum;  // Set prev for z
-//     current_cum = current_cum | is_min.z; // Update cum up to z
-//     prev_cum_mask.w = current_cum;  // Set prev for w
-//     let final_mask = is_min & !prev_cum_mask; // Same final step
-
-//     return final_mask; // e.g., (false, true, false, false) for input (3.0, 1.0, 1.0, 2.0)
-// }
 fn canonical_min(v: vec3<f32>) -> f32 {
     return min(min(v.x, v.y), v.z);
 }
