@@ -79,7 +79,7 @@ pub struct RasterWorkItem {
     pub seg_id: u32,
     pub strand_id: u32,
     pub frustum_id: u32,
-    pub tile_id: u32,
+    pub inst_id: u32,
 }
 
 #[inline]

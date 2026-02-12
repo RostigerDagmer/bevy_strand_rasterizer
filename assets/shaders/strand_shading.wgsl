@@ -34,13 +34,15 @@
 }
 
 #import "shaders/common.wgsl"::{
-    PI,
-    PI_HALF,
-    SQRT_2_PI,
+    // PI,
+    // PI_HALF,
+    // SQRT_2_PI,
     find_clip_bounds
 }
 
-const SQRT_2_PI = SQRT_2_PI;
+const PI = 3.14159265359;
+const PI_HALF = PI / 2.0;
+const SQRT_2_PI = 2.5066282746310002;
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
@@ -73,7 +75,7 @@ struct FrustumDesc {
 @group(#{SHADING_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(#{SHADING_GROUP}) @binding(#{BINNING_QUEUE}) var<storage, read> binning_queue: BinningQueue;
 @group(#{SHADING_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
-@group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
+@group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d_array<rgba8unorm, write>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -127,8 +129,8 @@ struct FrustumDesc {
 
 // --- Helpers ---
 
-fn is_valid_ptr(ptr: DevicePtr) -> bool {
-    return ptr.slab != 0xFFFFFFFFu;
+fn is_valid_ptr(_ptr: DevicePtr) -> bool {
+    return _ptr.slab != 0xFFFFFFFFu;
 }
 
 fn csch(x: f32) -> f32 {
@@ -496,6 +498,13 @@ fn shade_strands(
     if seg_idx + 1u >= index_count {
         return;
     }
+    if seg_idx < strand_meta.offset {
+        return;
+    }
+    let seg_local = seg_idx - strand_meta.offset;
+    if seg_local >= (strand_meta.count - 1u) {
+        return;
+    }
 
     let i0 = indices[index_ptr.slab].is[seg_idx];
     let i1 = indices[index_ptr.slab].is[seg_idx + 1u];
@@ -535,9 +544,8 @@ fn shade_strands(
         accum_color += vec4<f32>(c.xyz, 0.0);
     }
 
-    let out_row = strand_local % MAX_TEXTURE_EXT;
-    let out_col = strand_local / MAX_TEXTURE_EXT;
-    let y_coord = out_row;
-    let x_coord = out_col * (pc.workgroup_offset + 1u) + seg_idx;
-    textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), accum_color);
+    let x_coord = seg_local;
+    let y_coord = strand_local;
+    let layer = inst_id;
+    textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), i32(layer), accum_color);
 }

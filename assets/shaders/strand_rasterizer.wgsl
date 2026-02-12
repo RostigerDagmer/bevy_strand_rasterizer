@@ -70,11 +70,14 @@ struct RasterWorkQueue {
 @group(#{RASTER_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<atomic<u32>>;
 @group(#{RASTER_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read> chunk_pool_words: array<u32>;
 @group(#{RASTER_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read> raster_work_queue: RasterWorkQueue;
+#ifndef SHADOWS
+@group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_2d_array<f32>;
+#endif
 #ifdef SHADOWS
 @group(#{RASTER_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
 #endif
-// Disabled for correctness-only raster pass:
-// @group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
+
+var<private> g_inst_id: u32 = 0u;
 
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
@@ -140,11 +143,11 @@ fn get_geo0() -> StrandGeo {
 }
 
 fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) || g_inst_id >= arrayLength(&t_materials) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
-    let meta_ptr = t_strand_metadata[0u];
-    let material_ptr = t_materials[0u];
+    let meta_ptr = t_strand_metadata[g_inst_id];
+    let material_ptr = t_materials[g_inst_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
@@ -166,10 +169,10 @@ fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
 }
 
 fn get_segment_meta(segment_ref: SegmentRef) -> StrandMeta {
-    if arrayLength(&t_strand_metadata) == 0u {
+    if arrayLength(&t_strand_metadata) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
-    let meta_ptr = t_strand_metadata[0u];
+    let meta_ptr = t_strand_metadata[g_inst_id];
     if !is_valid_ptr(meta_ptr) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
@@ -200,12 +203,12 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
     // Get world-space vertex positions
     return mat2x4<f32>(vertices[v0_strand_idx], vertices[v1_strand_idx]);
 #else
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) || g_inst_id >= arrayLength(&t_indices) || g_inst_id >= arrayLength(&t_vertices) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
-    let meta_ptr = t_strand_metadata[0u];
-    let index_ptr = t_indices[0u];
-    let vertex_ptr = t_vertices[0u];
+    let meta_ptr = t_strand_metadata[g_inst_id];
+    let index_ptr = t_indices[g_inst_id];
+    let vertex_ptr = t_vertices[g_inst_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
@@ -496,6 +499,7 @@ fn rasterize_strands(
                 if work_item.frustum_id != active_frustum_id {
                     continue;
                 }
+                g_inst_id = work_item.inst_id;
                 let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
 
                 // Get strand metadata
@@ -559,7 +563,28 @@ fn rasterize_strands(
                 // let mat = get_segment_material(segment_ref);
                 // var ambient_occlusion = (1.0 - occlusion) + (lights.ambient_color.xyz / 255.0) * 0.5 * mat.ambient_factor + (mat.absorption_color.xyz) * 0.5 * mat.ambient_factor;
                 // let hair_fragment = vec4<f32>(hair_color.xyz * ambient_occlusion, hair_color.w * coverage);
-                    let hair_fragment = vec4<f32>(0.92, 0.78, 0.62, 0.65 * coverage);
+                    if segment_ref.segment_start_idx < strand_meta.offset {
+                        continue;
+                    }
+                    let seg_local = segment_ref.segment_start_idx - strand_meta.offset;
+                    if seg_local >= (strand_meta.count - 1u) {
+                        continue;
+                    }
+                    let layer = work_item.inst_id;
+                    if layer >= textureNumLayers(shading_buffer) {
+                        continue;
+                    }
+                    let dims = textureDimensions(shading_buffer, 0);
+                    if seg_local >= dims.x || segment_ref.strand_idx >= dims.y {
+                        continue;
+                    }
+                    let shaded = textureLoad(
+                        shading_buffer,
+                        vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
+                        i32(layer),
+                        0,
+                    );
+                    let hair_fragment = vec4<f32>(shaded.rgb, shaded.a * coverage);
                     // transmittance accumulation
                     froxel_color = blend_over(froxel_color, hair_fragment);
                     g_min_depth = max(g_min_depth, p_frag.z);

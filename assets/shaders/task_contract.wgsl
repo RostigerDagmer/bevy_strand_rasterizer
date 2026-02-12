@@ -67,7 +67,7 @@ struct RasterWorkItem {
     seg_id: u32,
     strand_id: u32,
     frustum_id: u32,
-    tile_id: u32,
+    inst_id: u32,
 }
 
 

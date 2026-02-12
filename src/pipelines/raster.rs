@@ -7,7 +7,8 @@ use bevy::{
             BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
             ComputePipeline, ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange,
             ShaderStages, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -139,17 +140,16 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
-                // Disabled for correctness-only raster pass:
-                // BindGroupLayoutEntry {
-                //     binding: layouts::rasterizer::SHADING_BUFFER,
-                //     visibility: ShaderStages::COMPUTE,
-                //     ty: BindingType::StorageTexture {
-                //         access: StorageTextureAccess::ReadOnly,
-                //         format: TextureFormat::Rgba8Unorm,
-                //         view_dimension: TextureViewDimension::D2,
-                //     },
-                //     count: None,
-                // },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 // BindGroupLayoutEntry {
                 //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
                 //     visibility: ShaderStages::COMPUTE,
@@ -274,6 +274,7 @@ pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
+    shading_resources: &StrandShadingResources,
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -287,6 +288,7 @@ pub fn create_strand_raster_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
+    let shading_texture = shading_resources.output_texture.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -325,11 +327,10 @@ pub fn create_strand_raster_bind_group(
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
                 },
-                // Disabled for correctness-only raster pass:
-                // BindGroupEntry {
-                //     binding: layouts::rasterizer::SHADING_BUFFER,
-                //     resource: BindingResource::TextureView(shading_buffer),
-                // },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    resource: BindingResource::TextureView(shading_texture),
+                },
                 // BindGroupEntry {
                 //     binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
                 //     resource: BindingResource::Sampler(&dom_sampler.0),

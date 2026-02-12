@@ -12,6 +12,7 @@ use bevy::{
     window::WindowResized,
 };
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashSet;
 use wgpu::{BufferDescriptor, BufferUsages};
 
 use crate::{
@@ -149,7 +150,10 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::raster::StrandRasterizerLabel,
             )
-            // .add_render_graph_node::<StrandShadingNode>(Core3d, StrandShadingLabel)
+            .add_render_graph_node::<nodes::shading::StrandShadingNode>(
+                Core3d,
+                nodes::shading::StrandShadingLabel,
+            )
             // .add_render_graph_node::<StrandShadowRasterizerNode>(
             //     Core3d,
             //     StrandShadowRasterizerLabel,
@@ -179,6 +183,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
+                nodes::shading::StrandShadingLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::shading::StrandShadingLabel,
                 nodes::raster::StrandRasterizerLabel,
             )
             .add_render_graph_edge(
@@ -201,14 +210,19 @@ impl Plugin for StrandRasterizerPlugin {
 
 fn use_prepass_buffers(
     geometry_query: Query<&StrandGeometry>,
+    light_frusta_query: Query<Entity, With<ExtractedDirectionalLight>>,
     device: Res<RenderDevice>,
     render_queue: Res<bevy::render::renderer::RenderQueue>,
     mut prepass_resources: ResMut<StrandPrepassResources>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
+    mut shading_resources: ResMut<StrandShadingResources>,
+    mut shadow_resources: ResMut<StrandShadowResources>,
 ) {
     let mut total_strands = 0u32;
     let mut total_segment_budget = 0u32;
     let mut geo_count = 0u32;
+    let mut max_segments_in_instance = 1u32;
+    let mut max_strands_in_instance = 1u32;
     for geom in &geometry_query {
         total_strands = total_strands.saturating_add(geom.strand_count);
         total_segment_budget = total_segment_budget.saturating_add(
@@ -216,22 +230,30 @@ fn use_prepass_buffers(
                 .saturating_mul(geom.max_segments_in_strand),
         );
         geo_count = geo_count.saturating_add(1);
+        max_segments_in_instance = max_segments_in_instance.max(geom.max_segments_in_strand);
+        max_strands_in_instance = max_strands_in_instance.max(geom.strand_count);
     }
 
     if total_strands == 0 {
         return;
     }
 
+    let allocated_max_segments = shading_resources.max_segments_in_strand.unwrap_or(0);
+    let allocated_max_strands = shading_resources.max_strands_in_instance.unwrap_or(0);
     raster_resources.strand_count = Some(total_strands);
+    shading_resources.strand_count = Some(total_strands);
 
     let prepass_capacity = total_strands.next_power_of_two().max(2048);
-    let binning_capacity = total_segment_budget
+    let base_binning_capacity = total_segment_budget
         .next_power_of_two()
         .max(prepass_capacity);
     let geo_capacity = geo_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
+    let light_entities: HashSet<Entity> = light_frusta_query.iter().collect();
     raster_resources.frustum_ids.clear();
+    shadow_resources.light_layer_by_frustum.clear();
+    let mut light_layer: u32 = 0;
     let mut frusta: Vec<_> = raster_resources
         .frustrum_config
         .iter()
@@ -239,7 +261,16 @@ fn use_prepass_buffers(
         .collect();
     frusta.sort_by_key(|(entity, _)| entity.index());
     for (frustum_id, (entity, cfg)) in frusta.into_iter().enumerate() {
-        raster_resources.frustum_ids.insert(entity, frustum_id as u32);
+        raster_resources
+            .frustum_ids
+            .insert(entity, frustum_id as u32);
+        let is_light = light_entities.contains(&entity);
+        if is_light {
+            shadow_resources
+                .light_layer_by_frustum
+                .insert(frustum_id as u32, light_layer);
+            light_layer = light_layer.saturating_add(1);
+        }
         let (_, _, bucket_count) = cfg.get_num_tiles();
         frustum_descs.push(GpuFrustumDesc {
             screen_width: cfg.screen_width,
@@ -249,7 +280,7 @@ fn use_prepass_buffers(
             depth_slices: cfg.depth_slices,
             bucket_base,
             bucket_count,
-            kind: 0, // 0 = camera
+            kind: u32::from(is_light), // 0 = camera, 1 = light
         });
         bucket_base = bucket_base.saturating_add(bucket_count);
     }
@@ -266,12 +297,36 @@ fn use_prepass_buffers(
         });
         bucket_base = 1;
     }
+    let frustum_task_multiplier = (frustum_descs.len() as u32).max(1);
+    let binning_capacity = base_binning_capacity
+        .saturating_mul(frustum_task_multiplier)
+        .next_power_of_two()
+        .max(base_binning_capacity);
     let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
+    let shading_layer_capacity = geo_capacity.max(1).min(128);
     let raster_work_capacity = binning_capacity
         .saturating_mul(8)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
+
+    let needs_shading_realloc = shading_resources.output_texture.is_none()
+        || shading_resources.layer_count.unwrap_or(0) < shading_layer_capacity
+        || allocated_max_segments < max_segments_in_instance
+        || allocated_max_strands < max_strands_in_instance;
+    if needs_shading_realloc {
+        let (tex, view) = create_shading_target_texture(
+            &device,
+            shading_layer_capacity,
+            max_strands_in_instance,
+            max_segments_in_instance,
+        );
+        shading_resources.output_texture_resource = Some(tex);
+        shading_resources.output_texture = Some(view);
+        shading_resources.layer_count = Some(shading_layer_capacity);
+        shading_resources.max_segments_in_strand = Some(max_segments_in_instance);
+        shading_resources.max_strands_in_instance = Some(max_strands_in_instance);
+    }
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -703,7 +758,45 @@ fn use_deep_opacity_maps(
     device: Res<RenderDevice>,
     mut shadow_resources: ResMut<StrandShadowResources>,
 ) {
-    for (entity, config) in query.iter() {
+    let mut lights: Vec<(Entity, FroxelConfig)> =
+        query.iter().map(|(e, cfg)| (e, cfg.clone())).collect();
+    lights.sort_by_key(|(e, _)| e.index());
+    if lights.is_empty() {
+        return;
+    }
+
+    let max_width = lights
+        .iter()
+        .map(|(_, cfg)| cfg.screen_width)
+        .max()
+        .unwrap_or(1);
+    let max_height = lights
+        .iter()
+        .map(|(_, cfg)| cfg.screen_height)
+        .max()
+        .unwrap_or(1);
+    let light_layers = lights.len() as u32;
+    let needs_array_realloc = shadow_resources.dom_array_targets.is_none()
+        || shadow_resources.light_entity_by_layer.len() as u32 != light_layers;
+    if needs_array_realloc {
+        let (
+            (opacity_tex, opacity_view, opacity_sampler),
+            (depth_tex, depth_view, depth_sampler),
+        ) = create_strand_shadow_texture_arrays(&device, max_width, max_height, light_layers);
+        shadow_resources.dom_array_resources = Some((opacity_tex, depth_tex));
+        shadow_resources.dom_array_targets = Some((opacity_view, depth_view));
+        shadow_resources.dom_array_samplers = Some((opacity_sampler, depth_sampler));
+    }
+    shadow_resources.light_layer_by_entity.clear();
+    shadow_resources.light_entity_by_layer.clear();
+    for (layer, (entity, _)) in lights.iter().enumerate() {
+        shadow_resources
+            .light_layer_by_entity
+            .insert(*entity, layer as u32);
+        shadow_resources.light_entity_by_layer.push(*entity);
+    }
+
+    for (entity, config) in lights.iter() {
         if shadow_resources.dom_targets.contains_key(&entity) {
             continue;
         }
@@ -718,10 +811,10 @@ fn use_deep_opacity_maps(
         );
         shadow_resources
             .dom_targets
-            .insert(entity, (opacity_view, depth_view));
+            .insert(*entity, (opacity_view, depth_view));
         shadow_resources
             .dom_samplers
-            .insert(entity, (opacity_sampler, depth_sampler));
+            .insert(*entity, (opacity_sampler, depth_sampler));
         info!("Added deep opacity maps to resource");
     }
 }

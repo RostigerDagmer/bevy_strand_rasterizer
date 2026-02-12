@@ -4,7 +4,7 @@ use bevy::{
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
+            BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
             ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
             ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
             TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
@@ -27,10 +27,12 @@ const SHADING_WORKGROUP_SIZE: u32 = 128;
 
 #[derive(Resource, Default)]
 pub struct StrandShadingResources {
+    pub output_texture_resource: Option<Texture>,
     pub output_texture: Option<TextureView>,
-    pub materials: Option<Buffer>,
     pub strand_count: Option<u32>,
     pub max_segments_in_strand: Option<u32>,
+    pub max_strands_in_instance: Option<u32>,
+    pub layer_count: Option<u32>,
 }
 
 #[derive(Resource)]
@@ -91,7 +93,7 @@ impl StrandShadingPipeline {
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
                         format: TextureFormat::Rgba8Unorm,
-                        view_dimension: TextureViewDimension::D2,
+                        view_dimension: TextureViewDimension::D2Array,
                     },
                     count: None,
                 },
@@ -222,26 +224,28 @@ pub fn create_strand_shading_bind_group(
 
 pub fn create_shading_target_texture(
     device: &RenderDevice,
-    strand_count: u32,
+    layer_count: u32,
+    max_strands_in_instance: u32,
     max_strand_segment_count: u32,
 ) -> (Texture, TextureView) {
-    let cols = strand_count.div_ceil(MAX_TEXTURE_EXTENT);
-
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("strand_shading_output"),
         size: Extent3d {
-            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR * cols,
-            height: MAX_TEXTURE_EXTENT,
-            depth_or_array_layers: 1,
+            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR,
+            height: max_strands_in_instance.clamp(1, MAX_TEXTURE_EXTENT),
+            depth_or_array_layers: layer_count.max(1),
         },
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba8Unorm,
         usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-        view_formats: &[TextureFormat::Rgba8Unorm],
+        view_formats: &[],
     });
-    let view = texture.create_view(&TextureViewDescriptor::default());
+    let view = texture.create_view(&TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..Default::default()
+    });
     (texture, view)
 }
 

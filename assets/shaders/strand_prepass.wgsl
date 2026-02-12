@@ -157,7 +157,7 @@ fn chunk_store_item(chunk_idx: u32, local_idx: u32, item: u32) {
     chunk_pool_words[chunk_word_base(chunk_idx) + 2u + local_idx] = item;
 }
 
-fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, strand_idx: u32, seg_idx: u32) {
+fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, inst_id: u32, strand_idx: u32, seg_idx: u32) {
     if frustum_id >= arrayLength(&frustum_table) {
         return;
     }
@@ -178,7 +178,7 @@ fn append_sparse_froxel_ref(frustum_id: u32, local_froxel_idx: u32, strand_idx: 
     if work_idx >= arrayLength(&raster_work_queue.items) {
         return;
     }
-    raster_work_queue.items[work_idx] = RasterWorkItem(seg_idx, strand_idx, frustum_id, local_froxel_idx);
+    raster_work_queue.items[work_idx] = RasterWorkItem(seg_idx, strand_idx, frustum_id, inst_id);
 
     let prev = atomicExchange(&froxel_bucket_heads[bucket_idx], chunk_idx);
     chunk_store_next(chunk_idx, prev);
@@ -294,20 +294,27 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Camera frustum only for now (frustum_id = 0, level = 0, non-shadow).
-    let packed_field_camera = pack_binning_field(0u, 0u, 0u);
     let segment_count = strand_meta.count - 1u;
+    let frustum_count = arrayLength(&frustum_table);
 
-    for (var i = 0u; i < segment_count; i = i + 1u) {
-        let seg_index = strand_meta.offset + i;
-        let write_idx = atomicAdd(&binning_queue.tail, 1u);
-        if write_idx < arrayLength(&binning_queue.tasks) {
-            binning_queue.tasks[write_idx] = BinningTask(
-                task.inst_id,
-                task.strand_local,
-                seg_index,
-                packed_field_camera,
-            );
+    for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
+        let frustum = frustum_table[fi];
+        if frustum.kind > 1u {
+            continue;
+        }
+        let is_shadow = select(0u, 1u, frustum.kind == 1u);
+        let packed_field = pack_binning_field(0u, is_shadow, fi);
+        for (var i = 0u; i < segment_count; i = i + 1u) {
+            let seg_index = strand_meta.offset + i;
+            let write_idx = atomicAdd(&binning_queue.tail, 1u);
+            if write_idx < arrayLength(&binning_queue.tasks) {
+                binning_queue.tasks[write_idx] = BinningTask(
+                    task.inst_id,
+                    task.strand_local,
+                    seg_index,
+                    packed_field,
+                );
+            }
         }
     }
 }
@@ -337,6 +344,7 @@ fn trace_segment_through_froxels_sparse(
     p1: vec3<f32>,
     cfg: FroxelConfig,
     frustum_id: u32,
+    inst_id: u32,
     strand_idx: u32,
     seg_idx: u32,
 ) {
@@ -418,7 +426,7 @@ fn trace_segment_through_froxels_sparse(
             let fy = u32(f.y);
             let fz = u32(f.z);
             let froxel_idx = (fz * num_tiles_y + fy) * num_tiles_x + fx;
-            append_sparse_froxel_ref(frustum_id, froxel_idx, strand_idx, seg_idx);
+            append_sparse_froxel_ref(frustum_id, froxel_idx, inst_id, strand_idx, seg_idx);
         } else {
             break;
         }
@@ -512,6 +520,7 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
         p1,
         frustum_cfg,
         frustum_id,
+        inst_id,
         task.chunk_id,
         task.seg_idx,
     );
