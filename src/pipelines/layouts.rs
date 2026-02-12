@@ -126,6 +126,14 @@ pub mod rasterizer {
                 "DIRECTIONAL_LIGHT_DEPTH_TEXTURE".into(),
                 DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
             ),
+            ShaderDefVal::UInt(
+                "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
+                DEEP_OPACITY_TEXTURE_O_VIEW,
+            ),
+            ShaderDefVal::UInt(
+                "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
+                DEEP_OPACITY_TEXTURE_D_VIEW,
+            ),
             ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
             ShaderDefVal::UInt("MATERIAL_BUFFER".into(), MATERIAL_BUFFER),
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
@@ -223,8 +231,8 @@ pub mod post_process {
 }
 
 pub mod tile_debug {
-    use bevy::shader::ShaderDefVal;
     use crate::pipelines::task_contract::BINNING_POOL_CHUNK_SIZE;
+    use bevy::shader::ShaderDefVal;
 
     pub const FRUSTUM_TABLE: u32 = 0;
     pub const FROXEL_BUCKET_HEADS: u32 = 1;

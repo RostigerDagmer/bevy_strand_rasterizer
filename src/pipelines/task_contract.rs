@@ -34,7 +34,7 @@ pub const BINNING_POOL_CHUNK_SIZE: u32 = 16;
 /// Number of allocator heads used to spread atomic pressure.
 pub const BINNING_POOL_NUM_HEADS: u32 = 64;
 /// Minimum number of chunks reserved for sparse binning.
-pub const BINNING_POOL_MIN_CHUNKS: u32 = 16_384;
+pub const BINNING_POOL_MIN_CHUNKS: u32 = 8192;
 
 pub const BINNING_LEVEL_BITS: u32 = 2;
 pub const BINNING_LEVEL_MASK: u32 = (1 << BINNING_LEVEL_BITS) - 1;

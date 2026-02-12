@@ -18,6 +18,7 @@ use crate::pipelines::{
         run_raster_pass,
     },
     shading::StrandShadingResources,
+    shadows::StrandShadowResources,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -47,6 +48,7 @@ impl Node for StrandRasterizerNode {
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
+        let shadow_resources = world.resource::<StrandShadowResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
@@ -103,6 +105,7 @@ impl Node for StrandRasterizerNode {
             &raster_pipeline,
             &raster_resources,
             &shading_resources,
+            &shadow_resources,
             &prepass_resources,
             &view_binding,
             &light_binding,

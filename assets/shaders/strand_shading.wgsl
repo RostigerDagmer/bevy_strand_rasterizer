@@ -37,6 +37,7 @@
     // PI,
     // PI_HALF,
     // SQRT_2_PI,
+    is_valid_ptr,
     find_clip_bounds
 }
 
@@ -128,10 +129,6 @@ struct FrustumDesc {
 // };
 
 // --- Helpers ---
-
-fn is_valid_ptr(_ptr: DevicePtr) -> bool {
-    return _ptr.slab != 0xFFFFFFFFu;
-}
 
 fn csch(x: f32) -> f32 {
     return 1.0 / sinh(x);

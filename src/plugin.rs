@@ -5,9 +5,14 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems, extract_component::ExtractComponentPlugin,
-        extract_resource::ExtractResourcePlugin, render_graph::RenderGraphExt,
-        render_resource::Buffer, renderer::RenderDevice, view::ExtractedView,
+        Render, RenderApp, RenderSystems,
+        extract_component::ExtractComponentPlugin,
+        extract_resource::ExtractResourcePlugin,
+        render_asset::RenderAssets,
+        render_graph::RenderGraphExt,
+        render_resource::Buffer,
+        renderer::{RenderDevice, RenderQueue},
+        view::ExtractedView,
     },
     window::WindowResized,
 };
@@ -106,7 +111,7 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<StrandShadingPipeline>();
         render_app.init_resource::<StrandShadingResources>();
-        // render_app.init_resource::<StrandShadowPipeline>();
+        render_app.init_resource::<StrandShadowPipeline>();
         render_app.init_resource::<StrandShadowResources>();
         render_app.init_resource::<StrandPrepassResources>();
         render_app.init_resource::<ComputeInvocationDims>();
@@ -119,7 +124,7 @@ impl Plugin for StrandRasterizerPlugin {
                 use_froxel_buffer,
                 use_deep_opacity_maps,
                 use_prepass_buffers,
-                // update_material_buffer,
+                update_material_buffer,
                 // use_strand_geometry.after(prepare_view_uniforms),
             )
                 .chain()
@@ -132,6 +137,10 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.add_systems(
             Render,
             update_strand_raster_pipeline.after(RenderSystems::PrepareBindGroups),
+        );
+        render_app.add_systems(
+            Render,
+            update_strand_shadow_pipeline.after(RenderSystems::PrepareBindGroups),
         );
         render_app.add_systems(
             Render,
@@ -154,10 +163,10 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::shading::StrandShadingLabel,
             )
-            // .add_render_graph_node::<StrandShadowRasterizerNode>(
-            //     Core3d,
-            //     StrandShadowRasterizerLabel,
-            // )
+            .add_render_graph_node::<nodes::shadows::StrandShadowRasterizerNode>(
+                Core3d,
+                nodes::shadows::StrandShadowRasterizerLabel,
+            )
             .add_render_graph_node::<nodes::composite::CompositionNode>(
                 Core3d,
                 nodes::composite::CompositionLabel,
@@ -183,6 +192,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
+                nodes::shadows::StrandShadowRasterizerLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::shadows::StrandShadowRasterizerLabel,
                 nodes::shading::StrandShadingLabel,
             )
             .add_render_graph_edge(
@@ -304,9 +318,9 @@ fn use_prepass_buffers(
         .max(base_binning_capacity);
     let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
-    let shading_layer_capacity = geo_capacity.max(1).min(128);
+    let shading_layer_capacity = geo_capacity.max(1).min(32);
     let raster_work_capacity = binning_capacity
-        .saturating_mul(8)
+        .saturating_mul(4)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
 
@@ -601,24 +615,33 @@ fn set_strand_geometry(
 
 // uploads changed material paramters to the buffer
 // TODO
-// pub fn update_material_buffer(
-//     query: Query<(Entity, &StrandGeometry, &StrandMaterial)>,
-//     storage_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
-//     render_queue: Res<RenderQueue>,
-// ) {
-//     for (entity, geometry, material) in query.iter() {
-//         let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
-//             warn!("Material storage buffer not found for entity: {:?}", entity);
-//             continue;
-//         };
-//         let material_bytes = bytemuck::bytes_of(material);
-//         render_queue.write_buffer(
-//             &material_buffer.buffer, // Get the underlying wgpu::Buffer
-//             0,                       // Offset in the buffer to start writing (0 for the start)
-//             material_bytes,          // The byte slice to write
-//         );
-//     }
-// }
+pub fn update_material_buffer(
+    query: Query<(Entity, &StrandGeometry, &StrandMaterial)>,
+    storage_buffers: Res<RenderAssets<GpuVirtualShaderStorageBuffer>>,
+    allocator: Res<GpuPagingAllocator>,
+    render_queue: Res<RenderQueue>,
+) {
+    for (entity, geometry, material) in query.iter() {
+        let Some(material_buffer) = storage_buffers.get(&geometry.materials) else {
+            warn!("Material storage buffer not found for entity: {:?}", entity);
+            continue;
+        };
+        let Some((allocation, kind)) = &material_buffer.allocation else {
+            warn!("Material buffer allocation missing");
+            continue;
+        };
+        let Some(buffer) = allocator.slab_buffer(*kind, allocation.slab_index) else {
+            warn!("Material slab not found in allocator");
+            continue;
+        };
+        let material_bytes = bytemuck::bytes_of(material);
+        render_queue.write_buffer(
+            &buffer,        // Get the underlying wgpu::Buffer
+            0,              // Offset in the buffer to start writing (0 for the start)
+            material_bytes, // The byte slice to write
+        );
+    }
+}
 
 // Create froxel configuration uniform buffer
 #[repr(C)]
@@ -779,10 +802,8 @@ fn use_deep_opacity_maps(
     let needs_array_realloc = shadow_resources.dom_array_targets.is_none()
         || shadow_resources.light_entity_by_layer.len() as u32 != light_layers;
     if needs_array_realloc {
-        let (
-            (opacity_tex, opacity_view, opacity_sampler),
-            (depth_tex, depth_view, depth_sampler),
-        ) = create_strand_shadow_texture_arrays(&device, max_width, max_height, light_layers);
+        let ((opacity_tex, opacity_view, opacity_sampler), (depth_tex, depth_view, depth_sampler)) =
+            create_strand_shadow_texture_arrays(&device, max_width, max_height, light_layers);
         shadow_resources.dom_array_resources = Some((opacity_tex, depth_tex));
         shadow_resources.dom_array_targets = Some((opacity_view, depth_view));
         shadow_resources.dom_array_samplers = Some((opacity_sampler, depth_sampler));

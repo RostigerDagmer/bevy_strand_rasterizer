@@ -2,6 +2,7 @@
 #import bevy_pbr::mesh_view_types as types
 
 #import "shaders/common.wgsl"::{
+    is_valid_ptr,
     find_clip_bounds,
     world_to_screen,
     canonical_min_mask,
@@ -89,10 +90,6 @@ struct RasterWorkQueue {
 @group(#{PREPASS_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read_write> chunk_pool_words: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
-
-fn is_valid_ptr(_ptr: DevicePtr) -> bool {
-    return _ptr.slab != 0xFFFFFFFFu;
-}
 
 fn stochastic_cull_camera(cam: View, aabb: Aabb, sample_threshold: f32) -> bool {
     if pc.stochastic_cull_enabled == 0u {

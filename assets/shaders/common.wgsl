@@ -6,13 +6,18 @@
     StrandGeo,
     StrandMeta,
     PushConstants,
+    DevicePtr,
 }
 
 const PI = 3.14159265359;
 const PI_HALF = PI / 2.0;
-const SQRT_2_PI = sqrt(2.0 * PI);
+const SQRT_2_PI = 2.5066282746310002;
 
 const DOM_GAMMA: f32 = 1.0; // distribution coefficient for DOM slices.
+
+fn is_valid_ptr(_ptr: DevicePtr) -> bool {
+    return _ptr.slab != 0xFFFFFFFFu;
+}
 
 fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {
     let froxels_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;

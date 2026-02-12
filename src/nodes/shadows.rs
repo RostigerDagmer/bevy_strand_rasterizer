@@ -1,10 +1,7 @@
 use bevy::{
     ecs::world::World,
     log::*,
-    pbr::{
-        GlobalClusterableObjectMeta, LightMeta, ShadowSamplers, ViewClusterBindings,
-        ViewLightsUniformOffset, ViewShadowBindings,
-    },
+    pbr::{LightMeta, ViewLightsUniformOffset},
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::PipelineCache,
@@ -12,10 +9,11 @@ use bevy::{
         view::{ViewUniformOffset, ViewUniforms},
     },
 };
+use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::pipelines::{
+    prepass::StrandPrepassResources,
     raster::StrandRasterizerResources,
-    shading::StrandShadingResources,
     shadows::{
         StrandShadowPipeline, StrandShadowResources, create_strand_shadow_bind_group,
         run_shadow_pass,
@@ -38,177 +36,71 @@ impl Node for StrandShadowRasterizerNode {
         if !world.contains_resource::<StrandRasterizerResources>() {
             return Ok(());
         }
-        let view_entity = graph.view_entity(); // Get the entity this node instance is running for
+
+        let view_entity = graph.view_entity();
         let pipeline_cache = world.resource::<PipelineCache>();
         let render_device = world.resource::<RenderDevice>();
+        let allocator = world.resource::<GpuPagingAllocator>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
+        let prepass_resources = world.resource::<StrandPrepassResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let shadow_resources = world.resource::<StrandShadowResources>();
-        let shading_resources = world.resource::<StrandShadingResources>();
-        let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
-        let light_meta = world.resource::<LightMeta>(); // Get light meta
-        let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
-        let shadow_samplers = world.resource::<ShadowSamplers>();
+        let view_uniforms = world.resource::<ViewUniforms>();
+        let light_meta = world.resource::<LightMeta>();
 
         let Some(view_uniform_offset) = world.get::<ViewUniformOffset>(view_entity) else {
-            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
-            warn!(
-                "Node running on view {:?} without ViewUniformOffset",
-                view_entity
-            );
             return Ok(());
         };
-
         let Some(view_light_uniform_offset) = world.get::<ViewLightsUniformOffset>(view_entity)
         else {
-            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
-            warn!(
-                "Node running on view {:?} without ViewLightUniformOffset",
-                view_entity
-            );
             return Ok(());
         };
-
-        // --- Check Prerequisites ---
         let Some(view_binding) = view_uniforms.uniforms.binding() else {
-            warn!("ViewUniforms binding not available.");
             return Ok(());
         };
-
         let Some(light_binding) = light_meta.view_gpu_lights.binding() else {
-            // This node might run on views without this (e.g. shadow maps). Handle appropriately.
-            warn!(
-                "Node running on view {:?} without LightBinding",
-                view_entity
-            );
             return Ok(());
         };
 
-        let Some(clusterable_objects) = global_clusterable_object_meta
-            .gpu_clusterable_objects
-            .binding()
-        else {
-            warn!("GlobalClusterableObjectMeta binding not available.");
+        let Ok((shadow_bind_group, dynamic_offsets)) = create_strand_shadow_bind_group(
+            render_device,
+            shadow_pipeline,
+            shadow_resources,
+            prepass_resources,
+            &view_binding,
+            &light_binding,
+            view_uniform_offset,
+            view_light_uniform_offset,
+        ) else {
+            warn!("Failed to create strand shadow bind group.");
             return Ok(());
         };
 
-        let Some(view_cluster_bindings) = world.get::<ViewClusterBindings>(view_entity) else {
-            warn!(
-                "Node running on view {:?} without ViewClusterBindings",
-                view_entity
-            );
-            // This might be expected if clustering isn't enabled/used for this view?
-            return Ok(()); // Adjust handling if necessary
-        };
-
-        let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
-            warn!(
-                "Node running on view {:?} without ViewShadowBindings",
-                view_entity
-            );
-            // This is expected for views rendering shadow maps, but required for views sampling them.
-            // If your node ONLY samples shadows, this might be an error.
-            // If your node might run on shadow views, handle appropriately.
-            return Ok(()); // Adjust handling if necessary
-        };
-        let Some(cluster_indices_binding) =
-            view_cluster_bindings.clusterable_object_index_lists_binding()
-        else {
-            warn!(
-                "ViewClusterBindings clusterable_object_index_lists_binding not available for view {:?}",
-                view_entity
-            );
-            return Ok(());
-        };
-
-        let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding()
-        else {
-            warn!(
-                "ViewClusterBindings offsets_and_counts_binding not available for view {:?}",
-                view_entity
-            );
-            return Ok(());
-        };
-
-        for entity in raster_resources.froxel_config_buffer.keys() {
-            debug!("Dispatching for entity: {:?}", entity);
-            // Get the dimensions to calculate dispatch size
-            let Some(frustrum) = raster_resources.frustrum_config.get(entity) else {
-                warn!("No frustum size defined.");
-                return Ok(());
+        let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
+        frusta.sort_by_key(|(entity, _)| entity.index());
+        for (entity, frustum_cfg) in frusta {
+            let Some(&frustum_id) = raster_resources.frustum_ids.get(entity) else {
+                continue;
             };
-
-            // Get the strand count for dispatch dimensions
-            let Some(strand_count) = raster_resources.strand_count else {
-                warn!("No strand count set.");
-                return Ok(());
-            };
-
-            if *entity != view_entity {
-                debug!("light entity: {:?}", entity);
-                let Ok((shadows_bindgroup, dynamic_offsets)) = &create_strand_shadow_bind_group(
-                    entity,
-                    render_device,
-                    shadow_pipeline,
-                    shadow_resources,
-                    shading_resources,
-                    &raster_resources,
-                    &view_binding,
-                    &light_binding,
-                    view_uniform_offset,
-                    view_light_uniform_offset,
-                    &cluster_indices_binding,
-                    &cluster_offsets_binding,
-                    &clusterable_objects,
-                    shadow_samplers,
-                    (
-                        &view_shadow_bindings.point_light_depth_texture_view,
-                        &view_shadow_bindings.directional_light_depth_texture_view,
-                    ),
-                ) else {
-                    warn!("Failed to create strand shadow bind group.");
-                    continue;
-                };
-                // Binning bind group (shadow pass)
-                // let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
-                //     &entity,
-                //     render_device,
-                //     binning_pipeline,
-                //     view_binding.clone(),
-                //     view_uniform_offset,
-                //     light_binding.clone(),
-                //     view_light_uniform_offset,
-                //     raster_resources,
-                //     binning_buffers,
-                // ) else {
-                //     warn!("Failed to create strand binning bind group for shadows .");
-                //     return Ok(());
-                // };
-
-                // run_binning_pass(
-                //     &entity,
-                //     render_device,
-                //     render_context,
-                //     pipeline_cache,
-                //     strand_binning_bind_groups,
-                //     binning_buffers,
-                //     binning_pipeline,
-                //     &frustrum,
-                //     strand_count,
-                //     true,
-                // );
-
-                run_shadow_pass(
-                    render_context,
-                    pipeline_cache,
-                    shadow_pipeline,
-                    &frustrum,
-                    &raster_resources,
-                    &shadows_bindgroup,
-                    &dynamic_offsets,
-                );
+            if !shadow_resources
+                .light_layer_by_frustum
+                .contains_key(&frustum_id)
+            {
+                continue;
             }
+            run_shadow_pass(
+                render_context,
+                pipeline_cache,
+                shadow_pipeline,
+                allocator,
+                frustum_cfg,
+                frustum_id,
+                raster_resources,
+                &shadow_bind_group,
+                &dynamic_offsets,
+            );
         }
+
         Ok(())
     }
 }
