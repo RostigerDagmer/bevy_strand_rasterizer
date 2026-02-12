@@ -14,10 +14,6 @@ use bevy::{
 };
 
 use crate::pipelines::{
-    binning::{
-        StrandBinningBuffers, StrandBinningPipeline, create_strand_binning_bind_group,
-        run_binning_pass,
-    },
     raster::StrandRasterizerResources,
     shading::StrandShadingResources,
     shadows::{
@@ -47,10 +43,8 @@ impl Node for StrandShadowRasterizerNode {
         let render_device = world.resource::<RenderDevice>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
-        let binning_pipeline = world.resource::<StrandBinningPipeline>();
         let shadow_resources = world.resource::<StrandShadowResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
         let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -159,7 +153,6 @@ impl Node for StrandShadowRasterizerNode {
                     shadow_resources,
                     shading_resources,
                     &raster_resources,
-                    binning_buffers,
                     &view_binding,
                     &light_binding,
                     view_uniform_offset,
@@ -177,33 +170,33 @@ impl Node for StrandShadowRasterizerNode {
                     continue;
                 };
                 // Binning bind group (shadow pass)
-                let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
-                    &entity,
-                    render_device,
-                    binning_pipeline,
-                    view_binding.clone(),
-                    view_uniform_offset,
-                    light_binding.clone(),
-                    view_light_uniform_offset,
-                    raster_resources,
-                    binning_buffers,
-                ) else {
-                    warn!("Failed to create strand binning bind group for shadows .");
-                    return Ok(());
-                };
+                // let Ok(strand_binning_bind_groups) = &create_strand_binning_bind_group(
+                //     &entity,
+                //     render_device,
+                //     binning_pipeline,
+                //     view_binding.clone(),
+                //     view_uniform_offset,
+                //     light_binding.clone(),
+                //     view_light_uniform_offset,
+                //     raster_resources,
+                //     binning_buffers,
+                // ) else {
+                //     warn!("Failed to create strand binning bind group for shadows .");
+                //     return Ok(());
+                // };
 
-                run_binning_pass(
-                    &entity,
-                    render_device,
-                    render_context,
-                    pipeline_cache,
-                    strand_binning_bind_groups,
-                    binning_buffers,
-                    binning_pipeline,
-                    &frustrum,
-                    strand_count,
-                    true,
-                );
+                // run_binning_pass(
+                //     &entity,
+                //     render_device,
+                //     render_context,
+                //     pipeline_cache,
+                //     strand_binning_bind_groups,
+                //     binning_buffers,
+                //     binning_pipeline,
+                //     &frustrum,
+                //     strand_count,
+                //     true,
+                // );
 
                 run_shadow_pass(
                     render_context,

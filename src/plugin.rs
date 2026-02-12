@@ -9,6 +9,7 @@ use bevy::{
         extract_resource::ExtractResourcePlugin, render_graph::RenderGraphExt,
         render_resource::Buffer, renderer::RenderDevice, view::ExtractedView,
     },
+    window::WindowResized,
 };
 use bytemuck::{Pod, Zeroable};
 use wgpu::{BufferDescriptor, BufferUsages};
@@ -19,7 +20,6 @@ use crate::{
     dson::DsonAsset,
     nodes,
     pipelines::{
-        binning::*,
         composite::*,
         prepass::*,
         raster::*,
@@ -107,8 +107,6 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandShadingResources>();
         // render_app.init_resource::<StrandShadowPipeline>();
         render_app.init_resource::<StrandShadowResources>();
-        render_app.init_resource::<StrandBinningPipeline>();
-        render_app.init_resource::<StrandBinningBuffers>();
         render_app.init_resource::<StrandPrepassResources>();
         render_app.init_resource::<ComputeInvocationDims>();
         render_app.init_resource::<StrandPrepassPipeline>();
@@ -612,11 +610,15 @@ pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig)
 
 fn flag_realloc_on_view_change(
     mut commands: Commands,
-    cams: Query<(Entity, Option<&TieFroxelsToView>), Changed<ExtractedView>>,
+    cams: Query<(Entity, Option<&TieFroxelsToView>)>,
+    mut resize_reader: MessageReader<WindowResized>,
     // or listen to WindowResized and map to camera(s)
 ) {
-    for (e, _) in &cams {
-        commands.entity(e).insert(NeedsRealloc);
+    for _ in resize_reader.read() {
+        info!("window changed");
+        for (e, _) in &cams {
+            commands.entity(e).insert(NeedsRealloc);
+        }
     }
 }
 

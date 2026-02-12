@@ -23,10 +23,7 @@ use crate::{
     shader_types::PushConstants,
 };
 
-use super::{
-    binning::StrandBinningBuffers, raster::StrandRasterizerResources,
-    shading::StrandShadingResources,
-};
+use super::{raster::StrandRasterizerResources, shading::StrandShadingResources};
 
 const NUM_DOM_SLICES: u32 = 12;
 
@@ -359,7 +356,6 @@ pub fn create_strand_shadow_bind_group(
     shadow_resources: &StrandShadowResources,
     shading_resources: &StrandShadingResources,
     raster_resources: &StrandRasterizerResources,
-    buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
     view_uniform_offset: &ViewUniformOffset,
@@ -370,56 +366,56 @@ pub fn create_strand_shadow_bind_group(
     shadows: &ShadowSamplers,
     shadow_textures: (&TextureView, &TextureView),
 ) -> Result<(BindGroup, Vec<u32>), ()> {
-    let artifacts = buffers.artifacts.get(entity).ok_or(())?;
+    // let artifacts = buffers.artifacts.get(entity).ok_or(())?;
     let layout = &pipeline.bind_group_layout;
 
-    let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
-    let tile_counts_buffer = &artifacts.tile_counts_buffer;
-    let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
-    let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
-    let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
+    // let tile_offsets_buffer = &artifacts.tile_offsets_buffer;
+    // let tile_counts_buffer = &artifacts.tile_counts_buffer;
+    // let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
+    // let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
+    // let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    // let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
     let output_texture = shadow_resources.dom_targets.get(entity).ok_or(())?;
     let packed_segments = raster_resources.froxel_buffer.get(entity).ok_or(())?;
     let froxel_config_buffer = raster_resources
         .froxel_config_buffer
         .get(entity)
         .ok_or(())?;
-    let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
+    // let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
             Some(&*format!("strand_shadows_{:?}_bind_group", entity)),
             layout,
             &[
-                BindGroupEntry {
-                    binding: layouts::rasterizer::VERTEX_BUFFER,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::INDEX_BUFFER,
-                    resource: index_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::META_BUFFER,
-                    resource: meta_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::GEO_BUFFER,
-                    resource: geos_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::MATERIAL_BUFFER,
-                    resource: material_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
-                    resource: tile_offsets_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
-                    resource: tile_counts_buffer.as_entire_binding(),
-                },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::VERTEX_BUFFER,
+                //     resource: vertex_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::INDEX_BUFFER,
+                //     resource: index_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::META_BUFFER,
+                //     resource: meta_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::GEO_BUFFER,
+                //     resource: geos_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::MATERIAL_BUFFER,
+                //     resource: material_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::TILE_OFFSETS_BUFFER,
+                //     resource: tile_offsets_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::rasterizer::TILE_COUNTS_BUFFER,
+                //     resource: tile_counts_buffer.as_entire_binding(),
+                // },
                 BindGroupEntry {
                     binding: layouts::rasterizer::FROXEL_TILE_BUFFER,
                     resource: packed_segments.as_entire_binding(),

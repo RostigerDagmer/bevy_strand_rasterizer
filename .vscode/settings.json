@@ -4,7 +4,7 @@
     "crates/bevy_gpu_paging_allocator/Cargo.toml"
   ],
   "rust-analyzer.cargo.features": "all",
-  "rust-analyzer.checkOnSave.command": "check",
+  "rust-analyzer.checkOnSave": true,
   "rust-analyzer.runnables.extraEnv": {
     "RUSTFLAGS": "-Awarnings"
   }

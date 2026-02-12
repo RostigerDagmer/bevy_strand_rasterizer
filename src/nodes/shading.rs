@@ -14,7 +14,6 @@ use bevy::{
 };
 
 use crate::pipelines::{
-    binning::StrandBinningBuffers,
     raster::StrandRasterizerResources,
     shading::{
         StrandShadingPipeline, StrandShadingResources, create_strand_shading_bind_group,
@@ -45,7 +44,6 @@ impl Node for StrandShadingNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let render_device = world.resource::<RenderDevice>();
         let shading_pipeline = world.resource::<StrandShadingPipeline>();
-        let binning_buffers = world.resource::<StrandBinningBuffers>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
         let shadow_resources = world.resource::<StrandShadowResources>();
@@ -131,7 +129,6 @@ impl Node for StrandShadingNode {
             raster_resources,
             &shading_resources,
             &shadow_resources,
-            &binning_buffers,
             &view_binding,
             &light_binding,
             view_uniform_offset,

@@ -25,7 +25,7 @@ use crate::{
     shader_types::PushConstants,
 };
 
-use super::{binning::StrandBinningBuffers, raster::StrandRasterizerResources};
+use super::raster::StrandRasterizerResources;
 
 const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
 const SHADING_WORKGROUP_SIZE: u32 = 64; // for shading
@@ -281,7 +281,7 @@ pub fn create_strand_shading_bind_group(
     raster_resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
     shadow_resources: &StrandShadowResources,
-    buffers: &StrandBinningBuffers,
+    // buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
     view_uniform_offset: &ViewUniformOffset,
@@ -298,10 +298,10 @@ pub fn create_strand_shading_bind_group(
         .ok_or(())?;
 
     let layout = &pipeline.bind_group_layout;
-    let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
-    let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
-    let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
+    // let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
+    // let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
+    // let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
+    // let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
     let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
     let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
@@ -315,22 +315,22 @@ pub fn create_strand_shading_bind_group(
             Some("strand_shading_bind_group"),
             layout,
             &[
-                BindGroupEntry {
-                    binding: layouts::shading::VERTEX_BUFFER,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::INDEX_BUFFER,
-                    resource: index_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::GEO_BUFFER,
-                    resource: geos_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::META_BUFFER,
-                    resource: meta_buffer.as_entire_binding(),
-                },
+                // BindGroupEntry {
+                //     binding: layouts::shading::VERTEX_BUFFER,
+                //     resource: vertex_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::shading::INDEX_BUFFER,
+                //     resource: index_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::shading::GEO_BUFFER,
+                //     resource: geos_buffer.as_entire_binding(),
+                // },
+                // BindGroupEntry {
+                //     binding: layouts::shading::META_BUFFER,
+                //     resource: meta_buffer.as_entire_binding(),
+                // },
                 BindGroupEntry {
                     binding: layouts::shading::VIEW_UNIFORM,
                     resource: view_buffer.clone(),

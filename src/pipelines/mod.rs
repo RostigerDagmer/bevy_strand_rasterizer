@@ -1,4 +1,3 @@
-pub mod binning;
 pub mod composite;
 pub mod ext;
 pub mod layouts;
