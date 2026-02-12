@@ -1,34 +1,29 @@
 use bevy::{
-    pbr::{ShadowSamplers, ViewLightsUniformOffset, ViewShadowBindings},
+    pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BlendState, Buffer, BufferBindingType, BufferSize,
-            CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d,
-            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
-            PushConstantRange, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess, Texture,
-            TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-            TextureView, TextureViewDescriptor, TextureViewDimension,
+            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
+            ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
+            ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
+            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
     },
     shader::ShaderDefVal,
 };
+use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::{
-    pipelines::{layouts, shadows::StrandShadowResources},
+    pipelines::{layouts, prepass::StrandPrepassResources},
     plugin::MAX_TEXTURE_EXTENT,
     shader_types::PushConstants,
 };
 
-use super::raster::StrandRasterizerResources;
-
-const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4; // for shading
-const SHADING_WORKGROUP_SIZE: u32 = 64; // for shading
+const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4;
+const SHADING_WORKGROUP_SIZE: u32 = 128;
 
 #[derive(Resource, Default)]
 pub struct StrandShadingResources {
@@ -41,61 +36,15 @@ pub struct StrandShadingResources {
 #[derive(Resource)]
 pub struct StrandShadingPipeline {
     pub bind_group_layout: BindGroupLayout,
-    pub shading_pipeline: CachedComputePipelineId,
+    pub shading_pipeline: Option<CachedComputePipelineId>,
+    pub allocator_epoch: u64,
 }
 
 impl StrandShadingPipeline {
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        // We shade in strand space so we only need the vertex, index and meta buffers in terms of geometry.
-        // We also need the View and light buffers and an output buffer containing the shading data along line segments.
         device.create_bind_group_layout(
             "strand_shading_bind_group_layout",
             &[
-                // Vertex buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::VERTEX_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Index Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::INDEX_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Meta buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::META_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Geos buffer (read-only storage buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::GEO_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // View Uniform Buffer
                 BindGroupLayoutEntry {
                     binding: layouts::shading::VIEW_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
@@ -106,7 +55,6 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
-                // Light Uniform Buffer
                 BindGroupLayoutEntry {
                     binding: layouts::shading::LIGHT_UNIFORM,
                     visibility: ShaderStages::COMPUTE,
@@ -117,9 +65,8 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
-                // Cluster Indices
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::CLUSTER_INDICES,
+                    binding: layouts::shading::BINNING_QUEUE,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -128,9 +75,8 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
-                // Cluster Offsets and Counts
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::CLUSTER_OFFSETS_AND_COUNTS,
+                    binding: layouts::shading::FRUSTUM_TABLE,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -139,68 +85,6 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
-                // Clusterable Objects
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::CLUSTERABLE_OBJECTS,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Point Light Depth Texture
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::POINT_LIGHT_DEPTH_TEXTURE,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
-                    count: None,
-                },
-                // Directional Light Depth Texture
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Comparison),
-                    count: None,
-                },
-                // Deep Opacity Texture Array (Opacity layers)
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Deep Opacity Texture View
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Deep Opacity Texture Array (Depth)
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Deep Opacity Texture View
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Output texture (write-only storage texture)
                 BindGroupLayoutEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     visibility: ShaderStages::COMPUTE,
@@ -211,18 +95,6 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
-                // Material Buffer
-                BindGroupLayoutEntry {
-                    binding: layouts::shading::MATERIAL_BUFFER,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // NOTE: Additional textures here if necessary for more accurate blending during rasterization
             ],
         )
     }
@@ -233,104 +105,95 @@ impl FromWorld for StrandShadingPipeline {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
 
-        let shader_loader = world.resource::<AssetServer>();
-        let shading_shader = shader_loader.load("shaders/strand_shading.wgsl");
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let cdefs = [
-            vec![
-                ShaderDefVal::UInt(
-                    "MAX_TEXTURE_EXTENT".into(),
-                    crate::plugin::MAX_TEXTURE_EXTENT,
-                ),
-                ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SHADING_WORKGROUP_SIZE),
-            ],
-            layouts::shading::shader_defs(),
-        ]
-        .concat();
-
-        let shading_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("strand_shading_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
-            shader: shading_shader,
-            shader_defs: cdefs,
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
-            entry_point: Some("shade_strands".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-
-        debug!(
-            "Created strand shading compute pipelines: shading={:?}",
-            shading_pipeline
-        );
-
         StrandShadingPipeline {
             bind_group_layout,
-            shading_pipeline,
+            shading_pipeline: None,
+            allocator_epoch: u64::MAX,
         }
     }
 }
 
+pub fn update_strand_shading_pipeline(
+    mut pipeline: ResMut<StrandShadingPipeline>,
+    allocator: Res<GpuPagingAllocator>,
+    shader_loader: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let current_state = allocator.bindgroups_epoch;
+    if pipeline.shading_pipeline.is_some() && pipeline.allocator_epoch == current_state {
+        return;
+    }
+
+    let (Some(buffer_layout), Some(table_layout)) = (
+        allocator.buffer_bind_group_layout.clone(),
+        allocator.pagetable_bind_group_layout.clone(),
+    ) else {
+        return;
+    };
+
+    let cdefs = [
+        vec![
+            ShaderDefVal::UInt("MAX_TEXTURE_EXTENT".into(), MAX_TEXTURE_EXTENT),
+            ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SHADING_WORKGROUP_SIZE),
+            ShaderDefVal::UInt(
+                "SIZEOF_METADATA".into(),
+                std::mem::size_of::<crate::shader_types::StrandMeta>() as u32,
+            ),
+            ShaderDefVal::UInt(
+                "SIZEOF_MATERIAL".into(),
+                std::mem::size_of::<crate::components::StrandMaterial>() as u32,
+            ),
+        ],
+        layouts::shading::shader_defs(),
+        allocator.shader_defs(),
+    ]
+    .concat();
+
+    let max_group = allocator
+        .buffer_group_idx
+        .max(allocator.table_group_idx)
+        .max(layouts::shading::SHADING_GROUP);
+    let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
+    layout[allocator.buffer_group_idx as usize] = buffer_layout;
+    layout[allocator.table_group_idx as usize] = table_layout;
+    layout[layouts::shading::SHADING_GROUP as usize] = pipeline.bind_group_layout.clone();
+
+    let shader = shader_loader.load("shaders/strand_shading.wgsl");
+    pipeline.shading_pipeline = Some(pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("strand_shading_pipeline".into()),
+        layout,
+        shader,
+        shader_defs: cdefs,
+        push_constant_ranges: vec![PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            range: 0..std::mem::size_of::<PushConstants>() as u32,
+        }],
+        entry_point: Some("shade_strands".into()),
+        zero_initialize_workgroup_memory: false,
+    }));
+    pipeline.allocator_epoch = current_state;
+}
+
 pub fn create_strand_shading_bind_group(
-    view_entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandShadingPipeline,
-    raster_resources: &StrandRasterizerResources,
+    prepass_resources: &StrandPrepassResources,
     shading_resources: &StrandShadingResources,
-    shadow_resources: &StrandShadowResources,
-    // buffers: &StrandBinningBuffers,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
     view_uniform_offset: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
-    cluster_indices: &BindingResource,
-    cluster_offsets_and_counts: &BindingResource,
-    clusterable_objects: &BindingResource,
-    shadows: &ShadowSamplers,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
-    let light_entities = raster_resources
-        .froxel_config_buffer
-        .keys()
-        .find(|k| *k != view_entity)
-        .ok_or(())?;
-
     let layout = &pipeline.bind_group_layout;
-    // let vertex_buffer = buffers.vertex_buffer.as_ref().ok_or(())?;
-    // let index_buffer = buffers.index_buffer.as_ref().ok_or(())?;
-    // let meta_buffer = buffers.meta_buffer.as_ref().ok_or(())?;
-    // let geos_buffer = buffers.geos_buffer.as_ref().ok_or(())?;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
-    let material_buffer = shading_resources.materials.as_ref().ok_or(())?;
-    let dom_texture = shadow_resources.dom_targets.get(light_entities).ok_or(())?;
-    let dom_sampler = shadow_resources
-        .dom_samplers
-        .get(light_entities)
-        .ok_or(())?;
+    let binning_queue = prepass_resources.binning_queue.as_ref().ok_or(())?;
+    let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
             Some("strand_shading_bind_group"),
             layout,
             &[
-                // BindGroupEntry {
-                //     binding: layouts::shading::VERTEX_BUFFER,
-                //     resource: vertex_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::shading::INDEX_BUFFER,
-                //     resource: index_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::shading::GEO_BUFFER,
-                //     resource: geos_buffer.as_entire_binding(),
-                // },
-                // BindGroupEntry {
-                //     binding: layouts::shading::META_BUFFER,
-                //     resource: meta_buffer.as_entire_binding(),
-                // },
                 BindGroupEntry {
                     binding: layouts::shading::VIEW_UNIFORM,
                     resource: view_buffer.clone(),
@@ -340,52 +203,16 @@ pub fn create_strand_shading_bind_group(
                     resource: light_buffer.clone(),
                 },
                 BindGroupEntry {
-                    binding: layouts::shading::CLUSTER_INDICES,
-                    resource: cluster_indices.clone(),
+                    binding: layouts::shading::BINNING_QUEUE,
+                    resource: binning_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::shading::CLUSTER_OFFSETS_AND_COUNTS,
-                    resource: cluster_offsets_and_counts.clone(),
+                    binding: layouts::shading::FRUSTUM_TABLE,
+                    resource: frustum_table.as_entire_binding(),
                 },
-                BindGroupEntry {
-                    binding: layouts::shading::CLUSTERABLE_OBJECTS,
-                    resource: clusterable_objects.clone(),
-                },
-                // Bind the shadow map texture
-                BindGroupEntry {
-                    binding: layouts::shading::POINT_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(&shadows.point_light_comparison_sampler),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-                    resource: BindingResource::Sampler(
-                        &shadows.directional_light_comparison_sampler,
-                    ),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O,
-                    resource: BindingResource::Sampler(&dom_sampler.0),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    resource: BindingResource::TextureView(&dom_texture.0),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D,
-                    resource: BindingResource::Sampler(&dom_sampler.1),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    resource: BindingResource::TextureView(&dom_texture.1),
-                },
-                // Bind the output texture
                 BindGroupEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
-                },
-                BindGroupEntry {
-                    binding: layouts::shading::MATERIAL_BUFFER,
-                    resource: material_buffer.as_entire_binding(),
                 },
             ],
         ),
@@ -398,11 +225,10 @@ pub fn create_shading_target_texture(
     strand_count: u32,
     max_strand_segment_count: u32,
 ) -> (Texture, TextureView) {
-    // calculate how many columns we need
     let cols = strand_count.div_ceil(MAX_TEXTURE_EXTENT);
 
     let texture = device.create_texture(&TextureDescriptor {
-        label: Some("strand_rasterizer_output"),
+        label: Some("strand_shading_output"),
         size: Extent3d {
             width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR * cols,
             height: MAX_TEXTURE_EXTENT,
@@ -423,44 +249,60 @@ pub fn run_shading_pass(
     render_context: &mut RenderContext,
     pipeline_cache: &PipelineCache,
     pipeline: &StrandShadingPipeline,
+    prepass_resources: &StrandPrepassResources,
     resources: &StrandShadingResources,
+    allocator: &GpuPagingAllocator,
     bind_group: &BindGroup,
     offsets: &[u32],
 ) {
-    let Some(strand_count) = resources.strand_count else {
-        warn!("Strand count not set.");
+    let Some(shading_pipeline_id) = pipeline.shading_pipeline else {
+        warn!("Shading pipeline id not ready");
         return;
     };
-    let Some(shading_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.shading_pipeline)
-    else {
+    let Some(shading_pipeline) = pipeline_cache.get_compute_pipeline(shading_pipeline_id) else {
         warn!("Shading pipeline not found");
         return;
     };
+    let Some(allocator_buffer_bind_group) = allocator.buffer_bind_group.as_ref() else {
+        warn!("allocator buffer bind group is not ready yet.");
+        return;
+    };
+    let Some(allocator_pagetable_bind_group) = allocator.pagetable_bind_group.as_ref() else {
+        warn!("allocator pagetable bind group is not ready yet.");
+        return;
+    };
 
-    let encoder = render_context.command_encoder(); // Get CommandEncoder
-    // --- Shading ---
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("Strand Shading"),
-            ..default()
-        });
-        pass.set_pipeline(shading_pipeline);
-        pass.set_bind_group(0, bind_group, offsets);
-        // Set push constants if needed
-        let pushconstants = PushConstants {
-            num_elements: resources.strand_count.unwrap_or(0),
-            workgroup_offset: resources.max_segments_in_strand.unwrap_or(0),
-            scan_load_base: 0,
-            scan_save_base: 0,
-            ..Default::default()
-        };
-        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
-
-        // Dispatch based on number of strands or segments
-        // TODO: this limits us to e.g. 65535 strands. With most workgroups staying underutilized.
-        pass.dispatch_workgroups(strand_count, 1, 1);
+    let task_capacity = prepass_resources.binning_task_capacity;
+    if task_capacity == 0 {
+        return;
     }
 
-    // --- Shading complete ---
-    // output_texture is ready for composition
+    let workgroups = task_capacity.div_ceil(SHADING_WORKGROUP_SIZE);
+    if workgroups == 0 {
+        return;
+    }
+
+    let encoder = render_context.command_encoder();
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("Strand Shading"),
+        ..default()
+    });
+    pass.set_pipeline(shading_pipeline);
+    pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
+    pass.set_bind_group(
+        allocator.table_group_idx,
+        allocator_pagetable_bind_group,
+        &[],
+    );
+    pass.set_bind_group(layouts::shading::SHADING_GROUP, bind_group, offsets);
+
+    let pushconstants = PushConstants {
+        num_elements: task_capacity,
+        workgroup_offset: resources.max_segments_in_strand.unwrap_or(0),
+        scan_load_base: 0,
+        scan_save_base: 0,
+        ..Default::default()
+    };
+    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.dispatch_workgroups(workgroups, 1, 1);
 }

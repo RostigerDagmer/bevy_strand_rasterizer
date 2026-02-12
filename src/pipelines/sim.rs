@@ -1,4 +1,3 @@
-use crate::{pipelines::layouts, shader_types::PushConstants};
 use bevy::{
     prelude::*,
     render::{
@@ -40,7 +39,7 @@ impl StrandSimulatorPipeline {
             &[
                 // Vertex buffer (read-only storage buffer)
                 BindGroupLayoutEntry {
-                    binding: layouts::shading::VERTEX_BUFFER,
+                    binding: 0,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -72,7 +71,6 @@ impl FromWorld for StrandSimulatorPipeline {
                 ),
                 ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SIMULATOR_WORKGROUP_SIZE),
             ],
-            layouts::shading::shader_defs(),
         ]
         .concat();
 

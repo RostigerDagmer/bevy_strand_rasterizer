@@ -198,58 +198,21 @@ pub mod binning {
 pub mod shading {
     use bevy::shader::ShaderDefVal;
 
-    pub const VERTEX_BUFFER: u32 = 0;
-    pub const INDEX_BUFFER: u32 = 1;
-    pub const META_BUFFER: u32 = 2;
-    pub const VIEW_UNIFORM: u32 = 3;
-    pub const LIGHT_UNIFORM: u32 = 4;
-    pub const CLUSTER_INDICES: u32 = 5;
-    pub const CLUSTER_OFFSETS_AND_COUNTS: u32 = 6;
-    pub const CLUSTERABLE_OBJECTS: u32 = 7;
-    pub const POINT_LIGHT_DEPTH_TEXTURE: u32 = 8;
-    pub const DIRECTIONAL_LIGHT_DEPTH_TEXTURE: u32 = 9;
-    pub const OUTPUT_TEXTURE: u32 = 10;
-    pub const MATERIAL_BUFFER: u32 = 11;
-    pub const DEEP_OPACITY_TEXTURE_O: u32 = 12;
-    pub const DEEP_OPACITY_TEXTURE_D: u32 = 13;
-    pub const DEEP_OPACITY_TEXTURE_O_VIEW: u32 = 14;
-    pub const DEEP_OPACITY_TEXTURE_D_VIEW: u32 = 15;
-    pub const GEO_BUFFER: u32 = 16;
+    pub const SHADING_GROUP: u32 = 2;
+    pub const VIEW_UNIFORM: u32 = 0;
+    pub const LIGHT_UNIFORM: u32 = 1;
+    pub const BINNING_QUEUE: u32 = 2;
+    pub const FRUSTUM_TABLE: u32 = 3;
+    pub const OUTPUT_TEXTURE: u32 = 4;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
-            ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
-            ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
-            ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
+            ShaderDefVal::UInt("SHADING_GROUP".into(), SHADING_GROUP),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
-            ShaderDefVal::UInt("CLUSTER_INDICES".into(), CLUSTER_INDICES),
-            ShaderDefVal::UInt(
-                "CLUSTER_OFFSETS_AND_COUNTS".into(),
-                CLUSTER_OFFSETS_AND_COUNTS,
-            ),
-            ShaderDefVal::UInt("CLUSTERABLE_OBJECTS".into(), CLUSTERABLE_OBJECTS),
-            ShaderDefVal::UInt(
-                "POINT_LIGHT_DEPTH_TEXTURE".into(),
-                POINT_LIGHT_DEPTH_TEXTURE,
-            ),
-            ShaderDefVal::UInt(
-                "DIRECTIONAL_LIGHT_DEPTH_TEXTURE".into(),
-                DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
-            ),
+            ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
+            ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
-            ShaderDefVal::UInt("MATERIAL_BUFFER".into(), MATERIAL_BUFFER),
-            ShaderDefVal::UInt("GEO_BUFFER".into(), GEO_BUFFER),
-            ShaderDefVal::UInt("DEEP_OPACITY_TEXTURE_O".into(), DEEP_OPACITY_TEXTURE_O),
-            ShaderDefVal::UInt("DEEP_OPACITY_TEXTURE_D".into(), DEEP_OPACITY_TEXTURE_D),
-            ShaderDefVal::UInt(
-                "DEEP_OPACITY_TEXTURE_O_VIEW".into(),
-                DEEP_OPACITY_TEXTURE_O_VIEW,
-            ),
-            ShaderDefVal::UInt(
-                "DEEP_OPACITY_TEXTURE_D_VIEW".into(),
-                DEEP_OPACITY_TEXTURE_D_VIEW,
-            ),
         ]
     }
 }

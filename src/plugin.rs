@@ -132,6 +132,10 @@ impl Plugin for StrandRasterizerPlugin {
             Render,
             update_strand_raster_pipeline.after(RenderSystems::PrepareBindGroups),
         );
+        render_app.add_systems(
+            Render,
+            update_strand_shading_pipeline.after(RenderSystems::PrepareBindGroups),
+        );
         render_app
             .add_render_graph_node::<nodes::prepass::WorkPreparationNode>(
                 Core3d,

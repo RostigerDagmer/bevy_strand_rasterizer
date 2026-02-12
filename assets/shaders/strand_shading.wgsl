@@ -2,7 +2,6 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::{
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
-    mesh_view_bindings as view_bindings,
 }
 #import bevy_pbr::mesh_view_types as types
 #import "shaders/shading_LUTs.wgsl"::{
@@ -14,47 +13,67 @@
     LEG_WEIGHTS_15,
 }
 #import "shaders/types.wgsl"::{
-    Aabb,
+    DevicePtr,
     FroxelConfig,
-    SegmentRef,
-    StrandGeo,
     StrandMeta,
     StrandMaterial,
+    Vertices,
+    Indices,
+    Materials,
+    Meta,
     PushConstants,
+}
+
+#import "shaders/task_contract.wgsl"::{
+    BinningTask,
+    unpack_binning_frustum,
+}
+
+#import "shaders/queues.wgsl"::{
+    BinningQueue,
 }
 
 #import "shaders/common.wgsl"::{
     PI,
     PI_HALF,
     SQRT_2_PI,
-    DOM_GAMMA,
-    find_clip_bounds,
-    world_to_screen_aabbnorm
+    find_clip_bounds
 }
 
 const SQRT_2_PI = SQRT_2_PI;
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
+const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
+const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
 
 var<push_constant> pc: PushConstants;
-@group(0) @binding(#{VERTEX_BUFFER}) var<storage, read> vertices: array<vec4<f32>>;
-@group(0) @binding(#{INDEX_BUFFER}) var<storage, read> indices: array<u32>;
-@group(0) @binding(#{META_BUFFER}) var<storage, read> strand_metadata: array<StrandMeta>;
-@group(0) @binding(#{GEO_BUFFER}) var<storage, read> geos: array<StrandGeo>;
-@group(0) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
-@group(0) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
-@group(0) @binding(#{CLUSTER_INDICES}) var<storage> clusterable_object_index_lists: types::ClusterLightIndexLists;
-@group(0) @binding(#{CLUSTERABLE_OBJECTS}) var<storage> clusterable_objects: types::ClusterableObjects;
-@group(0) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
-@group(0) @binding(#{POINT_LIGHT_DEPTH_TEXTURE}) var point_shadow_textures_linear_sampler: sampler;
-@group(0) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures_linear_sampler: sampler;
-@group(0) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(#{MATERIAL_BUFFER}) var<storage, read> materials: array<StrandMaterial>;
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_sampler: sampler;
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_depth_sampler: sampler;
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_O_VIEW}) var deep_opacity_maps: texture_3d<f32>;
-@group(0) @binding(#{DEEP_OPACITY_TEXTURE_D_VIEW}) var deep_opacity_depth_maps: texture_2d<f32>;
+struct FrustumDesc {
+    screen_width: u32,
+    screen_height: u32,
+    froxel_size_x: u32,
+    froxel_size_y: u32,
+    depth_slices: u32,
+    bucket_base: u32,
+    bucket_count: u32,
+    kind: u32,
+}
+
+@group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
+@group(#{BIND_ARRAYS}) @binding(#{INDICES}) var<storage, read_write> indices: binding_array<Indices>;
+@group(#{BIND_ARRAYS}) @binding(#{STRAND_METADATA}) var<storage, read_write> strand_metadata: binding_array<Meta>;
+@group(#{BIND_ARRAYS}) @binding(#{STRAND_MATERIALS}) var<storage, read_write> materials: binding_array<Materials>;
+
+@group(#{PAGE_TABLES}) @binding(#{VERTICES}) var<storage, read_write> t_vertices: array<DevicePtr>;
+@group(#{PAGE_TABLES}) @binding(#{INDICES}) var<storage, read_write> t_indices: array<DevicePtr>;
+@group(#{PAGE_TABLES}) @binding(#{STRAND_METADATA}) var<storage, read_write> t_strand_metadata: array<DevicePtr>;
+@group(#{PAGE_TABLES}) @binding(#{STRAND_MATERIALS}) var<storage, read_write> t_materials: array<DevicePtr>;
+
+@group(#{SHADING_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
+@group(#{SHADING_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
+@group(#{SHADING_GROUP}) @binding(#{BINNING_QUEUE}) var<storage, read> binning_queue: BinningQueue;
+@group(#{SHADING_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
+@group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -107,6 +126,10 @@ var<push_constant> pc: PushConstants;
 // };
 
 // --- Helpers ---
+
+fn is_valid_ptr(ptr: DevicePtr) -> bool {
+    return ptr.slab != 0xFFFFFFFFu;
+}
 
 fn csch(x: f32) -> f32 {
     return 1.0 / sinh(x);
@@ -426,99 +449,95 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn shade_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,
-    @builtin(workgroup_id) workgroup_id: vec3u,
-    @builtin(local_invocation_id) local_id: vec3u
 ) {
+    let task_idx = global_id.x;
+    if task_idx >= pc.num_elements {
+        return;
+    }
+    if task_idx >= atomicLoad(&binning_queue.tail) {
+        return;
+    }
+    let task: BinningTask = binning_queue.tasks[task_idx];
+    let frustum_id = unpack_binning_frustum(task.packed_field);
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    if frustum.kind != 0u {
+        return; // Camera frusta only
+    }
 
-    let strand_id = workgroup_id.x;
-    let segment_id = local_id.x;
-    if strand_id >= pc.num_elements {
+    let inst_id = task.id_info;
+    if inst_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&t_indices) || inst_id >= arrayLength(&t_strand_metadata) || inst_id >= arrayLength(&t_materials) {
         return;
     }
 
-    let strand_meta = strand_metadata[strand_id];
-    let strand_offset = strand_meta.offset;
-    let strand_count = strand_meta.count;
-
-    if segment_id >= strand_count {
+    let vertex_ptr = t_vertices[inst_id];
+    let index_ptr = t_indices[inst_id];
+    let meta_ptr = t_strand_metadata[inst_id];
+    let material_ptr = t_materials[inst_id];
+    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return;
     }
 
-    let light_count = lights.n_directional_lights;
+    let strand_local = task.chunk_id;
+    let meta_base = meta_ptr.offset / SIZEOF_METADATA;
+    let meta_count = meta_ptr.size / SIZEOF_METADATA;
+    if strand_local >= meta_count {
+        return;
+    }
+    let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + strand_local];
+    if strand_meta.count < 2u {
+        return;
+    }
 
-    // var strand_absorption_color = vec4<f32>(0.44, 0.15, 0.05, 0.5);
-    var material = materials[strand_meta.material_idx];
+    let seg_idx = task.seg_idx;
+    let index_count = index_ptr.size / 4u;
+    if seg_idx + 1u >= index_count {
+        return;
+    }
+
+    let i0 = indices[index_ptr.slab].is[seg_idx];
+    let i1 = indices[index_ptr.slab].is[seg_idx + 1u];
+    let vertex_count = vertex_ptr.size / 12u;
+    if i0 >= vertex_count || i1 >= vertex_count {
+        return;
+    }
+
+    let v0 = vec4<f32>(vertices[vertex_ptr.slab].vs[i0], 1.0);
+    let v1 = vec4<f32>(vertices[vertex_ptr.slab].vs[i1], 1.0);
+    let U = normalize(v1.xyz - v0.xyz);
+    if all(U == vec3<f32>(0.0)) {
+        return;
+    }
+
+    let tangent = U;
+    let camera_dir = normalize(view.world_position - v0.xyz);
+    let binormal = normalize(cross(tangent, camera_dir));
+    let V = normalize(cross(binormal, tangent));
+
+    let material_base = material_ptr.offset / SIZEOF_MATERIAL;
+    let material_count = material_ptr.size / SIZEOF_MATERIAL;
+    if strand_meta.material_idx >= material_count {
+        return;
+    }
+    let material = materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
+
     var accum_color = vec4<f32>(0.0, 0.0, 0.0, material.absorption_color.w);
 
-    let texture_dims = textureDimensions(deep_opacity_maps);
-    let shadow_map_dims = vec2<f32>(texture_dims.xy);
-    let geo = geos[0]; // TODO
-
-    for (var i = 0u; i < strand_count; i = i + WORKGROUP_SIZE) { // in case we have more segments than workgroup size
-        let segment_offset = segment_id + i;
-        var next_point = segment_offset + 1u;
-        if next_point >= strand_count {
-            // we use the previous point to indicate fibre direction and reverse it
-            // we still have to shade the tip of the strand
-            next_point = strand_count - 1u;
-        }
-        let index = indices[strand_offset + segment_offset];
-        let i_dir = indices[strand_offset + next_point];
-
-        let vertex = vertices[index];
-        let next_vertex = vertices[i_dir];
-
-        // fiber direction
-        var U = normalize(next_vertex.xyz - vertex.xyz);
-        if next_point < segment_offset {
-            // invert direction for the tip
-            U = -U;
-        }
-
-        // view direction
-        let tangent = U;
-        let camera_dir = normalize(view.world_position - U / 2.0);
-        let binormal = normalize(cross(tangent, camera_dir));
-        let V = normalize(cross(binormal, tangent));
-
-        let ao_intensity = smoothstep(1.0, 0.0, max(0.0, 1.0 - (f32(segment_offset) / f32(strand_count))));
-
-        // TODO: we can theoretically split this across multiple workgroups radiance accumulation is commutative
-        for (var j = 0u; j < light_count; j = j + 1) {
-            let light: types::DirectionalLight = lights.directional_lights[j];
-            let cascade = light.cascades[0]; // TODO: select cascade based on distance
-            let light_cascade_clip_from_world = cascade.clip_from_world;
-            let light_flags = light.flags;
-            let L = normalize(light.direction_to_light); // TODO: point lights, spot lights etc. this would be normalize(light.position - strand_point.position);
-            // get local occlusion if there is a shadowmap
-            let light_clip_bounds = find_clip_bounds(cascade.clip_from_world, geo.aabb.min, geo.aabb.max);
-            let fragment_light = world_to_screen_aabbnorm(vertex, light_cascade_clip_from_world, shadow_map_dims.x, shadow_map_dims.y, light_clip_bounds);
-            var sample_coord = vec2<f32>(fragment_light.xy / shadow_map_dims.xy);
-
-            let dom_depth = textureSampleLevel(deep_opacity_depth_maps, deep_opacity_depth_sampler, sample_coord, 0.0);
-            let min_depth = dom_depth.x;
-            var occlusion = 0.0;
-            if fragment_light.z > min_depth {
-                let span = max(1e-6, 1.0 - min_depth);
-                let invSpan = 1.0 / span;
-                let dzp = max(0.0, fragment_light.z - min_depth) * invSpan;
-                let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
-                let tL = u * f32(texture_dims.z);
-                let d = min(tL, f32(texture_dims.z - 1u));
-                occlusion = textureSampleLevel(deep_opacity_maps, deep_opacity_sampler, vec3<f32>(sample_coord, d), 0.0).x;
-            }
-
-            let bcsdf = marschner(vertex, L, V, U, material, occlusion);
-
-            var c = bcsdf * (light.color.xyz / 255.0);
-            c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor); // ambient TODO: ambient lighting
-
-            accum_color += vec4<f32>(c.xyz, 0.0);
-        }
-        let out_row = strand_id % MAX_TEXTURE_EXT;
-        let out_col = strand_id / MAX_TEXTURE_EXT;
-        let y_coord = out_row;
-        let x_coord = out_col * (pc.workgroup_offset + 1) + segment_offset; // remember that workgroup_offset is abused for column width in this context
-        textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), accum_color);
+    let light_count = lights.n_directional_lights;
+    for (var j = 0u; j < light_count; j = j + 1u) {
+        let light: types::DirectionalLight = lights.directional_lights[j];
+        let L = normalize(light.direction_to_light);
+        let bcsdf = marschner(v0, L, V, U, material, 0.0);
+        var c = bcsdf * (light.color.xyz / 255.0);
+        c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor);
+        accum_color += vec4<f32>(c.xyz, 0.0);
     }
+
+    let out_row = strand_local % MAX_TEXTURE_EXT;
+    let out_col = strand_local / MAX_TEXTURE_EXT;
+    let y_coord = out_row;
+    let x_coord = out_col * (pc.workgroup_offset + 1u) + seg_idx;
+    textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), accum_color);
 }
