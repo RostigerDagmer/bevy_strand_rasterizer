@@ -36,6 +36,7 @@ pub struct StrandRasterizerResources {
     pub output_depth: Option<TextureView>,
     pub strand_count: Option<u32>,
     pub frustrum_config: HashMap<Entity, FroxelConfig>,
+    pub frustum_ids: HashMap<Entity, u32>,
 }
 
 #[derive(Resource)]
@@ -69,17 +70,6 @@ impl StrandRasterizerPipeline {
                         access: StorageTextureAccess::WriteOnly,
                         format: TextureFormat::R32Float,
                         view_dimension: TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                // Froxel configuration (uniform buffer)
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::FROXEL_CONFIG,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -281,7 +271,6 @@ pub fn update_strand_raster_pipeline(
 
 // Create the bind group for the strand rasterizer
 pub fn create_strand_raster_bind_group(
-    entity: &Entity,
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
@@ -294,7 +283,6 @@ pub fn create_strand_raster_bind_group(
     let layout = &pipeline.bind_group_layout;
     let output_texture = resources.output_texture.as_ref().ok_or(())?;
     let output_depth = resources.output_depth.as_ref().ok_or(())?;
-    let froxel_config_buffer = resources.froxel_config_buffer.get(entity).ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
@@ -312,10 +300,6 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::OUTPUT_DEPTH,
                     resource: BindingResource::TextureView(output_depth),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::FROXEL_CONFIG,
-                    resource: froxel_config_buffer.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::VIEW_UNIFORM,
@@ -421,6 +405,7 @@ pub fn run_raster_pass(
     pipeline: &StrandRasterizerPipeline,
     allocator: &GpuPagingAllocator,
     froxel_config: &FroxelConfig,
+    frustum_id: u32,
     resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
@@ -465,7 +450,7 @@ pub fn run_raster_pass(
         let pushconstants = PushConstants {
             num_elements: resources.strand_count.unwrap_or(0),
             workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
-            scan_load_base: 0,
+            scan_load_base: frustum_id,
             scan_save_base: 0,
             ..Default::default()
         };

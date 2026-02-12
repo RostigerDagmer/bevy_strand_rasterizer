@@ -92,10 +92,13 @@ impl Node for StrandRasterizerNode {
             warn!("No frustum size defined.");
             return Ok(());
         };
+        let Some(&frustum_id) = raster_resources.frustum_ids.get(&view_entity) else {
+            warn!("No frustum id defined for view {:?}", view_entity);
+            return Ok(());
+        };
 
         // Raster bind group
         let Ok((raster_bind_group, raster_group_offsets)) = create_strand_raster_bind_group(
-            &view_entity,
             render_device,
             &raster_pipeline,
             &raster_resources,
@@ -115,6 +118,7 @@ impl Node for StrandRasterizerNode {
             raster_pipeline,
             allocator,
             &frustrum,
+            frustum_id,
             raster_resources,
             shading_resources,
             &raster_bind_group,

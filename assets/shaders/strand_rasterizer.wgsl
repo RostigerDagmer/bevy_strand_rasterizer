@@ -64,13 +64,15 @@ struct RasterWorkQueue {
 
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
-@group(#{RASTER_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
 @group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(#{RASTER_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
 @group(#{RASTER_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<atomic<u32>>;
 @group(#{RASTER_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read> chunk_pool_words: array<u32>;
 @group(#{RASTER_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read> raster_work_queue: RasterWorkQueue;
+#ifdef SHADOWS
+@group(#{RASTER_GROUP}) @binding(#{FROXEL_CONFIG}) var<uniform> config: FroxelConfig;
+#endif
 // Disabled for correctness-only raster pass:
 // @group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_storage_2d<rgba8unorm, read>;
 
@@ -108,6 +110,16 @@ fn blend_over(foreground: vec4<f32>, background: vec4<f32>) -> vec4<f32> {
     }
     let final_rgb = (fg_rgb + background.rgb * background.a * (1.0 - foreground.a)) / final_alpha;
     return vec4<f32>(final_rgb, final_alpha);
+}
+
+fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
+    return FroxelConfig(
+        desc.screen_width,
+        desc.screen_height,
+        desc.froxel_size_x,
+        desc.froxel_size_y,
+        desc.depth_slices,
+    );
 }
 
 #ifndef SHADOWS
@@ -432,33 +444,24 @@ fn rasterize_strands(
     // let shadow_map_dims = vec2<f32>(texture_dims.xy);
     // let depth_texture_slices = texture_dims.z;
     var g_min_depth: f32 = 0.0;
-    var active_frustum_id: u32 = 0xFFFFFFFFu;
-    var active_bucket_base: u32 = 0u;
-    var active_bucket_count: u32 = 0u;
-    for (var fi: u32 = 0u; fi < arrayLength(&frustum_table); fi = fi + 1u) {
-        let fd = frustum_table[fi];
-        if fd.kind != 0u {
-            continue;
-        }
-        if fd.screen_width == config.screen_width &&
-            fd.screen_height == config.screen_height &&
-            fd.froxel_size_x == config.froxel_size_x &&
-            fd.froxel_size_y == config.froxel_size_y &&
-            fd.depth_slices == config.depth_slices {
-            active_frustum_id = fi;
-            active_bucket_base = fd.bucket_base;
-            active_bucket_count = fd.bucket_count;
-            break;
-        }
-    }
-    if active_frustum_id == 0xFFFFFFFFu {
+    let active_frustum_id = pc.scan_load_base;
+    if active_frustum_id >= arrayLength(&frustum_table) {
         textureStore(render_target, pixel_coord_int, final_color);
         textureStore(depth_target, pixel_coord_int, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
+    let active_desc = frustum_table[active_frustum_id];
+    if active_desc.kind != 0u {
+        textureStore(render_target, pixel_coord_int, final_color);
+        textureStore(depth_target, pixel_coord_int, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    let active_config = frustum_to_config(active_desc);
+    let active_bucket_base = active_desc.bucket_base;
+    let active_bucket_count = active_desc.bucket_count;
 
-    for (var dz: u32 = 0; dz < config.depth_slices; dz = dz + 1) {
-        let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, config);
+    for (var dz: u32 = 0; dz < active_config.depth_slices; dz = dz + 1) {
+        let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
         if local_froxel_idx >= active_bucket_count {
             continue;
         }
@@ -508,8 +511,8 @@ fn rasterize_strands(
                 let v1_world = V[1];
 
                 // Project to screen space (pixels)
-                let p0_screen = world_to_screen_raw(v0_world, view.unjittered_clip_from_world, vec4<f32>(0.0, 0.0, f32(config.screen_width), f32(config.screen_height)));
-                let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, vec4<f32>(0.0, 0.0, f32(config.screen_width), f32(config.screen_height)));
+                let p0_screen = world_to_screen_raw(v0_world, view.unjittered_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
+                let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
 
                 // Skip if segment is fully behind camera or off-screen after projection
                 if p0_screen.x < 0.0 && p1_screen.x < 0.0 { continue; } // Basic culling

@@ -227,9 +227,15 @@ fn use_prepass_buffers(
     let geo_capacity = geo_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
-    let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
+    raster_resources.frustum_ids.clear();
+    let mut frusta: Vec<_> = raster_resources
+        .frustrum_config
+        .iter()
+        .map(|(entity, cfg)| (*entity, cfg.clone()))
+        .collect();
     frusta.sort_by_key(|(entity, _)| entity.index());
-    for (_, cfg) in frusta {
+    for (frustum_id, (entity, cfg)) in frusta.into_iter().enumerate() {
+        raster_resources.frustum_ids.insert(entity, frustum_id as u32);
         let (_, _, bucket_count) = cfg.get_num_tiles();
         frustum_descs.push(GpuFrustumDesc {
             screen_width: cfg.screen_width,
