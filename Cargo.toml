@@ -26,3 +26,4 @@ phf = {version="0.13.1", features=["macros"]}
 range-alloc = "0.1.4"
 "wgpu"="26.0.1"
 bevy_gpu_paging_allocator={ path="crates/bevy_gpu_paging_allocator" }
+bevy_vsms = { path = "crates/bevy_vsms" }

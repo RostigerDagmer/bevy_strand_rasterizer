@@ -16,6 +16,13 @@ use bevy::{
     },
     window::WindowResized,
 };
+use bevy_vsms::{
+    allocator::VirtualSurfaceRuntime,
+    lifecycle::reconcile_virtual_surfaces,
+    plugin::BevyVsmsPlugin,
+    prelude::{VirtualSurfaceConfigBuilder, VirtualSurfaceKind, VirtualSurfaceResidencyMode},
+    residency::sync_virtual_surface_device_state,
+};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashSet;
 use wgpu::{BufferDescriptor, BufferUsages};
@@ -42,6 +49,12 @@ use crate::{
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
+
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+enum DomVsmsProxyKind {
+    Opacity,
+    Depth,
+}
 
 use lazy_static::lazy_static;
 
@@ -82,6 +95,7 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
             GpuPagingAllocatorPlugin,
+            BevyVsmsPlugin,
         ));
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
@@ -129,6 +143,18 @@ impl Plugin for StrandRasterizerPlugin {
             )
                 .chain()
                 .in_set(RenderSystems::Prepare),),
+        );
+        render_app.add_systems(
+            Render,
+            sync_vsms_dom_configs
+                .before(reconcile_virtual_surfaces)
+                .in_set(RenderSystems::Prepare),
+        );
+        render_app.add_systems(
+            Render,
+            bind_vsms_dom_targets
+                .after(sync_virtual_surface_device_state)
+                .in_set(RenderSystems::Queue),
         );
         render_app.add_systems(
             Render,
@@ -196,7 +222,7 @@ impl Plugin for StrandRasterizerPlugin {
             )
             .add_render_graph_edge(
                 Core3d,
-                nodes::shadows::StrandShadowRasterizerLabel,
+                nodes::prepass::WorkPreparationLabel,
                 nodes::shading::StrandShadingLabel,
             )
             .add_render_graph_edge(
@@ -208,6 +234,11 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::raster::StrandRasterizerLabel,
                 nodes::composite::CompositionLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::prepass::WorkPreparationLabel,
+                nodes::debug::TileDebugLabel,
             )
             .add_render_graph_edge(
                 Core3d,
@@ -698,13 +729,13 @@ pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig)
 
 fn flag_realloc_on_view_change(
     mut commands: Commands,
-    cams: Query<(Entity, Option<&TieFroxelsToView>)>,
+    cams: Query<Entity, With<TieFroxelsToView>>,
     mut resize_reader: MessageReader<WindowResized>,
     // or listen to WindowResized and map to camera(s)
 ) {
     for _ in resize_reader.read() {
         info!("window changed");
-        for (e, _) in &cams {
+        for e in &cams {
             commands.entity(e).insert(NeedsRealloc);
         }
     }
@@ -750,22 +781,28 @@ fn tie_view_to_froxel_config(
 
 // render world buffer retrieval
 fn use_froxel_buffer(
-    query: Query<(Entity, &FroxelConfig), Or<(Added<FroxelConfig>, With<NeedsRealloc>)>>,
+    query: Query<
+        (Entity, &FroxelConfig, Option<&ExtractedView>),
+        Or<(Added<FroxelConfig>, With<NeedsRealloc>)>,
+    >,
     device: Res<RenderDevice>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
 ) {
-    for (entity, config) in query.iter() {
+    for (entity, config, extracted_view) in query.iter() {
         let config_buffer = create_froxel_config_buffer(&device, config);
 
-        let (target_texture, target_view) = recreate_render_target_texture(&device, config);
-        let (depth_texture, depth_view) = recreate_render_target_depth_texture(&device, config);
+        // Only the active view/camera should drive render target extent.
+        if extracted_view.is_some() {
+            let (target_texture, target_view) = recreate_render_target_texture(&device, config);
+            let (depth_texture, depth_view) = recreate_render_target_depth_texture(&device, config);
 
-        info!("Recreated render target: {:?}", config);
+            info!("Recreated render target from view froxels: {:?}", config);
 
-        raster_resources.output_texture_resource = Some(target_texture);
-        raster_resources.output_depth_resource = Some(depth_texture);
-        raster_resources.output_texture = Some(target_view);
-        raster_resources.output_depth = Some(depth_view);
+            raster_resources.output_texture_resource = Some(target_texture);
+            raster_resources.output_depth_resource = Some(depth_texture);
+            raster_resources.output_texture = Some(target_view);
+            raster_resources.output_depth = Some(depth_view);
+        }
         raster_resources
             .froxel_config_buffer
             .insert(entity, config_buffer);
@@ -778,13 +815,14 @@ fn use_froxel_buffer(
 
 fn use_deep_opacity_maps(
     query: Query<(Entity, &FroxelConfig), With<ExtractedDirectionalLight>>,
-    device: Res<RenderDevice>,
     mut shadow_resources: ResMut<StrandShadowResources>,
 ) {
     let mut lights: Vec<(Entity, FroxelConfig)> =
         query.iter().map(|(e, cfg)| (e, cfg.clone())).collect();
     lights.sort_by_key(|(e, _)| e.index());
     if lights.is_empty() {
+        shadow_resources.light_layer_by_entity.clear();
+        shadow_resources.light_entity_by_layer.clear();
         return;
     }
 
@@ -799,15 +837,7 @@ fn use_deep_opacity_maps(
         .max()
         .unwrap_or(1);
     let light_layers = lights.len() as u32;
-    let needs_array_realloc = shadow_resources.dom_array_targets.is_none()
-        || shadow_resources.light_entity_by_layer.len() as u32 != light_layers;
-    if needs_array_realloc {
-        let ((opacity_tex, opacity_view, opacity_sampler), (depth_tex, depth_view, depth_sampler)) =
-            create_strand_shadow_texture_arrays(&device, max_width, max_height, light_layers);
-        shadow_resources.dom_array_resources = Some((opacity_tex, depth_tex));
-        shadow_resources.dom_array_targets = Some((opacity_view, depth_view));
-        shadow_resources.dom_array_samplers = Some((opacity_sampler, depth_sampler));
-    }
+    let _ = (max_width, max_height, light_layers);
     shadow_resources.light_layer_by_entity.clear();
     shadow_resources.light_entity_by_layer.clear();
     for (layer, (entity, _)) in lights.iter().enumerate() {
@@ -816,26 +846,107 @@ fn use_deep_opacity_maps(
             .insert(*entity, layer as u32);
         shadow_resources.light_entity_by_layer.push(*entity);
     }
+}
 
-    for (entity, config) in lights.iter() {
-        if shadow_resources.dom_targets.contains_key(&entity) {
-            continue;
+fn bind_vsms_dom_targets(
+    runtime: Res<VirtualSurfaceRuntime>,
+    mut shadow_resources: ResMut<StrandShadowResources>,
+) {
+    let Some(opacity_binding) = runtime
+        .pool_storage_bindings
+        .get(&VirtualSurfaceKind::Opacity3D)
+    else {
+        return;
+    };
+    let Some(depth_binding) = runtime
+        .pool_storage_bindings
+        .get(&VirtualSurfaceKind::Depth2DArray)
+    else {
+        return;
+    };
+    shadow_resources.dom_array_targets = Some((
+        opacity_binding.first_view.clone(),
+        depth_binding.first_view.clone(),
+    ));
+}
+
+fn sync_vsms_dom_configs(
+    mut commands: Commands,
+    lights: Query<(Entity, &FroxelConfig), With<ExtractedDirectionalLight>>,
+    mut shadow_resources: ResMut<StrandShadowResources>,
+) {
+    let mut light_entities: Vec<(Entity, FroxelConfig)> =
+        lights.iter().map(|(e, cfg)| (e, *cfg)).collect();
+    light_entities.sort_by_key(|(e, _)| e.index());
+
+    let live: HashSet<Entity> = light_entities.iter().map(|(e, _)| *e).collect();
+    let stale: Vec<Entity> = shadow_resources
+        .dom_vsms_proxies
+        .keys()
+        .copied()
+        .filter(|e| !live.contains(e))
+        .collect();
+    for entity in stale {
+        if let Some((op_proxy, d_proxy)) = shadow_resources.dom_vsms_proxies.remove(&entity) {
+            commands.entity(op_proxy).despawn();
+            commands.entity(d_proxy).despawn();
         }
-        let (
-            (opacity_texture, opacity_view, opacity_sampler),
-            (depth_texture, depth_view, depth_sampler),
-        ) = create_strand_shadow_textures(
-            &device,
-            config.screen_width,
-            config.screen_height,
-            config.depth_slices,
-        );
-        shadow_resources
-            .dom_targets
-            .insert(*entity, (opacity_view, depth_view));
-        shadow_resources
-            .dom_samplers
-            .insert(*entity, (opacity_sampler, depth_sampler));
-        info!("Added deep opacity maps to resource");
+    }
+
+    for (entity, cfg) in light_entities {
+        const DOM_VIRTUAL_SCALE: u32 = 2;
+        const DOM_PAGE_XY: u32 = 256;
+        const DOM_DEPTH_BUDGET_PAGES: u32 = 64;
+        const DOM_OPACITY_BUDGET_PAGES: u32 = 64;
+
+        let virtual_w = cfg
+            .screen_width
+            .saturating_mul(DOM_VIRTUAL_SCALE)
+            .clamp(DOM_PAGE_XY, 8192);
+        let virtual_h = cfg
+            .screen_height
+            .saturating_mul(DOM_VIRTUAL_SCALE)
+            .clamp(DOM_PAGE_XY, 8192);
+        let op_cfg = VirtualSurfaceConfigBuilder::new()
+            .enabled(true)
+            .surface_kind(VirtualSurfaceKind::Opacity3D)
+            .page_size(UVec3::new(DOM_PAGE_XY, DOM_PAGE_XY, NUM_DOM_SLICES))
+            .virtual_extent(UVec3::new(virtual_w, virtual_h, NUM_DOM_SLICES))
+            .mip_levels(1)
+            .layer_count(1)
+            .max_resident_pages(DOM_OPACITY_BUDGET_PAGES)
+            .priority_bias(1.0)
+            .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
+                DOM_OPACITY_BUDGET_PAGES,
+            ))
+            .build();
+        let d_cfg = VirtualSurfaceConfigBuilder::new()
+            .enabled(true)
+            .surface_kind(VirtualSurfaceKind::Depth2DArray)
+            .page_size(UVec3::new(DOM_PAGE_XY, DOM_PAGE_XY, 1))
+            .virtual_extent(UVec3::new(virtual_w, virtual_h, 1))
+            .mip_levels(1)
+            .layer_count(1)
+            .max_resident_pages(DOM_DEPTH_BUDGET_PAGES)
+            .priority_bias(1.0)
+            .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
+                DOM_DEPTH_BUDGET_PAGES,
+            ))
+            .build();
+
+        if let Some(&(op_proxy, d_proxy)) = shadow_resources.dom_vsms_proxies.get(&entity) {
+            commands
+                .entity(op_proxy)
+                .insert((op_cfg, DomVsmsProxyKind::Opacity));
+            commands
+                .entity(d_proxy)
+                .insert((d_cfg, DomVsmsProxyKind::Depth));
+        } else {
+            let op_proxy = commands.spawn((op_cfg, DomVsmsProxyKind::Opacity)).id();
+            let d_proxy = commands.spawn((d_cfg, DomVsmsProxyKind::Depth)).id();
+            shadow_resources
+                .dom_vsms_proxies
+                .insert(entity, (op_proxy, d_proxy));
+        }
     }
 }

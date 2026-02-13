@@ -31,7 +31,7 @@ const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
 const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
-const DEBUG_FORCE_SINGLE_LIGHT: bool = true;
+const DEBUG_FORCE_SINGLE_LIGHT: bool = false;
 var<push_constant> pc: PushConstants;
 
 struct FrustumDesc {
@@ -270,8 +270,8 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
 
 #ifdef SHADOWS
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
-@group(#{RASTER_GROUP}) @binding(#{DEEP_OPACITY_TEXTURE_O}) var deep_opacity_maps: texture_storage_3d<r32float, write>; // TODO: maybe find a more compact format
-@group(#{RASTER_GROUP}) @binding(#{DEEP_OPACITY_TEXTURE_D}) var deep_opacity_maps_depth: texture_storage_2d_array<r32float, write>; // TODO: maybe find a more compact format
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps: texture_storage_3d<r32float, write>; // TODO: maybe find a more compact format
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps_depth: texture_storage_2d_array<r32float, write>; // TODO: maybe find a more compact format
 
 fn light_layer_from_frustum(frustum_id: u32) -> u32 {
     if frustum_id >= arrayLength(&frustum_table) {

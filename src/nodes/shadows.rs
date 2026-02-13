@@ -9,6 +9,7 @@ use bevy::{
         view::{ViewUniformOffset, ViewUniforms},
     },
 };
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::pipelines::{
@@ -41,6 +42,7 @@ impl Node for StrandShadowRasterizerNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let render_device = world.resource::<RenderDevice>();
         let allocator = world.resource::<GpuPagingAllocator>();
+        let vsms_runtime = world.resource::<VirtualSurfaceRuntime>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
@@ -65,7 +67,6 @@ impl Node for StrandShadowRasterizerNode {
         let Ok((shadow_bind_group, dynamic_offsets)) = create_strand_shadow_bind_group(
             render_device,
             shadow_pipeline,
-            shadow_resources,
             prepass_resources,
             &view_binding,
             &light_binding,
@@ -73,6 +74,20 @@ impl Node for StrandShadowRasterizerNode {
             view_light_uniform_offset,
         ) else {
             warn!("Failed to create strand shadow bind group.");
+            return Ok(());
+        };
+        let Some(opacity_storage_bind_group) = vsms_runtime
+            .pool_storage_bindings
+            .get(&VirtualSurfaceKind::Opacity3D)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
+        let Some(depth_storage_bind_group) = vsms_runtime
+            .pool_storage_bindings
+            .get(&VirtualSurfaceKind::Depth2DArray)
+            .map(|b| &b.bind_group)
+        else {
             return Ok(());
         };
 
@@ -93,6 +108,8 @@ impl Node for StrandShadowRasterizerNode {
                 pipeline_cache,
                 shadow_pipeline,
                 allocator,
+                opacity_storage_bind_group,
+                depth_storage_bind_group,
                 frustum_cfg,
                 frustum_id,
                 raster_resources,

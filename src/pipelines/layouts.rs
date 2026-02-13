@@ -56,6 +56,9 @@ pub mod rasterizer {
     use bevy::shader::ShaderDefVal;
 
     pub const RASTER_GROUP: u32 = 2;
+    pub const VSMS_OPACITY_WRITE_GROUP: u32 = 3;
+    pub const VSMS_DEPTH_WRITE_GROUP: u32 = 4;
+    pub const VSMS_STORAGE_BINDING: u32 = 0;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
@@ -90,6 +93,9 @@ pub mod rasterizer {
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
             ShaderDefVal::UInt("RASTER_GROUP".into(), RASTER_GROUP),
+            ShaderDefVal::UInt("VSMS_OPACITY_WRITE_GROUP".into(), VSMS_OPACITY_WRITE_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_WRITE_GROUP".into(), VSMS_DEPTH_WRITE_GROUP),
+            ShaderDefVal::UInt("VSMS_STORAGE_BINDING".into(), VSMS_STORAGE_BINDING),
             ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
             ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
             ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),

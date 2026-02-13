@@ -2,6 +2,7 @@
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
+use bevy_vsms::prelude::BevyVsmsPlugin;
 mod dson;
 use dson::*;
 mod components;
@@ -107,8 +108,8 @@ fn setup(
         },
         FroxelConfig {
             // TODO: move into plugin
-            screen_width: 1024 + 512, // shadow map size in this context
-            screen_height: 1024 + 512,
+            screen_width: 1024, // shadow map size in this context
+            screen_height: 1024,
             froxel_size_x: 8,
             froxel_size_y: 8,
             depth_slices: 8,

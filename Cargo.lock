@@ -2515,6 +2515,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_vsms"
+version = "0.1.0"
+dependencies = [
+ "bevy 0.17.2",
+ "bytemuck",
+ "lazy_static",
+ "range-alloc",
+ "wgpu 26.0.1",
+]
+
+[[package]]
 name = "bevy_wgsl_utils"
 version = "0.15.1"
 source = "git+https://github.com/AllenPocketGamer/bevy_wgsl_utils.git?branch=master#c1e076948e17cc4217486dbd8014eee4fe2b1cd9"
@@ -6073,6 +6084,7 @@ dependencies = [
  "bevy_egui",
  "bevy_gpu_paging_allocator",
  "bevy_panorbit_camera",
+ "bevy_vsms",
  "bevy_wgsl_utils",
  "bytemuck",
  "encase 0.12.0",

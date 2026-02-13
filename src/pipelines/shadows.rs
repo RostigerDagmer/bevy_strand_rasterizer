@@ -5,16 +5,15 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
             BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, Extent3d, FilterMode, PipelineCache, PushConstantRange,
-            Sampler, SamplerDescriptor, ShaderStages, ShaderType, StorageTextureAccess, Texture,
-            TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-            TextureView, TextureViewDescriptor, TextureViewDimension,
+            ComputePipelineDescriptor, PipelineCache, PushConstantRange, ShaderStages, ShaderType,
+            TextureView,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
     },
     shader::ShaderDefVal,
 };
+use bevy_vsms::allocator::VirtualSurfaceRuntime;
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
 use std::collections::HashMap;
 
@@ -28,18 +27,14 @@ use crate::{
 use super::raster::StrandRasterizerResources;
 
 pub const NUM_DOM_SLICES: u32 = 12;
-pub const DOM_FORMAT: TextureFormat = TextureFormat::R32Float;
 
 #[derive(Resource, Default)]
 pub struct StrandShadowResources {
-    pub dom_targets: HashMap<Entity, (TextureView, TextureView)>,
-    pub dom_samplers: HashMap<Entity, (Sampler, Sampler)>,
-    pub dom_array_resources: Option<(Texture, Texture)>,
     pub dom_array_targets: Option<(TextureView, TextureView)>,
-    pub dom_array_samplers: Option<(Sampler, Sampler)>,
     pub light_layer_by_entity: HashMap<Entity, u32>,
     pub light_layer_by_frustum: HashMap<u32, u32>,
     pub light_entity_by_layer: Vec<Entity>,
+    pub dom_vsms_proxies: HashMap<Entity, (Entity, Entity)>, // (opacity_proxy, depth_proxy)
 }
 
 #[derive(Resource)]
@@ -114,26 +109,6 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::WriteOnly,
-                        format: DOM_FORMAT,
-                        view_dimension: TextureViewDimension::D3,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::WriteOnly,
-                        format: DOM_FORMAT,
-                        view_dimension: TextureViewDimension::D2Array,
-                    },
-                    count: None,
-                },
             ],
         )
     }
@@ -155,6 +130,7 @@ impl FromWorld for StrandShadowPipeline {
 pub fn update_strand_shadow_pipeline(
     mut pipeline: ResMut<StrandShadowPipeline>,
     allocator: Res<GpuPagingAllocator>,
+    vsms_runtime: Res<VirtualSurfaceRuntime>,
     shader_loader: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -167,6 +143,20 @@ pub fn update_strand_shadow_pipeline(
         allocator.buffer_bind_group_layout.clone(),
         allocator.pagetable_bind_group_layout.clone(),
     ) else {
+        return;
+    };
+    let Some(opacity_storage_layout) = vsms_runtime
+        .pool_storage_bindings
+        .get(&bevy_vsms::api::VirtualSurfaceKind::Opacity3D)
+        .map(|b| b.layout.clone())
+    else {
+        return;
+    };
+    let Some(depth_storage_layout) = vsms_runtime
+        .pool_storage_bindings
+        .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
+        .map(|b| b.layout.clone())
+    else {
         return;
     };
 
@@ -197,11 +187,15 @@ pub fn update_strand_shadow_pipeline(
     let max_group = allocator
         .buffer_group_idx
         .max(allocator.table_group_idx)
-        .max(layouts::rasterizer::RASTER_GROUP);
+        .max(layouts::rasterizer::RASTER_GROUP)
+        .max(layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP)
+        .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP);
     let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::rasterizer::RASTER_GROUP as usize] = pipeline.bind_group_layout.clone();
+    layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_storage_layout;
+    layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout;
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
     pipeline.shadow_pipeline = Some(pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -222,7 +216,6 @@ pub fn update_strand_shadow_pipeline(
 pub fn create_strand_shadow_bind_group(
     device: &RenderDevice,
     pipeline: &StrandShadowPipeline,
-    shadow_resources: &StrandShadowResources,
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -231,7 +224,6 @@ pub fn create_strand_shadow_bind_group(
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
 
-    let (dom_opacity, dom_depth) = shadow_resources.dom_array_targets.as_ref().ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
@@ -266,131 +258,10 @@ pub fn create_strand_shadow_bind_group(
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
                 },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O,
-                    resource: BindingResource::TextureView(dom_opacity),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D,
-                    resource: BindingResource::TextureView(dom_depth),
-                },
             ],
         ),
         vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
     ))
-}
-
-pub fn create_strand_shadow_texture_arrays(
-    device: &RenderDevice,
-    width: u32,
-    height: u32,
-    light_layers: u32,
-) -> (
-    (Texture, TextureView, Sampler),
-    (Texture, TextureView, Sampler),
-) {
-    let layers = light_layers.max(1);
-
-    let depth_texture = device.create_texture(&TextureDescriptor {
-        label: Some("strand_shadow_depth_array"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: layers,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: DOM_FORMAT,
-        usage: TextureUsages::STORAGE_BINDING
-            | TextureUsages::TEXTURE_BINDING
-            | TextureUsages::COPY_DST,
-        view_formats: &[DOM_FORMAT],
-    });
-    let depth_texture_view = depth_texture.create_view(&TextureViewDescriptor {
-        label: Some("strand_shadow_depth_array_view"),
-        format: Some(DOM_FORMAT),
-        dimension: Some(TextureViewDimension::D2Array),
-        aspect: TextureAspect::All,
-        base_mip_level: 0,
-        mip_level_count: None,
-        base_array_layer: 0,
-        array_layer_count: Some(layers),
-        usage: Some(
-            TextureUsages::COPY_DST
-                | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::STORAGE_BINDING,
-        ),
-    });
-    let depth_sampler = device.create_sampler(&SamplerDescriptor {
-        label: Some("strand_shadow_depth_array_sampler"),
-        address_mode_u: bevy::render::render_resource::AddressMode::ClampToEdge,
-        address_mode_v: bevy::render::render_resource::AddressMode::ClampToEdge,
-        address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Nearest,
-        ..default()
-    });
-
-    let opacity_texture = device.create_texture(&TextureDescriptor {
-        label: Some("strand_shadow_opacity_array"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: NUM_DOM_SLICES.saturating_mul(layers),
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D3,
-        format: DOM_FORMAT,
-        usage: TextureUsages::STORAGE_BINDING
-            | TextureUsages::TEXTURE_BINDING
-            | TextureUsages::COPY_DST,
-        view_formats: &[DOM_FORMAT],
-    });
-    let opacity_texture_view = opacity_texture.create_view(&TextureViewDescriptor {
-        label: Some("strand_shadow_opacity_array_view"),
-        format: Some(DOM_FORMAT),
-        dimension: Some(TextureViewDimension::D3),
-        aspect: TextureAspect::All,
-        base_mip_level: 0,
-        mip_level_count: None,
-        base_array_layer: 0,
-        array_layer_count: None,
-        usage: Some(
-            TextureUsages::COPY_DST
-                | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::STORAGE_BINDING,
-        ),
-    });
-    let opacity_sampler = device.create_sampler(&SamplerDescriptor {
-        label: Some("strand_shadow_opacity_array_sampler"),
-        address_mode_u: bevy::render::render_resource::AddressMode::ClampToEdge,
-        address_mode_v: bevy::render::render_resource::AddressMode::ClampToEdge,
-        address_mode_w: bevy::render::render_resource::AddressMode::ClampToEdge,
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Nearest,
-        ..default()
-    });
-
-    (
-        (opacity_texture, opacity_texture_view, opacity_sampler),
-        (depth_texture, depth_texture_view, depth_sampler),
-    )
-}
-
-pub fn create_strand_shadow_textures(
-    device: &RenderDevice,
-    width: u32,
-    height: u32,
-    _slices: u32,
-) -> (
-    (Texture, TextureView, Sampler),
-    (Texture, TextureView, Sampler),
-) {
-    create_strand_shadow_texture_arrays(device, width, height, 1)
 }
 
 pub fn run_shadow_pass(
@@ -398,6 +269,8 @@ pub fn run_shadow_pass(
     pipeline_cache: &PipelineCache,
     pipeline: &StrandShadowPipeline,
     allocator: &GpuPagingAllocator,
+    opacity_storage_bind_group: &BindGroup,
+    depth_storage_bind_group: &BindGroup,
     froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
@@ -434,6 +307,16 @@ pub fn run_shadow_pass(
         &[],
     );
     pass.set_bind_group(layouts::rasterizer::RASTER_GROUP, bind_group, offsets);
+    pass.set_bind_group(
+        layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP,
+        opacity_storage_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP,
+        depth_storage_bind_group,
+        &[],
+    );
 
     let pushconstants = PushConstants {
         num_elements: resources.strand_count.unwrap_or(0),
