@@ -896,8 +896,6 @@ fn sync_vsms_dom_configs(
     for (entity, cfg) in light_entities {
         const DOM_VIRTUAL_SCALE: u32 = 2;
         const DOM_PAGE_XY: u32 = 256;
-        const DOM_DEPTH_BUDGET_PAGES: u32 = 64;
-        const DOM_OPACITY_BUDGET_PAGES: u32 = 64;
 
         let virtual_w = cfg
             .screen_width
@@ -907,6 +905,13 @@ fn sync_vsms_dom_configs(
             .screen_height
             .saturating_mul(DOM_VIRTUAL_SCALE)
             .clamp(DOM_PAGE_XY, 8192);
+        // TEMP DEBUG: force dense DOM residency (full virtual tile coverage) while fixing
+        // shadow shader logic. Revert to smaller budgets + demand-driven residency afterwards.
+        let depth_tile_count = virtual_w
+            .div_ceil(DOM_PAGE_XY)
+            .saturating_mul(virtual_h.div_ceil(DOM_PAGE_XY))
+            .max(1);
+        let opacity_tile_count = depth_tile_count.max(1);
         let op_cfg = VirtualSurfaceConfigBuilder::new()
             .enabled(true)
             .surface_kind(VirtualSurfaceKind::Opacity3D)
@@ -914,10 +919,10 @@ fn sync_vsms_dom_configs(
             .virtual_extent(UVec3::new(virtual_w, virtual_h, NUM_DOM_SLICES))
             .mip_levels(1)
             .layer_count(1)
-            .max_resident_pages(DOM_OPACITY_BUDGET_PAGES)
+            .max_resident_pages(opacity_tile_count)
             .priority_bias(1.0)
             .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
-                DOM_OPACITY_BUDGET_PAGES,
+                opacity_tile_count,
             ))
             .build();
         let d_cfg = VirtualSurfaceConfigBuilder::new()
@@ -927,10 +932,10 @@ fn sync_vsms_dom_configs(
             .virtual_extent(UVec3::new(virtual_w, virtual_h, 1))
             .mip_levels(1)
             .layer_count(1)
-            .max_resident_pages(DOM_DEPTH_BUDGET_PAGES)
+            .max_resident_pages(depth_tile_count)
             .priority_bias(1.0)
             .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
-                DOM_DEPTH_BUDGET_PAGES,
+                depth_tile_count,
             ))
             .build();
 

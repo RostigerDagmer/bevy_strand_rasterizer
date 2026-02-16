@@ -134,7 +134,7 @@ fn normalize_depth01(z: f32) -> f32 {
     return clamp(z * 0.5 + 0.5, 0.0, 1.0);
 }
 
-#ifndef SHADOWS
+
 
 fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
     if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) || g_inst_id >= arrayLength(&t_materials) {
@@ -161,6 +161,8 @@ fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
     }
     return materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 }
+
+#ifndef SHADOWS
 
 fn get_segment_meta(segment_ref: SegmentRef) -> StrandMeta {
     if arrayLength(&t_strand_metadata) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) {
@@ -320,12 +322,8 @@ fn rasterize_strands(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let tile_coord_x = wg.x;
     let tile_coord_y = wg.y;
-    var alpha: array<f32, DOM_SLICES>;
-    for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
-        alpha[i] = 0.0;
-    }
-
-    var z_nearest = 1e9;
+    // Pass 1: determine nearest depth at this pixel (z0).
+    var z0 = 1e9;
     for (var dz = 0u; dz < active_config.depth_slices; dz = dz + 1u) {
         let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
         if local_froxel_idx >= active_desc.bucket_count {
@@ -381,23 +379,107 @@ fn rasterize_strands(@builtin(global_invocation_id) gid: vec3<u32>,
                 if cov <= 0.0 {
                     continue;
                 }
-                z_nearest = min(z_nearest, p.z);
-                let u = clamp(p.z, 0.0, 0.999999);
-                let si = min(u32(u * f32(DOM_SLICES)), DOM_SLICES - 1u);
-                let a0 = alpha[si];
-                alpha[si] = clamp(a0 + (1.0 - a0) * (0.65 * cov), 0.0, 1.0);
+                z0 = min(z0, p.z);
             }
             chunk_idx = next_chunk;
         }
     }
 
-    if z_nearest == 1e9 {
-        z_nearest = 1.0;
+    let z_base = light_layer * DOM_SLICES;
+    if z0 == 1e9 {
+        textureStore(deep_opacity_maps_depth, px_i, i32(light_layer), vec4<f32>(1.0, 0.0, 0.0, 0.0));
+        for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
+            textureStore(deep_opacity_maps, vec3<i32>(px_i, i32(z_base + i)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        }
+        return;
     }
-    textureStore(deep_opacity_maps_depth, px_i, i32(light_layer), vec4<f32>(z_nearest, 0.0, 0.0, 0.0));
+
+    // Pass 2: accumulate opacity slices relative to z0.
+    var alpha: array<f32, DOM_SLICES>;
+    for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
+        alpha[i] = 0.0;
+    }
+    let span = max(1e-6, 1.0 - z0);
+    let inv_span = 1.0 / span;
+
+    for (var dz = 0u; dz < active_config.depth_slices; dz = dz + 1u) {
+        let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
+        if local_froxel_idx >= active_desc.bucket_count {
+            continue;
+        }
+        let bucket_idx = active_desc.bucket_base + local_froxel_idx;
+        if bucket_idx >= arrayLength(&froxel_bucket_heads) {
+            continue;
+        }
+        var chunk_idx = atomicLoad(&froxel_bucket_heads[bucket_idx]);
+        loop {
+            if chunk_idx == 0xFFFFFFFFu {
+                break;
+            }
+            let chunk_word_base = chunk_idx * CHUNK_WORD_STRIDE;
+            if chunk_word_base + 1u >= arrayLength(&chunk_pool_words) {
+                break;
+            }
+            let next_chunk = chunk_pool_words[chunk_word_base];
+            let item_count = min(chunk_pool_words[chunk_word_base + 1u], POOL_CHUNK_SIZE);
+            for (var ci = 0u; ci < item_count; ci = ci + 1u) {
+                let payload_idx = chunk_word_base + 2u + ci;
+                if payload_idx >= arrayLength(&chunk_pool_words) {
+                    continue;
+                }
+                let work_idx = chunk_pool_words[payload_idx];
+                if work_idx >= arrayLength(&raster_work_queue.items) {
+                    continue;
+                }
+                let work_item = raster_work_queue.items[work_idx];
+                if work_item.frustum_id != active_frustum_id {
+                    continue;
+                }
+                g_inst_id = work_item.inst_id;
+                let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
+                let V = get_segment_vertices(segment_ref);
+                let v0 = V[0];
+                let v1 = V[1];
+                if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
+                    continue;
+                }
+                let p0_raw = world_to_screen_raw(v0, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
+                let p1_raw = world_to_screen_raw(v1, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
+                let p0 = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
+                let p1 = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
+                let t = fragment_position_line_relative(px_f, p0.xy, p1.xy);
+                if t < 0.0 || t > 1.0 {
+                    continue;
+                }
+                let p = mix(p0, p1, t);
+                let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, clamp(p.z, 0.0, 1.0));
+                let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
+                if cov <= 0.0 {
+                    continue;
+                }
+
+                let mat = get_segment_material(segment_ref);
+                let dzp = max(0.0, p.z - z0) * inv_span;
+                let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
+                let tL = u * f32(DOM_SLICES);
+                let si = min(u32(floor(tL)), DOM_SLICES - 1u);
+                let w = fract(tL);
+                let a = cov * mat.absorption_color.w * 0.5;
+
+                let a0 = alpha[si];
+                alpha[si] = clamp(a0 + (1.0 - a0) * (1.0 - w) * a, 0.0, 1.0);
+                if si + 1u < DOM_SLICES {
+                    let a1 = alpha[si + 1u];
+                    alpha[si + 1u] = clamp(a1 + (1.0 - a1) * w * a, 0.0, 1.0);
+                }
+            }
+            chunk_idx = next_chunk;
+        }
+    }
+
+    textureStore(deep_opacity_maps_depth, px_i, i32(light_layer), vec4<f32>(z0, 0.0, 0.0, 0.0));
 
     var acc = 0.0;
-    let z_base = light_layer * DOM_SLICES;
     for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
         let a = alpha[i];
         acc = acc + (1.0 - acc) * a;

@@ -108,8 +108,8 @@ fn setup(
         },
         FroxelConfig {
             // TODO: move into plugin
-            screen_width: 1024, // shadow map size in this context
-            screen_height: 1024,
+            screen_width: 3072, // shadow map size in this context
+            screen_height: 3072,
             froxel_size_x: 8,
             froxel_size_y: 8,
             depth_slices: 8,
