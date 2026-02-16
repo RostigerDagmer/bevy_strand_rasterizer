@@ -27,6 +27,33 @@
       "problemMatcher": [
         "$rustc"
       ]
+    },
+    {
+      "label": "test: surface allocator crate",
+      "type": "shell",
+      "command": "cargo test -p bevy_vsms",
+      "options": {
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "group": "test",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "test: surface allocator crate (single test)",
+      "type": "shell",
+      "command": "cargo test -p bevy_vsms ${input:testName}",
+      "options": {
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
     }
   ],
   "inputs": [

@@ -41,6 +41,47 @@
         "--nocapture"
       ],
       "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug allocator crate tests",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "-p",
+          "bevy_vsms",
+          "--no-run"
+        ],
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug allocator single test",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "-p",
+          "bevy_vsms",
+          "--no-run",
+          "${input:testName}"
+        ],
+        "env": {
+          "RUSTFLAGS": "-Awarnings"
+        }
+      },
+      "args": [
+        "${input:testName}",
+        "--exact",
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
     }
   ],
   "inputs": [
