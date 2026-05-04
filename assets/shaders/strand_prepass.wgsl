@@ -3,12 +3,13 @@
 
 #import "shaders/common.wgsl"::{
     is_valid_ptr,
-    find_clip_bounds,
-    world_to_screen,
+    world_to_screen_raw,
     canonical_min_mask,
     wang_hash,
     hash_to_unit_float,
     l_and,
+    normalize_depth01,
+    to_log_depth,
 }
 
 #import "shaders/types.wgsl"::{
@@ -316,26 +317,6 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-
-// Returns true if the float is NaN
-fn isNan(val: f32) -> bool {
-    let u_val = bitcast<u32>(val);
-    // Check if exponent is all 1s (0x7F800000) and mantissa is non-zero (0x007FFFFF)
-    return (u_val & 0x7F800000u) == 0x7F800000u && (u_val & 0x007FFFFFu) != 0u;
-}
-
-// Returns true if the float is Infinity (positive or negative)
-fn isInf(val: f32) -> bool {
-    let u_val = bitcast<u32>(val);
-    // Check if exponent is all 1s (0x7F800000) and mantissa is zero
-    return (u_val & 0x7F800000u) == 0x7F800000u && (u_val & 0x007FFFFFu) == 0u;
-}
-
-// Helper: Check a vec3 for any bad values
-fn isValid(v: vec3<f32>) -> bool {
-    return !(isNan(v.x) || isNan(v.y) || isNan(v.z) || isInf(v.x) || isInf(v.y) || isInf(v.z));
-}
-
 fn trace_segment_through_froxels_sparse(
     p0: vec3<f32>,
     p1: vec3<f32>,
@@ -471,7 +452,7 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vertex_ptr = t_vertices[inst_id];
     let index_ptr = t_indices[inst_id];
     let geo_ptr = t_geos[inst_id];
-    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(geo_ptr) {
+    if !is_valid_ptr(geo_ptr) {
         return;
     }
 
@@ -480,35 +461,25 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let geo = geos[geo_ptr.slab].gs[geo_ptr.offset / SIZEOF_GEO];
     let clip_from_world = view.unjittered_clip_from_world;
-    let clip_bounds = find_clip_bounds(clip_from_world, geo.aabb.min, geo.aabb.max);
-    if !isValid(clip_bounds[0]) || !isValid(clip_bounds[1]) {
-        return;
-    }
-    if abs(clip_bounds[1].z - clip_bounds[0].z) < 1e-6 {
-        return;
-    }
-    let aabb_znear_zfar = vec2<f32>(clip_bounds[0].z, clip_bounds[1].z);
+    let viewport = vec4<f32>(0.0, 0.0, f32(frustum_cfg.screen_width), f32(frustum_cfg.screen_height));
 
     let vi0 = indices[index_ptr.slab].is[task.seg_idx];
     let vi1 = indices[index_ptr.slab].is[task.seg_idx + 1u];
     let p0_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vi0], 1.0);
     let p1_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vi1], 1.0);
-    let p0 = world_to_screen(
+    let p0_raw = world_to_screen_raw(
         p0_world,
         clip_from_world,
-        f32(frustum_cfg.screen_width),
-        f32(frustum_cfg.screen_height),
-        aabb_znear_zfar,
+        viewport,
     );
-    let p1 = world_to_screen(
+    let p1_raw = world_to_screen_raw(
         p1_world,
         clip_from_world,
-        f32(frustum_cfg.screen_width),
-        f32(frustum_cfg.screen_height),
-        aabb_znear_zfar,
+        viewport,
     );
+    let p0 = vec3<f32>(p0_raw.xy, to_log_depth(p0_raw.z));
+    let p1 = vec3<f32>(p1_raw.xy, to_log_depth(p1_raw.z));
 
     // Sparse queue binning path:
     // consume BinningTask and append leaf references into froxel bucket chains.

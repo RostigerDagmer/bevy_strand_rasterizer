@@ -203,6 +203,23 @@ fn screen_to_world_raw(
     return world_h.xyz / world_h.w;
 }
 
+fn normalize_depth01(z: f32) -> f32 {
+    if z >= 0.0 && z <= 1.0 {
+        return z;
+    }
+    // Some projection paths produce clip-space z in [-1, 1].
+    return clamp(z * 0.5 + 0.5, 0.0, 1.0);
+}
+
+
+fn to_log_depth(z: f32) -> f32 {
+    let linear_depth01 = normalize_depth01(z);
+    let log_scale = 512.0;
+    let log_depth01 = log2(1.0 + log_scale * linear_depth01) / log2(1.0 + log_scale);
+    // Keep prepass convention where higher values are closer.
+    return clamp(log_depth01, 0.0, 1.0);
+}
+
 fn wang_hash(seed: u32) -> u32 {
     var x = seed;
     x = (x ^ 61u) ^ (x >> 16u);

@@ -30,11 +30,12 @@ pub const PHASE_BINNING: u32 = 2;
 /// Current hierarchy depth target for queue-based binning.
 pub const BINNING_NUM_LEVELS: u32 = 2;
 /// Sparse binning chunk size in u32 payload entries.
-pub const BINNING_POOL_CHUNK_SIZE: u32 = 16;
+pub const BINNING_POOL_CHUNK_SIZE: u32 = 4;
 /// Number of allocator heads used to spread atomic pressure.
-pub const BINNING_POOL_NUM_HEADS: u32 = 64;
+pub const BINNING_POOL_NUM_HEADS: u32 = 256;
 /// Minimum number of chunks reserved for sparse binning.
-pub const BINNING_POOL_MIN_CHUNKS: u32 = 8192;
+pub const BINNING_POOL_MIN_CHUNKS: u32 = 16384;
+pub const BINNING_POOL_MAX_CHUNKS: u32 = 32768 * 128;
 
 pub const BINNING_LEVEL_BITS: u32 = 2;
 pub const BINNING_LEVEL_MASK: u32 = (1 << BINNING_LEVEL_BITS) - 1;

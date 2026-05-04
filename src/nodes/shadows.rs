@@ -9,8 +9,8 @@ use bevy::{
         view::{ViewUniformOffset, ViewUniforms},
     },
 };
-use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use crate::pipelines::{
     prepass::StrandPrepassResources,
@@ -20,6 +20,7 @@ use crate::pipelines::{
         run_shadow_pass,
     },
 };
+use crate::resources::ComputeInvocationDims;
 
 #[derive(Debug, Clone, Default)]
 pub struct StrandShadowRasterizerNode;
@@ -47,6 +48,7 @@ impl Node for StrandShadowRasterizerNode {
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let shadow_resources = world.resource::<StrandShadowResources>();
+        let invocation_dims = world.resource::<ComputeInvocationDims>();
         let view_uniforms = world.resource::<ViewUniforms>();
         let light_meta = world.resource::<LightMeta>();
 
@@ -91,32 +93,33 @@ impl Node for StrandShadowRasterizerNode {
             return Ok(());
         };
 
-        let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
-        frusta.sort_by_key(|(entity, _)| entity.index());
-        for (entity, frustum_cfg) in frusta {
-            let Some(&frustum_id) = raster_resources.frustum_ids.get(entity) else {
-                continue;
-            };
-            if !shadow_resources
-                .light_layer_by_frustum
-                .contains_key(&frustum_id)
-            {
-                continue;
-            }
-            run_shadow_pass(
-                render_context,
-                pipeline_cache,
-                shadow_pipeline,
-                allocator,
-                opacity_storage_bind_group,
-                depth_storage_bind_group,
-                frustum_cfg,
-                frustum_id,
-                raster_resources,
-                &shadow_bind_group,
-                &dynamic_offsets,
-            );
-        }
+        // let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
+        // frusta.sort_by_key(|(entity, _)| entity.index());
+        // for (entity, frustum_cfg) in frusta {
+        //     let Some(&frustum_id) = raster_resources.frustum_ids.get(entity) else {
+        //         continue;
+        //     };
+        //     if !shadow_resources
+        //         .light_layer_by_frustum
+        //         .contains_key(&frustum_id)
+        //     {
+        //         continue;
+        //     }
+        //     run_shadow_pass(
+        //         render_context,
+        //         pipeline_cache,
+        //         shadow_pipeline,
+        //         allocator,
+        //         opacity_storage_bind_group,
+        //         depth_storage_bind_group,
+        //         frustum_cfg,
+        //         frustum_id,
+        //         raster_resources,
+        //         &shadow_bind_group,
+        //         &dynamic_offsets,
+        //         invocation_dims.dispatch_size,
+        //     );
+        // }
 
         Ok(())
     }

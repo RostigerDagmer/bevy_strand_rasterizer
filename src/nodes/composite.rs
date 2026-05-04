@@ -159,7 +159,7 @@ impl Node for CompositionNode {
         render_pass.set_render_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         render_pass.draw(0..3, 0..1); // Draw a fullscreen triangle
-
+        info!("Finished Compositing");
         Ok(())
     }
 }

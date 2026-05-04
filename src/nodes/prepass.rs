@@ -12,10 +12,8 @@ use bevy::{
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
 
 use crate::{
-    pipelines::{
-        prepass::{
-            StrandPrepassPipeline, StrandPrepassResources, create_prepass_bind_group, run_prepass,
-        },
+    pipelines::prepass::{
+        StrandPrepassPipeline, StrandPrepassResources, create_prepass_bind_group, run_prepass,
     },
     resources::{ComputeInvocationDims, StochasticCullSettings},
 };
@@ -102,7 +100,7 @@ impl Node for WorkPreparationNode {
         let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
             return Ok(());
         };
-        debug!("Running prepass");
+        info!("Running prepass");
         run_prepass(
             render_context,
             pipeline_cache,
@@ -114,6 +112,7 @@ impl Node for WorkPreparationNode {
             &dynamic_offsets,
             indirect_args,
         );
+        info!("Finished prepass");
 
         Ok(())
     }

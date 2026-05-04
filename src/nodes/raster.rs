@@ -20,6 +20,7 @@ use crate::pipelines::{
     shading::StrandShadingResources,
     shadows::StrandShadowResources,
 };
+use crate::resources::ComputeInvocationDims;
 
 #[derive(Debug, Clone, Default)]
 pub struct StrandRasterizerNode;
@@ -50,6 +51,7 @@ impl Node for StrandRasterizerNode {
         let shading_resources = world.resource::<StrandShadingResources>();
         let shadow_resources = world.resource::<StrandShadowResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
+        let invocation_dims = world.resource::<ComputeInvocationDims>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
         // let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -115,7 +117,7 @@ impl Node for StrandRasterizerNode {
             warn!("Failed to create strand raster bind group.");
             return Ok(());
         };
-
+        info!("Running raster pass");
         run_raster_pass(
             render_context,
             pipeline_cache,
@@ -127,7 +129,9 @@ impl Node for StrandRasterizerNode {
             shading_resources,
             &raster_bind_group,
             &raster_group_offsets,
+            invocation_dims.dispatch_size,
         );
+        info!("Finished raster pass");
 
         Ok(())
     }

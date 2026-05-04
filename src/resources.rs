@@ -44,7 +44,7 @@ impl Default for ComputeInvocationDims {
         Self {
             threads_per_workgroup: 256,
             subgroup_size: 32,
-            dispatch_size: (16384, 1, 1),
+            dispatch_size: (32768, 1, 1),
         }
     }
 }

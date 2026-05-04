@@ -13,14 +13,15 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use bevy_vsms::allocator::VirtualSurfaceRuntime;
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_vsms::allocator::VirtualSurfaceRuntime;
 use std::collections::HashMap;
 
 use crate::{
     components::FroxelConfig,
     pipelines::{layouts, prepass::StrandPrepassResources, task_contract::BINNING_POOL_CHUNK_SIZE},
     plugin::MAX_TEXTURE_EXTENT,
+    resources::ComputeInvocationDims,
     shader_types::PushConstants,
 };
 
@@ -42,6 +43,7 @@ pub struct StrandShadowPipeline {
     pub bind_group_layout: BindGroupLayout,
     pub shadow_pipeline: Option<CachedComputePipelineId>,
     pub allocator_epoch: u64,
+    pub workgroup_size: u32,
 }
 
 impl StrandShadowPipeline {
@@ -123,6 +125,7 @@ impl FromWorld for StrandShadowPipeline {
             bind_group_layout,
             shadow_pipeline: None,
             allocator_epoch: u64::MAX,
+            workgroup_size: 0,
         }
     }
 }
@@ -130,12 +133,17 @@ impl FromWorld for StrandShadowPipeline {
 pub fn update_strand_shadow_pipeline(
     mut pipeline: ResMut<StrandShadowPipeline>,
     allocator: Res<GpuPagingAllocator>,
+    invocation_dims: Res<ComputeInvocationDims>,
     vsms_runtime: Res<VirtualSurfaceRuntime>,
     shader_loader: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
     let current_state = allocator.bindgroups_epoch;
-    if pipeline.shadow_pipeline.is_some() && pipeline.allocator_epoch == current_state {
+    let workgroup_size = invocation_dims.threads_per_workgroup.max(1);
+    if pipeline.shadow_pipeline.is_some()
+        && pipeline.allocator_epoch == current_state
+        && pipeline.workgroup_size == workgroup_size
+    {
         return;
     }
 
@@ -177,6 +185,7 @@ pub fn update_strand_shadow_pipeline(
             ),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
             ShaderDefVal::UInt("NUM_DOM_SLICES".into(), NUM_DOM_SLICES),
+            ShaderDefVal::UInt("WORKGROUP_SIZE".into(), workgroup_size),
             "SHADOWS".into(),
         ],
         layouts::rasterizer::shader_defs(),
@@ -198,19 +207,22 @@ pub fn update_strand_shadow_pipeline(
     layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout;
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
-    pipeline.shadow_pipeline = Some(pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("strand_shadow_rasterize_pipeline".into()),
-        layout,
-        shader: rasterize_shader,
-        shader_defs: cdefs,
-        push_constant_ranges: vec![PushConstantRange {
-            stages: ShaderStages::COMPUTE,
-            range: 0..std::mem::size_of::<PushConstants>() as u32,
-        }],
-        entry_point: Some("rasterize_strands".into()),
-        zero_initialize_workgroup_memory: false,
-    }));
+    pipeline.shadow_pipeline = Some(pipeline_cache.queue_compute_pipeline(
+        ComputePipelineDescriptor {
+            label: Some("strand_shadow_rasterize_pipeline".into()),
+            layout,
+            shader: rasterize_shader,
+            shader_defs: cdefs,
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: Some("rasterize_strands".into()),
+            zero_initialize_workgroup_memory: false,
+        },
+    ));
     pipeline.allocator_epoch = current_state;
+    pipeline.workgroup_size = workgroup_size;
 }
 
 pub fn create_strand_shadow_bind_group(
@@ -271,11 +283,12 @@ pub fn run_shadow_pass(
     allocator: &GpuPagingAllocator,
     opacity_storage_bind_group: &BindGroup,
     depth_storage_bind_group: &BindGroup,
-    froxel_config: &FroxelConfig,
+    _froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
     bind_group: &BindGroup,
     offsets: &[u32],
+    dispatch_size: (u32, u32, u32),
 ) {
     let Some(pipeline_id) = pipeline.shadow_pipeline else {
         warn!("Shadow pipeline id not ready");
@@ -327,9 +340,5 @@ pub fn run_shadow_pass(
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-    let workgroup_size_x = froxel_config.froxel_size_x;
-    let workgroup_size_y = froxel_config.froxel_size_y;
-    let workgroups_x = froxel_config.screen_width / workgroup_size_x;
-    let workgroups_y = froxel_config.screen_height / workgroup_size_y;
-    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    pass.dispatch_workgroups(dispatch_size.0, dispatch_size.1, dispatch_size.2);
 }

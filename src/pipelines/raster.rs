@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use crate::{
     allocator::GpuPagingAllocator, components::FroxelConfig, pipelines::layouts,
     pipelines::task_contract::BINNING_POOL_CHUNK_SIZE, plugin::MAX_TEXTURE_EXTENT,
+    resources::ComputeInvocationDims,
     shader_types::PushConstants,
 };
 
@@ -48,6 +49,7 @@ pub struct StrandRasterizerPipeline {
     pub bind_group_layout: BindGroupLayout,
     pub rasterize_pipeline: Option<CachedComputePipelineId>,
     pub allocator_epoch: u64,
+    pub workgroup_size: u32,
 }
 
 impl StrandRasterizerPipeline {
@@ -187,6 +189,7 @@ impl FromWorld for StrandRasterizerPipeline {
             bind_group_layout,
             rasterize_pipeline: None,
             allocator_epoch: u64::MAX,
+            workgroup_size: 0,
         }
     }
 }
@@ -194,11 +197,16 @@ impl FromWorld for StrandRasterizerPipeline {
 pub fn update_strand_raster_pipeline(
     mut pipeline: ResMut<StrandRasterizerPipeline>,
     allocator: Res<GpuPagingAllocator>,
+    invocation_dims: Res<ComputeInvocationDims>,
     shader_loader: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
     let current_state = allocator.bindgroups_epoch;
-    if pipeline.rasterize_pipeline.is_some() && pipeline.allocator_epoch == current_state {
+    let workgroup_size = invocation_dims.threads_per_workgroup.max(1);
+    if pipeline.rasterize_pipeline.is_some()
+        && pipeline.allocator_epoch == current_state
+        && pipeline.workgroup_size == workgroup_size
+    {
         return;
     }
 
@@ -225,6 +233,7 @@ pub fn update_strand_raster_pipeline(
                 std::mem::size_of::<crate::shader_types::StrandGeo>() as u32,
             ),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
+            ShaderDefVal::UInt("WORKGROUP_SIZE".into(), workgroup_size),
         ],
         layouts::rasterizer::shader_defs(),
         allocator.shader_defs(),
@@ -257,6 +266,7 @@ pub fn update_strand_raster_pipeline(
 
     pipeline.rasterize_pipeline = Some(rasterize_pipeline);
     pipeline.allocator_epoch = current_state;
+    pipeline.workgroup_size = workgroup_size;
     info!("Updated rasterizer pipeline.")
 }
 
@@ -388,12 +398,13 @@ pub fn run_raster_pass(
     pipeline_cache: &PipelineCache,
     pipeline: &StrandRasterizerPipeline,
     allocator: &GpuPagingAllocator,
-    froxel_config: &FroxelConfig,
+    _froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
     shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
+    dispatch_size: (u32, u32, u32),
 ) {
     let encoder = render_context.command_encoder(); // Get CommandEncoder
     // --- Rasterize ---
@@ -440,12 +451,7 @@ pub fn run_raster_pass(
         };
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-        // Dispatch based on number of strands or segments
-        let workgroup_size_x = froxel_config.froxel_size_x;
-        let workgroup_size_y = froxel_config.froxel_size_y;
-        let workgroups_x = froxel_config.screen_width / workgroup_size_x;
-        let workgroups_y = froxel_config.screen_height / workgroup_size_y;
-        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        pass.dispatch_workgroups(dispatch_size.0, dispatch_size.1, dispatch_size.2);
     }
 
     // --- Rasterization complete ---

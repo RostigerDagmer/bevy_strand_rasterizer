@@ -39,8 +39,8 @@ use crate::{
         shading::*,
         shadows::*,
         task_contract::{
-            BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MIN_CHUNKS, BINNING_POOL_NUM_HEADS,
-            QUEUE_HEADER_WORDS, RasterWorkItem,
+            BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MAX_CHUNKS, BINNING_POOL_MIN_CHUNKS,
+            BINNING_POOL_NUM_HEADS, QUEUE_HEADER_WORDS, RasterWorkItem,
         },
         tile_debug::*,
     },
@@ -215,11 +215,11 @@ impl Plugin for StrandRasterizerPlugin {
                 bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass, // Run before composition
                 nodes::prepass::WorkPreparationLabel,
             )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::prepass::WorkPreparationLabel,
-                nodes::shadows::StrandShadowRasterizerLabel,
-            )
+            // .add_render_graph_edge(
+            //     Core3d,
+            //     nodes::prepass::WorkPreparationLabel,
+            //     nodes::shadows::StrandShadowRasterizerLabel,
+            // )
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
@@ -235,11 +235,11 @@ impl Plugin for StrandRasterizerPlugin {
                 nodes::raster::StrandRasterizerLabel,
                 nodes::composite::CompositionLabel,
             )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::prepass::WorkPreparationLabel,
-                nodes::debug::TileDebugLabel,
-            )
+            // .add_render_graph_edge(
+            //     Core3d,
+            //     nodes::prepass::WorkPreparationLabel,
+            //     nodes::debug::TileDebugLabel,
+            // )
             .add_render_graph_edge(
                 Core3d,
                 nodes::composite::CompositionLabel,
@@ -247,7 +247,8 @@ impl Plugin for StrandRasterizerPlugin {
             )
             .add_render_graph_edge(
                 Core3d,
-                nodes::debug::TileDebugLabel, // Run after composition
+                // nodes::debug::TileDebugLabel, // Run after composition
+                nodes::composite::CompositionLabel, // Run after composition
                 bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing, // Before standard post-processing
             );
     }
@@ -351,7 +352,7 @@ fn use_prepass_buffers(
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
     let shading_layer_capacity = geo_capacity.max(1).min(32);
     let raster_work_capacity = binning_capacity
-        .saturating_mul(4)
+        .saturating_mul(2)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
 
@@ -398,7 +399,9 @@ fn use_prepass_buffers(
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
         let geo_bytes = (geo_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let geo_prefix_bytes = ((geo_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
-        let chunk_count = raster_work_capacity.max(BINNING_POOL_MIN_CHUNKS);
+        let chunk_count = raster_work_capacity
+            .max(BINNING_POOL_MIN_CHUNKS)
+            .min(BINNING_POOL_MAX_CHUNKS);
         let chunk_stride_bytes =
             (2u64 + BINNING_POOL_CHUNK_SIZE as u64) * std::mem::size_of::<u32>() as u64;
         let chunk_pool_bytes = chunk_count as u64 * chunk_stride_bytes;
