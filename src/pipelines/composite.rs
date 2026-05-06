@@ -4,12 +4,13 @@ use bevy::{
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{
-            BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-            BlendState, BufferBindingType, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            FilterMode, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache,
-            PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
-            RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
-            ShaderType, StoreOp, TextureFormat, TextureSampleType, TextureViewDimension,
+            BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+            BindingResource, BindingType, BlendState, BufferBindingType, CachedRenderPipelineId,
+            ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp, MultisampleState,
+            Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
+            RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType,
+            TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -30,7 +31,7 @@ impl FromWorld for CompositionPipeline {
         let render_device = world.resource::<RenderDevice>();
         let fullscreen_shader = world.resource::<FullscreenShader>();
 
-        let layout = render_device.create_bind_group_layout(
+        let layout_descriptor = BindGroupLayoutDescriptor::new(
             "composition_layout",
             &[
                 // Input Scene Texture
@@ -95,6 +96,8 @@ impl FromWorld for CompositionPipeline {
                 },
             ],
         );
+        let layout = render_device
+            .create_bind_group_layout(layout_descriptor.label.as_ref(), &layout_descriptor.entries);
 
         let sampler = render_device.create_sampler(&SamplerDescriptor {
             label: Some("composition_sampler"),
@@ -111,7 +114,7 @@ impl FromWorld for CompositionPipeline {
 
         let pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("composition_pipeline".into()),
-            layout: vec![layout.clone()],
+            layout: vec![layout_descriptor],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),

@@ -326,9 +326,6 @@ fn trace_segment_through_froxels_sparse(
     strand_idx: u32,
     seg_idx: u32,
 ) {
-    if !isValid(p0) || !isValid(p1) {
-        return;
-    }
     if p0.x < 0.0 || p1.x < 0.0 {
         return;
     }

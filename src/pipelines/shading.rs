@@ -3,18 +3,19 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
-            ShaderType, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
+            PipelineCache, PushConstantRange, ShaderStages, ShaderType, StorageTextureAccess,
+            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+            TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
     },
     shader::ShaderDefVal,
 };
-use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
 
 use crate::{
     pipelines::{layouts, prepass::StrandPrepassResources},
@@ -43,8 +44,8 @@ pub struct StrandShadingPipeline {
 }
 
 impl StrandShadingPipeline {
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
+    pub fn bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
             "strand_shading_bind_group_layout",
             &[
                 BindGroupLayoutEntry {
@@ -100,6 +101,11 @@ impl StrandShadingPipeline {
             ],
         )
     }
+
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
 }
 
 impl FromWorld for StrandShadingPipeline {
@@ -126,12 +132,20 @@ pub fn update_strand_shading_pipeline(
         return;
     }
 
-    let (Some(buffer_layout), Some(table_layout)) = (
-        allocator.buffer_bind_group_layout.clone(),
-        allocator.pagetable_bind_group_layout.clone(),
-    ) else {
+    if allocator.buffer_bind_group_layout.is_none()
+        || allocator.pagetable_bind_group_layout.is_none()
+    {
         return;
-    };
+    }
+    let allocator_layout_entries = allocator.layout_entries();
+    let buffer_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_buffer_layout",
+        &allocator_layout_entries.pools,
+    );
+    let table_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_table_layout",
+        &allocator_layout_entries.page_tables,
+    );
 
     let cdefs = [
         vec![
@@ -155,24 +169,27 @@ pub fn update_strand_shading_pipeline(
         .buffer_group_idx
         .max(allocator.table_group_idx)
         .max(layouts::shading::SHADING_GROUP);
-    let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
+    let shading_layout = StrandShadingPipeline::bind_group_layout_descriptor();
+    let mut layout = vec![shading_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
-    layout[layouts::shading::SHADING_GROUP as usize] = pipeline.bind_group_layout.clone();
+    layout[layouts::shading::SHADING_GROUP as usize] = shading_layout;
 
     let shader = shader_loader.load("shaders/strand_shading.wgsl");
-    pipeline.shading_pipeline = Some(pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("strand_shading_pipeline".into()),
-        layout,
-        shader,
-        shader_defs: cdefs,
-        push_constant_ranges: vec![PushConstantRange {
-            stages: ShaderStages::COMPUTE,
-            range: 0..std::mem::size_of::<PushConstants>() as u32,
-        }],
-        entry_point: Some("shade_strands".into()),
-        zero_initialize_workgroup_memory: false,
-    }));
+    pipeline.shading_pipeline = Some(pipeline_cache.queue_compute_pipeline(
+        ComputePipelineDescriptor {
+            label: Some("strand_shading_pipeline".into()),
+            layout,
+            shader,
+            shader_defs: cdefs,
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: Some("shade_strands".into()),
+            zero_initialize_workgroup_memory: false,
+        },
+    ));
     pipeline.allocator_epoch = current_state;
 }
 

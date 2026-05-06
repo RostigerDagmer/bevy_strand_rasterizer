@@ -217,7 +217,7 @@ fn to_log_depth(z: f32) -> f32 {
     let log_scale = 512.0;
     let log_depth01 = log2(1.0 + log_scale * linear_depth01) / log2(1.0 + log_scale);
     // Keep prepass convention where higher values are closer.
-    return clamp(log_depth01, 0.0, 1.0);
+    return clamp(1.0 - log_depth01, 0.0, 1.0);
 }
 
 fn wang_hash(seed: u32) -> u32 {

@@ -2,10 +2,10 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupLayout, BindGroupLayoutEntry, BindingType, Buffer,
-            BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
-            ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, PushConstantRange,
-            ShaderStages, TextureView,
+            BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+            BindingType, Buffer, BufferBindingType, BufferInitDescriptor, BufferUsages,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+            PipelineCache, PushConstantRange, ShaderStages, TextureView,
         },
         renderer::{RenderContext, RenderDevice},
     },
@@ -27,14 +27,8 @@ pub struct StrandSimulatorPipeline {
 }
 
 impl StrandSimulatorPipeline {
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        let dispatch_args = device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("strand_dispatch_args"),
-            contents: bytemuck::cast_slice(&[1u32, 1u32, 1u32]),
-            usage: BufferUsages::INDIRECT | BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        });
-
-        device.create_bind_group_layout(
+    pub fn bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
             "strand_simulation_bind_group_layout",
             &[
                 // Vertex buffer (read-only storage buffer)
@@ -52,6 +46,17 @@ impl StrandSimulatorPipeline {
             ],
         )
     }
+
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let dispatch_args = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("strand_dispatch_args"),
+            contents: bytemuck::cast_slice(&[1u32, 1u32, 1u32]),
+            usage: BufferUsages::INDIRECT | BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+
+        let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
 }
 
 impl FromWorld for StrandSimulatorPipeline {
@@ -63,20 +68,18 @@ impl FromWorld for StrandSimulatorPipeline {
         let shading_shader = shader_loader.load("shaders/strand_simulation.wgsl");
 
         let pipeline_cache = world.resource::<PipelineCache>();
-        let cdefs = [
-            vec![
-                ShaderDefVal::UInt(
-                    "MAX_TEXTURE_EXTENT".into(),
-                    crate::plugin::MAX_TEXTURE_EXTENT,
-                ),
-                ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SIMULATOR_WORKGROUP_SIZE),
-            ],
-        ]
+        let cdefs = [vec![
+            ShaderDefVal::UInt(
+                "MAX_TEXTURE_EXTENT".into(),
+                crate::plugin::MAX_TEXTURE_EXTENT,
+            ),
+            ShaderDefVal::UInt("WORKGROUP_SIZE".into(), SIMULATOR_WORKGROUP_SIZE),
+        ]]
         .concat();
 
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("strand_simulation_pipeline".into()),
-            layout: vec![bind_group_layout.clone()],
+            layout: vec![Self::bind_group_layout_descriptor()],
             shader: shading_shader,
             shader_defs: cdefs,
             push_constant_ranges: vec![],

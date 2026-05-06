@@ -15,7 +15,7 @@ pub struct DsonAsset {
 }
 
 /// Asset loader for DSON files
-#[derive(Default)]
+#[derive(Default, TypePath)]
 pub struct DsonAssetLoader;
 
 impl AssetLoader for DsonAssetLoader {

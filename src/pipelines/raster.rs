@@ -3,11 +3,12 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipeline, ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange,
-            ShaderStages, StorageTextureAccess, Texture, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
+            ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
+            StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
             TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
@@ -15,14 +16,14 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
+use bevy_gpu_paging_allocator::BindGroupBuilder;
 
 use std::collections::HashMap;
 
 use crate::{
     allocator::GpuPagingAllocator, components::FroxelConfig, pipelines::layouts,
     pipelines::task_contract::BINNING_POOL_CHUNK_SIZE, plugin::MAX_TEXTURE_EXTENT,
-    resources::ComputeInvocationDims,
-    shader_types::PushConstants,
+    resources::ComputeInvocationDims, shader_types::PushConstants,
 };
 
 use super::{
@@ -53,8 +54,8 @@ pub struct StrandRasterizerPipeline {
 }
 
 impl StrandRasterizerPipeline {
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
+    pub fn bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
             "strand_rasterizer_bind_group_layout",
             &[
                 // Output texture (write-only storage texture)
@@ -178,6 +179,11 @@ impl StrandRasterizerPipeline {
             ],
         )
     }
+
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
 }
 
 impl FromWorld for StrandRasterizerPipeline {
@@ -210,12 +216,20 @@ pub fn update_strand_raster_pipeline(
         return;
     }
 
-    let (Some(buffer_layout), Some(table_layout)) = (
-        allocator.buffer_bind_group_layout.clone(),
-        allocator.pagetable_bind_group_layout.clone(),
-    ) else {
+    if allocator.buffer_bind_group_layout.is_none()
+        || allocator.pagetable_bind_group_layout.is_none()
+    {
         return;
-    };
+    }
+    let allocator_layout_entries = allocator.layout_entries();
+    let buffer_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_buffer_layout",
+        &allocator_layout_entries.pools,
+    );
+    let table_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_table_layout",
+        &allocator_layout_entries.page_tables,
+    );
 
     let mut cdefs = [
         vec![
@@ -245,10 +259,11 @@ pub fn update_strand_raster_pipeline(
         .buffer_group_idx
         .max(allocator.table_group_idx)
         .max(layouts::rasterizer::RASTER_GROUP);
-    let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
+    let raster_layout = StrandRasterizerPipeline::bind_group_layout_descriptor();
+    let mut layout = vec![raster_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
-    layout[layouts::rasterizer::RASTER_GROUP as usize] = pipeline.bind_group_layout.clone();
+    layout[layouts::rasterizer::RASTER_GROUP as usize] = raster_layout;
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
     let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {

@@ -3,17 +3,17 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, PipelineCache, PushConstantRange, ShaderStages, ShaderType,
-            TextureView,
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+            PipelineCache, PushConstantRange, ShaderStages, ShaderType, TextureView,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
     },
     shader::ShaderDefVal,
 };
-use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
 use bevy_vsms::allocator::VirtualSurfaceRuntime;
 use std::collections::HashMap;
 
@@ -47,8 +47,8 @@ pub struct StrandShadowPipeline {
 }
 
 impl StrandShadowPipeline {
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
+    pub fn bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
             "strand_shadow_bind_group_layout",
             &[
                 BindGroupLayoutEntry {
@@ -114,6 +114,11 @@ impl StrandShadowPipeline {
             ],
         )
     }
+
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
 }
 
 impl FromWorld for StrandShadowPipeline {
@@ -147,23 +152,31 @@ pub fn update_strand_shadow_pipeline(
         return;
     }
 
-    let (Some(buffer_layout), Some(table_layout)) = (
-        allocator.buffer_bind_group_layout.clone(),
-        allocator.pagetable_bind_group_layout.clone(),
-    ) else {
+    if allocator.buffer_bind_group_layout.is_none()
+        || allocator.pagetable_bind_group_layout.is_none()
+    {
         return;
-    };
+    }
+    let allocator_layout_entries = allocator.layout_entries();
+    let buffer_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_buffer_layout",
+        &allocator_layout_entries.pools,
+    );
+    let table_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_table_layout",
+        &allocator_layout_entries.page_tables,
+    );
     let Some(opacity_storage_layout) = vsms_runtime
         .pool_storage_bindings
         .get(&bevy_vsms::api::VirtualSurfaceKind::Opacity3D)
-        .map(|b| b.layout.clone())
+        .map(|b| b.layout_descriptor.clone())
     else {
         return;
     };
     let Some(depth_storage_layout) = vsms_runtime
         .pool_storage_bindings
         .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
-        .map(|b| b.layout.clone())
+        .map(|b| b.layout_descriptor.clone())
     else {
         return;
     };
@@ -199,10 +212,11 @@ pub fn update_strand_shadow_pipeline(
         .max(layouts::rasterizer::RASTER_GROUP)
         .max(layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP)
         .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP);
-    let mut layout = vec![pipeline.bind_group_layout.clone(); (max_group + 1) as usize];
+    let shadow_layout = StrandShadowPipeline::bind_group_layout_descriptor();
+    let mut layout = vec![shadow_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
-    layout[layouts::rasterizer::RASTER_GROUP as usize] = pipeline.bind_group_layout.clone();
+    layout[layouts::rasterizer::RASTER_GROUP as usize] = shadow_layout;
     layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_storage_layout;
     layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout;
 

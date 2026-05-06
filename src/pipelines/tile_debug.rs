@@ -4,20 +4,19 @@ use bevy::{
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{
-            BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingType, BlendState,
-            BufferBindingType, BufferInitDescriptor, CachedRenderPipelineId, ColorTargetState,
-            ColorWrites, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache,
-            PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, StoreOp, TextureFormat,
+            BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+            BindingType, BlendState, BufferBindingType, BufferInitDescriptor,
+            CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp,
+            MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
+            RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, StoreOp,
+            TextureFormat,
         },
         renderer::RenderContext,
         view::ViewTarget,
     },
 };
 
-use crate::{
-    pipelines::layouts,
-};
+use crate::pipelines::layouts;
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Clone, Copy, ShaderType, Pod, Zeroable)]
@@ -40,7 +39,7 @@ impl FromWorld for TileDebugPipeline {
         let render_device = world.resource::<bevy::render::renderer::RenderDevice>();
         let fullscreen_shader = world.resource::<FullscreenShader>();
 
-        let layout = render_device.create_bind_group_layout(
+        let layout_descriptor = BindGroupLayoutDescriptor::new(
             "tile_debug_layout",
             &[
                 BindGroupLayoutEntry {
@@ -85,6 +84,8 @@ impl FromWorld for TileDebugPipeline {
                 },
             ],
         );
+        let layout = render_device
+            .create_bind_group_layout(layout_descriptor.label.as_ref(), &layout_descriptor.entries);
 
         let shader = world
             .resource::<AssetServer>()
@@ -93,7 +94,7 @@ impl FromWorld for TileDebugPipeline {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("tile_debug_pipeline".into()),
-            layout: vec![layout.clone()],
+            layout: vec![layout_descriptor],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader,

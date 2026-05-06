@@ -10,15 +10,17 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-            BindingType, Buffer, BufferBindingType, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, IntoBinding, PipelineCache, PushConstantRange, ShaderStages,
+            BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, IntoBinding,
+            PipelineCache, PushConstantRange, ShaderStages,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
     },
     shader::ShaderDefVal,
 };
+use bevy_gpu_paging_allocator::BindGroupBuilder;
 
 #[derive(Resource, Default)]
 pub struct StrandPrepassResources {
@@ -82,8 +84,8 @@ impl StrandPrepassPipeline {
         }
     }
 
-    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
-        device.create_bind_group_layout(
+    pub fn bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
             "strand_prepass_bind_group_layout",
             &[
                 Self::storage_entry(layouts::prepass::PREPASS_QUEUE, false),
@@ -105,22 +107,36 @@ impl StrandPrepassPipeline {
             ],
         )
     }
+
+    pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
 }
 
 fn queue_prepass_pipeline(
     pipeline_cache: &PipelineCache,
     shader: Handle<Shader>,
-    bind_group_layout: BindGroupLayout,
+    _bind_group_layout: BindGroupLayout,
     allocator: &GpuPagingAllocator,
     invocation_dims: &ComputeInvocationDims,
     entry_point: &'static str,
 ) -> Option<CachedComputePipelineId> {
-    let (Some(buffer_layout), Some(table_layout)) = (
-        allocator.buffer_bind_group_layout.clone(),
-        allocator.pagetable_bind_group_layout.clone(),
-    ) else {
+    if allocator.buffer_bind_group_layout.is_none()
+        || allocator.pagetable_bind_group_layout.is_none()
+    {
         return None;
-    };
+    }
+    let allocator_layout_entries = allocator.layout_entries();
+    let buffer_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_buffer_layout",
+        &allocator_layout_entries.pools,
+    );
+    let table_layout = BindGroupLayoutDescriptor::new(
+        "gpu_paging_allocator_table_layout",
+        &allocator_layout_entries.page_tables,
+    );
+    let bind_group_layout = StrandPrepassPipeline::bind_group_layout_descriptor();
 
     let mut shader_defs = vec![layouts::prepass::shader_defs(), allocator.shader_defs()].concat();
     shader_defs.extend([

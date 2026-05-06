@@ -94,9 +94,9 @@ fn setup(
         FroxelConfig {
             screen_height: 2160,
             screen_width: 2160,
-            depth_slices: 16,
-            froxel_size_x: 8,
-            froxel_size_y: 8,
+            depth_slices: 512,
+            froxel_size_x: 32,
+            froxel_size_y: 32,
             ..Default::default()
         },
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),
@@ -146,7 +146,7 @@ fn setup(
             screen_height: 512,
             froxel_size_x: 8,
             froxel_size_y: 8,
-            depth_slices: 4,
+            depth_slices: 16,
         },
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow
