@@ -26,6 +26,9 @@ pub mod prepass {
     pub const COARSE_RANGE_QUEUE: u32 = 28;
     pub const COARSE_INTERVAL_HEADS: u32 = 29;
     pub const COARSE_INTERVAL_REFS: u32 = 30;
+    pub const COARSE_RANGE_LOOKUP: u32 = 31;
+    pub const COARSE_COUNT_PAGE_TABLE: u32 = 32;
+    pub const COARSE_COUNT_PAGES: u32 = 33;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -56,6 +59,9 @@ pub mod prepass {
             ShaderDefVal::UInt("COARSE_RANGE_QUEUE".into(), COARSE_RANGE_QUEUE),
             ShaderDefVal::UInt("COARSE_INTERVAL_HEADS".into(), COARSE_INTERVAL_HEADS),
             ShaderDefVal::UInt("COARSE_INTERVAL_REFS".into(), COARSE_INTERVAL_REFS),
+            ShaderDefVal::UInt("COARSE_RANGE_LOOKUP".into(), COARSE_RANGE_LOOKUP),
+            ShaderDefVal::UInt("COARSE_COUNT_PAGE_TABLE".into(), COARSE_COUNT_PAGE_TABLE),
+            ShaderDefVal::UInt("COARSE_COUNT_PAGES".into(), COARSE_COUNT_PAGES),
         ]
     }
 }
@@ -245,21 +251,31 @@ pub mod post_process {
 }
 
 pub mod tile_debug {
-    use crate::pipelines::task_contract::BINNING_POOL_CHUNK_SIZE;
+    use crate::{
+        pipelines::task_contract::BINNING_POOL_CHUNK_SIZE,
+        plugin::{COARSE_COUNT_PAGE_SIZE, COARSE_DEPTH_SLICES, COARSE_FINE_TILE_EXTENT},
+    };
     use bevy::shader::ShaderDefVal;
 
     pub const FRUSTUM_TABLE: u32 = 0;
     pub const FROXEL_BUCKET_HEADS: u32 = 1;
     pub const CHUNK_POOL: u32 = 2;
-    pub const PARAMS: u32 = 3;
+    pub const COARSE_COUNT_PAGE_TABLE: u32 = 3;
+    pub const COARSE_COUNT_PAGES: u32 = 4;
+    pub const PARAMS: u32 = 5;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
             ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
+            ShaderDefVal::UInt("COARSE_COUNT_PAGE_TABLE".into(), COARSE_COUNT_PAGE_TABLE),
+            ShaderDefVal::UInt("COARSE_COUNT_PAGES".into(), COARSE_COUNT_PAGES),
             ShaderDefVal::UInt("PARAMS".into(), PARAMS),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
+            ShaderDefVal::UInt("COARSE_FINE_TILE_EXTENT".into(), COARSE_FINE_TILE_EXTENT),
+            ShaderDefVal::UInt("COARSE_DEPTH_SLICES".into(), COARSE_DEPTH_SLICES),
+            ShaderDefVal::UInt("COARSE_COUNT_PAGE_SIZE".into(), COARSE_COUNT_PAGE_SIZE),
         ]
     }
 }

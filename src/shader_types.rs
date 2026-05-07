@@ -64,9 +64,10 @@ impl From<Aabb3d> for Aabb {
 pub struct StrandGeo {
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
-    pad1: u32,
+    pub offset: u32,
     pad2: u32,
     pub aabb: Aabb,
+    pad3: [u32; 4],
 }
 
 #[derive(Debug, Clone, ShaderType)]
@@ -93,9 +94,10 @@ impl StrandGeo {
         Self {
             strand_count,
             max_segments_in_strand,
-            pad1: 0,
+            offset: 0,
             pad2: 0,
             aabb: aabb.into(),
+            pad3: [0; 4],
         }
     }
 }

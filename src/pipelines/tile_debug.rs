@@ -73,6 +73,26 @@ impl FromWorld for TileDebugPipeline {
                     count: None,
                 },
                 BindGroupLayoutEntry {
+                    binding: layouts::tile_debug::COARSE_COUNT_PAGE_TABLE,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::tile_debug::COARSE_COUNT_PAGES,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
                     binding: layouts::tile_debug::PARAMS,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {

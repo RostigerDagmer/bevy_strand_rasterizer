@@ -52,6 +52,7 @@ struct StrandGeo {
     offset: u32,
     pad_b: u32,
     aabb: Aabb,
+    pad_c: vec4<u32>,
 } // align(16)
 
 struct StrandMeta {

@@ -8,8 +8,8 @@ use bevy::{
     },
 };
 use wgpu::{
-    BindGroupEntry, LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor, StoreOp,
-    util::BufferInitDescriptor,
+    BindGroupEntry, Color, LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor,
+    StoreOp, util::BufferInitDescriptor,
 };
 
 use crate::{
@@ -57,6 +57,13 @@ impl Node for TileDebugNode {
             return Ok(());
         };
         let Some(chunk_pool) = prepass_resources.chunk_pool.as_ref() else {
+            return Ok(());
+        };
+        let Some(coarse_count_page_table) = prepass_resources.coarse_count_page_table.as_ref()
+        else {
+            return Ok(());
+        };
+        let Some(coarse_count_pages) = prepass_resources.coarse_count_pages.as_ref() else {
             return Ok(());
         };
 
@@ -107,6 +114,14 @@ impl Node for TileDebugNode {
                     resource: chunk_pool.as_entire_binding(),
                 },
                 BindGroupEntry {
+                    binding: layouts::tile_debug::COARSE_COUNT_PAGE_TABLE,
+                    resource: coarse_count_page_table.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::tile_debug::COARSE_COUNT_PAGES,
+                    resource: coarse_count_pages.as_entire_binding(),
+                },
+                BindGroupEntry {
                     binding: layouts::tile_debug::PARAMS,
                     resource: params_buffer.as_entire_binding(),
                 },
@@ -120,7 +135,7 @@ impl Node for TileDebugNode {
                 view: post_process.destination,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Load,
+                    load: LoadOp::Clear(Color::BLACK),
                     store: StoreOp::Store,
                 },
                 depth_slice: None,

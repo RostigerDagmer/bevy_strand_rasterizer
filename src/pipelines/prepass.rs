@@ -42,6 +42,9 @@ pub struct StrandPrepassResources {
     pub coarse_range_queue: Option<Buffer>,
     pub coarse_interval_heads: Option<Buffer>,
     pub coarse_interval_refs: Option<Buffer>,
+    pub coarse_range_lookup: Option<Buffer>,
+    pub coarse_count_page_table: Option<Buffer>,
+    pub coarse_count_pages: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
@@ -53,6 +56,7 @@ pub struct StrandPrepassResources {
     pub coarse_depth_tile_capacity: u32,
     pub coarse_range_capacity: u32,
     pub coarse_interval_ref_capacity: u32,
+    pub coarse_count_page_capacity: u32,
 }
 
 #[derive(Resource)]
@@ -64,6 +68,8 @@ pub struct StrandPrepassPipeline {
     pub coarse_interval_pipeline: Option<CachedComputePipelineId>,
     pub build_depth_warp_pipeline: Option<CachedComputePipelineId>,
     pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
+    pub mark_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
+    pub allocate_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
     pub binning_pipeline: Option<CachedComputePipelineId>,
 }
 
@@ -118,6 +124,9 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::COARSE_RANGE_QUEUE, false),
                 Self::storage_entry(layouts::prepass::COARSE_INTERVAL_HEADS, false),
                 Self::storage_entry(layouts::prepass::COARSE_INTERVAL_REFS, false),
+                Self::storage_entry(layouts::prepass::COARSE_RANGE_LOOKUP, false),
+                Self::storage_entry(layouts::prepass::COARSE_COUNT_PAGE_TABLE, false),
+                Self::storage_entry(layouts::prepass::COARSE_COUNT_PAGES, false),
             ],
         )
     }
@@ -189,6 +198,10 @@ fn queue_prepass_pipeline(
             "COARSE_MAX_SLICES_PER_ASSET_INTERVAL".into(),
             crate::plugin::COARSE_MAX_SLICES_PER_ASSET_INTERVAL,
         ),
+        ShaderDefVal::UInt(
+            "COARSE_COUNT_PAGE_SIZE".into(),
+            crate::plugin::COARSE_COUNT_PAGE_SIZE,
+        ),
     ]);
 
     let max_group = allocator
@@ -231,6 +244,8 @@ impl FromWorld for StrandPrepassPipeline {
             coarse_interval_pipeline: None,
             build_depth_warp_pipeline: None,
             finalize_binning_pipeline: None,
+            mark_coarse_count_pages_pipeline: None,
+            allocate_coarse_count_pages_pipeline: None,
             binning_pipeline: None,
         }
     }
@@ -264,6 +279,9 @@ pub fn create_prepass_bind_group(
     let coarse_range_queue = resources.coarse_range_queue.as_ref().ok_or(())?;
     let coarse_interval_heads = resources.coarse_interval_heads.as_ref().ok_or(())?;
     let coarse_interval_refs = resources.coarse_interval_refs.as_ref().ok_or(())?;
+    let coarse_range_lookup = resources.coarse_range_lookup.as_ref().ok_or(())?;
+    let coarse_count_page_table = resources.coarse_count_page_table.as_ref().ok_or(())?;
+    let coarse_count_pages = resources.coarse_count_pages.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -350,6 +368,18 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::COARSE_INTERVAL_REFS,
                     resource: coarse_interval_refs.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_RANGE_LOOKUP,
+                    resource: coarse_range_lookup.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_COUNT_PAGE_TABLE,
+                    resource: coarse_count_page_table.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_COUNT_PAGES,
+                    resource: coarse_count_pages.as_entire_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -367,6 +397,9 @@ pub fn run_prepass(
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
+    coarse_depth_lut: &Buffer,
+    coarse_count_page_table: &Buffer,
+    coarse_count_pages: &Buffer,
     frustum_count: u32,
     coarse_depth_tile_capacity: u32,
     coarse_range_capacity: u32,
@@ -380,6 +413,10 @@ pub fn run_prepass(
         warn!("allocator pagetable bind group is not ready yet.");
         return;
     };
+
+    encoder.clear_buffer(coarse_depth_lut, 0, None);
+    encoder.clear_buffer(coarse_count_page_table, 0, None);
+    encoder.clear_buffer(coarse_count_pages, 0, None);
 
     let Some(broad_pipeline_id) = pipeline.broad_pipeline else {
         warn!("Broad prepass pipeline id not ready yet");
@@ -403,6 +440,17 @@ pub fn run_prepass(
     };
     let Some(finalize_binning_pipeline_id) = pipeline.finalize_binning_pipeline else {
         warn!("Finalize binning pipeline id not ready yet");
+        return;
+    };
+    let Some(mark_coarse_count_pages_pipeline_id) = pipeline.mark_coarse_count_pages_pipeline
+    else {
+        warn!("Mark coarse count pages pipeline id not ready yet");
+        return;
+    };
+    let Some(allocate_coarse_count_pages_pipeline_id) =
+        pipeline.allocate_coarse_count_pages_pipeline
+    else {
+        warn!("Allocate coarse count pages pipeline id not ready yet");
         return;
     };
     let Some(binning_pipeline_id) = pipeline.binning_pipeline else {
@@ -437,6 +485,18 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(finalize_binning_pipeline_id)
     else {
         warn!("Finalize binning pipeline not found");
+        return;
+    };
+    let Some(mark_coarse_count_pages_pipeline) =
+        pipeline_cache.get_compute_pipeline(mark_coarse_count_pages_pipeline_id)
+    else {
+        warn!("Mark coarse count pages pipeline not found");
+        return;
+    };
+    let Some(allocate_coarse_count_pages_pipeline) =
+        pipeline_cache.get_compute_pipeline(allocate_coarse_count_pages_pipeline_id)
+    else {
+        warn!("Allocate coarse count pages pipeline not found");
         return;
     };
     let Some(binning_pipeline) = pipeline_cache.get_compute_pipeline(binning_pipeline_id) else {
@@ -493,6 +553,21 @@ pub fn run_prepass(
     );
     pass.set_pipeline(finalize_binning_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
+    pass.set_pipeline(mark_coarse_count_pages_pipeline);
+    pass.dispatch_workgroups_indirect(indirect_args, 0);
+    let coarse_count_page_table_capacity =
+        coarse_depth_tile_capacity.saturating_mul(crate::plugin::COARSE_DEPTH_SLICES);
+    let allocate_count_pages_pushconstants = PushConstants {
+        num_elements: coarse_count_page_table_capacity,
+        ..pushconstants
+    };
+    pass.set_pipeline(allocate_coarse_count_pages_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    pass.dispatch_workgroups(
+        coarse_count_page_table_capacity.div_ceil(settings.threads_per_workgroup),
+        1,
+        1,
+    );
     pass.set_pipeline(binning_pipeline);
     pass.dispatch_workgroups_indirect(indirect_args, 0);
 }
@@ -524,6 +599,8 @@ pub fn update_strand_prepass_pipeline(
     let coarse_interval_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let build_depth_warp_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let mark_coarse_count_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let allocate_coarse_count_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
@@ -587,6 +664,26 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(mark_coarse_count_pages_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        mark_coarse_count_pages_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "mark_coarse_count_pages_pass",
+    ) else {
+        return;
+    };
+    let Some(allocate_coarse_count_pages_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        allocate_coarse_count_pages_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "allocate_coarse_count_pages",
+    ) else {
+        return;
+    };
     let Some(binning_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         binning_shader,
@@ -603,15 +700,20 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.coarse_interval_pipeline = Some(coarse_interval_pipeline_id);
     pipeline_res.build_depth_warp_pipeline = Some(build_depth_warp_pipeline_id);
     pipeline_res.finalize_binning_pipeline = Some(finalize_binning_pipeline_id);
+    pipeline_res.mark_coarse_count_pages_pipeline = Some(mark_coarse_count_pages_pipeline_id);
+    pipeline_res.allocate_coarse_count_pages_pipeline =
+        Some(allocate_coarse_count_pages_pipeline_id);
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} binning={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?}",
         broad_pipeline_id,
         finalize_pipeline_id,
         fine_pipeline_id,
         coarse_interval_pipeline_id,
         build_depth_warp_pipeline_id,
         finalize_binning_pipeline_id,
+        mark_coarse_count_pages_pipeline_id,
+        allocate_coarse_count_pages_pipeline_id,
         binning_pipeline_id
     );
 }

@@ -16,7 +16,7 @@ const SQRT_2_PI = 2.5066282746310002;
 const DOM_GAMMA: f32 = 1.0; // distribution coefficient for DOM slices.
 
 fn is_valid_ptr(_ptr: DevicePtr) -> bool {
-    return _ptr.slab != 0xFFFFFFFFu;
+    return _ptr.slab != 0xFFFFFFFFu && _ptr.size != 0u;
 }
 
 fn calculate_froxel_index(x: u32, y: u32, z: u32, config: FroxelConfig) -> u32 {

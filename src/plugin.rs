@@ -49,6 +49,9 @@ pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from de
 pub const COARSE_FINE_TILE_EXTENT: u32 = 4;
 pub const COARSE_DEPTH_SLICES: u32 = 16;
 pub const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = 2;
+pub const COARSE_COUNT_PAGE_SIZE: u32 =
+    COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT * COARSE_DEPTH_SLICES;
+const COARSE_COUNT_PAGE_CAPACITY_DIVISOR: u32 = 2;
 const COARSE_INTERVAL_REFS_PER_TILE: u32 = 64;
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,18 +170,18 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
                 nodes::debug::TileDebugLabel,
-            )
-            // Disabled transition graph:
-            // WorkPreparation -> Shading -> Raster -> Composition -> Debug
-            // WorkPreparation -> ShadowRaster
-            //
-            // The current migration target is:
-            // WorkPreparation -> Debug -> PostProcessing
-            .add_render_graph_edge(
-                Core3d,
-                nodes::debug::TileDebugLabel,
-                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
             );
+        // Disabled transition graph:
+        // WorkPreparation -> Shading -> Raster -> Composition -> Debug
+        // WorkPreparation -> ShadowRaster
+        //
+        // The current migration target is:
+        // WorkPreparation -> Debug -> PostProcessing
+        // .add_render_graph_edge(
+        //     Core3d,
+        //     nodes::debug::TileDebugLabel,
+        //     bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
+        // );
     }
 }
 
@@ -285,6 +288,10 @@ fn use_prepass_buffers(
     let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
     let coarse_depth_tile_capacity = coarse_depth_tile_base.next_power_of_two().max(1);
+    let coarse_count_page_table_capacity = coarse_depth_tile_capacity
+        .saturating_mul(COARSE_DEPTH_SLICES)
+        .next_power_of_two()
+        .max(1);
     let coarse_range_capacity = geo_capacity
         .saturating_mul(frustum_capacity)
         .next_power_of_two()
@@ -293,6 +300,9 @@ fn use_prepass_buffers(
         .saturating_mul(COARSE_INTERVAL_REFS_PER_TILE)
         .next_power_of_two()
         .max(coarse_range_capacity);
+    let coarse_count_page_capacity = coarse_count_page_table_capacity
+        .div_ceil(COARSE_COUNT_PAGE_CAPACITY_DIVISOR)
+        .max(1);
     let raster_work_capacity = binning_capacity
         .saturating_mul(2)
         .next_power_of_two()
@@ -313,6 +323,9 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_range_queue.is_none()
         || prepass_resources.coarse_interval_heads.is_none()
         || prepass_resources.coarse_interval_refs.is_none()
+        || prepass_resources.coarse_range_lookup.is_none()
+        || prepass_resources.coarse_count_page_table.is_none()
+        || prepass_resources.coarse_count_pages.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
         || prepass_resources.geo_capacity < geo_capacity
@@ -321,7 +334,8 @@ fn use_prepass_buffers(
         || prepass_resources.raster_work_capacity < raster_work_capacity
         || prepass_resources.coarse_depth_tile_capacity < coarse_depth_tile_capacity
         || prepass_resources.coarse_range_capacity < coarse_range_capacity
-        || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity;
+        || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
+        || prepass_resources.coarse_count_page_capacity < coarse_count_page_capacity;
 
     if needs_realloc {
         let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -352,6 +366,14 @@ fn use_prepass_buffers(
         let coarse_interval_refs_bytes = std::mem::size_of::<u32>() as u64
             + (coarse_interval_ref_capacity as u64)
                 * (std::mem::size_of::<GpuCoarseIntervalRef>() as u64);
+        let coarse_range_lookup_bytes =
+            (coarse_range_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let coarse_count_page_table_bytes =
+            (coarse_count_page_table_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let coarse_count_pages_bytes = std::mem::size_of::<u32>() as u64
+            + (coarse_count_page_capacity as u64)
+                * (COARSE_COUNT_PAGE_SIZE as u64)
+                * std::mem::size_of::<u32>() as u64;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -443,6 +465,24 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.coarse_range_lookup = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_range_lookup"),
+            size: coarse_range_lookup_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_count_page_table = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_count_page_table"),
+            size: coarse_count_page_table_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_count_pages = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_count_pages"),
+            size: coarse_count_pages_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
@@ -454,9 +494,10 @@ fn use_prepass_buffers(
         prepass_resources.coarse_depth_tile_capacity = coarse_depth_tile_capacity;
         prepass_resources.coarse_range_capacity = coarse_range_capacity;
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
+        prepass_resources.coarse_count_page_capacity = coarse_count_page_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} raster_work_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} raster_work_cap={}",
             total_strands,
             total_segment_budget,
             geo_count,
@@ -467,6 +508,7 @@ fn use_prepass_buffers(
             coarse_depth_tile_capacity,
             coarse_range_capacity,
             coarse_interval_ref_capacity,
+            coarse_count_page_capacity,
             raster_work_capacity,
         );
     }
@@ -497,21 +539,13 @@ fn use_prepass_buffers(
         let zero_heads = vec![0u32; BINNING_POOL_NUM_HEADS as usize];
         render_queue.write_buffer(free_heads, 0, bytemuck::cast_slice(&zero_heads));
     }
-    if let Some(bucket_heads) = &prepass_resources.froxel_bucket_heads {
-        let invalid_heads = vec![u32::MAX; prepass_resources.froxel_bucket_capacity as usize];
-        render_queue.write_buffer(bucket_heads, 0, bytemuck::cast_slice(&invalid_heads));
-    }
     if let Some(interval_heads) = &prepass_resources.coarse_interval_heads {
         let invalid_heads = vec![u32::MAX; prepass_resources.coarse_depth_tile_capacity as usize];
         render_queue.write_buffer(interval_heads, 0, bytemuck::cast_slice(&invalid_heads));
     }
-    if let Some(lut) = &prepass_resources.coarse_depth_lut {
-        let zero_lut = vec![
-            GpuCoarseDepthLutEntry::default();
-            (prepass_resources.coarse_depth_tile_capacity * COARSE_DEPTH_SLICES)
-                as usize
-        ];
-        render_queue.write_buffer(lut, 0, bytemuck::cast_slice(&zero_lut));
+    if let Some(range_lookup) = &prepass_resources.coarse_range_lookup {
+        let invalid_lookup = vec![u32::MAX; prepass_resources.coarse_range_capacity as usize];
+        render_queue.write_buffer(range_lookup, 0, bytemuck::cast_slice(&invalid_lookup));
     }
     if let Some(frustum_table) = &prepass_resources.frustum_table {
         render_queue.write_buffer(frustum_table, 0, bytemuck::cast_slice(&frustum_descs));

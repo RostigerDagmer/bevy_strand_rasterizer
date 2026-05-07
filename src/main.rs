@@ -57,37 +57,37 @@ fn setup(
         // StrandMaterial::default(),
     ));
 
-    // commands.spawn((
-    //     StrandAsset { handle: handle2 },
-    //     StrandMaterial {
-    //         // absorption_color: Vec4::new(0.7, 0.7, 0.7, 0.5),
-    //         // specular_color: Vec4::new(0.7, 0.7, 0.7, 0.1),
+    commands.spawn((
+        StrandAsset { handle: handle2 },
+        StrandMaterial {
+            // absorption_color: Vec4::new(0.7, 0.7, 0.7, 0.5),
+            // specular_color: Vec4::new(0.7, 0.7, 0.7, 0.1),
 
-    //         // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
-    //         // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
-    //         absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
-    //         // absorption_color: Vec4::new(1.0, 209.0 / 255.0, 184.0 / 255.0, 0.8),
-    //         // absorption_color: Vec4::new(0.99, 0.521, 0.261, 0.688),
-    //         // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
-    //         // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
-    //         // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
-    //         // specular_color: Vec4::new(0.82, 0.663, 0.365, 0.3),
-    //         specular_color: Vec4::new(0.99, 0.718, 0.513, 0.422),
-    //         // specular_color: Vec4::new(0.769, 0.383, 0.325, 0.9),
-    //         ambient_factor: 0.15,
-    //         ao_factor: 0.1,
-    //         eta: 1.55, // index of refraction
-    //         // beta: 0.25,   // higher order path roughness
-    //         // alpha: 0.05, // first order path roughness
-    //         // beta: 0.45,
-    //         beta: 0.85,
-    //         alpha: 0.35,
-    //         shift: 0.1, // specular shift
-    //         pad1: 0,
-    //         pad2: 0,
-    //     },
-    //     // StrandMaterial::default(),
-    // ));
+            // absorption_color: Vec4::new(0.6, 0.1, 0.05, 0.3),
+            // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
+            absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
+            // absorption_color: Vec4::new(1.0, 209.0 / 255.0, 184.0 / 255.0, 0.8),
+            // absorption_color: Vec4::new(0.99, 0.521, 0.261, 0.688),
+            // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
+            // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
+            // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
+            // specular_color: Vec4::new(0.82, 0.663, 0.365, 0.3),
+            specular_color: Vec4::new(0.99, 0.718, 0.513, 0.422),
+            // specular_color: Vec4::new(0.769, 0.383, 0.325, 0.9),
+            ambient_factor: 0.15,
+            ao_factor: 0.1,
+            eta: 1.55, // index of refraction
+            // beta: 0.25,   // higher order path roughness
+            // alpha: 0.05, // first order path roughness
+            // beta: 0.45,
+            beta: 0.85,
+            alpha: 0.35,
+            shift: 0.1, // specular shift
+            pad1: 0,
+            pad2: 0,
+        },
+        // StrandMaterial::default(),
+    ));
 
     commands.spawn((
         FroxelConfig {

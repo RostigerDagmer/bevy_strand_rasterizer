@@ -100,6 +100,16 @@ impl Node for WorkPreparationNode {
         let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
             return Ok(());
         };
+        let Some(coarse_depth_lut) = prepass_resources.coarse_depth_lut.as_ref() else {
+            return Ok(());
+        };
+        let Some(coarse_count_page_table) = prepass_resources.coarse_count_page_table.as_ref()
+        else {
+            return Ok(());
+        };
+        let Some(coarse_count_pages) = prepass_resources.coarse_count_pages.as_ref() else {
+            return Ok(());
+        };
         info!("Running prepass");
         run_prepass(
             render_context,
@@ -111,6 +121,9 @@ impl Node for WorkPreparationNode {
             &prepass_bind_group,
             &dynamic_offsets,
             indirect_args,
+            coarse_depth_lut,
+            coarse_count_page_table,
+            coarse_count_pages,
             prepass_resources.frustum_count,
             prepass_resources.coarse_depth_tile_capacity,
             prepass_resources.coarse_range_capacity,

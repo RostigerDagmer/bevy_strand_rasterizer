@@ -24,10 +24,21 @@ struct FrustumDesc {
 
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
+const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
+const COARSE_DEPTH_SLICES: u32 = #COARSE_DEPTH_SLICES;
+const COARSE_COUNT_PAGE_SIZE: u32 = #COARSE_COUNT_PAGE_SIZE;
+const MARKED_COUNT_PAGE: u32 = 0xFFFFFFFEu;
+
+struct CoarseCountPages {
+    tail: u32,
+    counts: array<u32>,
+}
 
 @group(0) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
-@group(0) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<atomic<u32>>;
+@group(0) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<u32>;
 @group(0) @binding(#{CHUNK_POOL}) var<storage, read> chunk_pool_words: array<u32>;
+@group(0) @binding(#{COARSE_COUNT_PAGE_TABLE}) var<storage, read> coarse_count_page_table: array<u32>;
+@group(0) @binding(#{COARSE_COUNT_PAGES}) var<storage, read> coarse_count_pages: CoarseCountPages;
 @group(0) @binding(#{PARAMS}) var<uniform> params: TileDebugParams;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
@@ -61,38 +72,29 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let sx = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(config.screen_width)), config.screen_width - 1u);
     let sy = min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(config.screen_height)), config.screen_height - 1u);
 
-    let tiles_x = (config.screen_width + config.froxel_size_x - 1u) / config.froxel_size_x;
-    let tiles_y = (config.screen_height + config.froxel_size_y - 1u) / config.froxel_size_y;
-
-    let tile_coord_x = min(sx / config.froxel_size_x, tiles_x - 1u);
-    let tile_coord_y = min(sy / config.froxel_size_y, tiles_y - 1u);
-
     var frag_count: u32 = 0u;
-    for (var dz: u32 = 0u; dz < config.depth_slices; dz = dz + 1u) {
-        let local_idx = (dz * tiles_y + tile_coord_y) * tiles_x + tile_coord_x;
-        if local_idx >= config.bucket_count {
-            continue;
-        }
-        let bucket_idx = config.bucket_base + local_idx;
-        if bucket_idx >= arrayLength(&froxel_bucket_heads) {
-            continue;
-        }
-        var chunk_idx = atomicLoad(&froxel_bucket_heads[bucket_idx]);
-        var guard = 0u;
-        loop {
-            if chunk_idx == 0xFFFFFFFFu {
-                break;
+    let coarse_px_x = max(1u, config.froxel_size_x * COARSE_FINE_TILE_EXTENT);
+    let coarse_px_y = max(1u, config.froxel_size_y * COARSE_FINE_TILE_EXTENT);
+    let coarse_x = min(sx / coarse_px_x, config.coarse_tiles_x - 1u);
+    let coarse_y = min(sy / coarse_px_y, config.coarse_tiles_y - 1u);
+    let local_coarse_tile = coarse_y * config.coarse_tiles_x + coarse_x;
+    let tile_idx = config.coarse_depth_tile_base + local_coarse_tile;
+    let local_x = min((sx - coarse_x * coarse_px_x) / config.froxel_size_x, COARSE_FINE_TILE_EXTENT - 1u);
+    let local_y = min((sy - coarse_y * coarse_px_y) / config.froxel_size_y, COARSE_FINE_TILE_EXTENT - 1u);
+    for (var coarse_z: u32 = 0u; coarse_z < COARSE_DEPTH_SLICES; coarse_z = coarse_z + 1u) {
+        let page_table_idx = tile_idx * COARSE_DEPTH_SLICES + coarse_z;
+        if page_table_idx < arrayLength(&coarse_count_page_table) {
+            let page_handle = coarse_count_page_table[page_table_idx];
+            if page_handle != 0u && page_handle != MARKED_COUNT_PAGE {
+                let page_idx = page_handle - 1u;
+                for (var fine_z: u32 = 0u; fine_z < COARSE_DEPTH_SLICES; fine_z = fine_z + 1u) {
+                    let cell_idx = (fine_z * COARSE_FINE_TILE_EXTENT + local_y) * COARSE_FINE_TILE_EXTENT + local_x;
+                    let count_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
+                    if count_idx < arrayLength(&coarse_count_pages.counts) {
+                        frag_count = frag_count + coarse_count_pages.counts[count_idx];
+                    }
+                }
             }
-            guard = guard + 1u;
-            if guard > 4096u {
-                break;
-            }
-            let base = chunk_idx * CHUNK_WORD_STRIDE;
-            if base + 1u >= arrayLength(&chunk_pool_words) {
-                break;
-            }
-            frag_count = frag_count + min(chunk_pool_words[base + 1u], POOL_CHUNK_SIZE);
-            chunk_idx = chunk_pool_words[base];
         }
     }
 
