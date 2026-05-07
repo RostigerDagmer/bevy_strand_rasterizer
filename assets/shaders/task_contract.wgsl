@@ -64,10 +64,32 @@ fn unpack_binning_frustum(packed: u32) -> u32 {
 }
 
 struct RasterWorkItem {
-    seg_id: u32,
-    strand_id: u32,
+    seg_ref_base: u32,
+    seg_ref_count: u32,
     frustum_id: u32,
+    screen_tile_id: u32,
+    depth_key: u32,
+    load_score: u32,
+    page_idx: u32,
+    cell_idx: u32,
+}
+
+struct FineSegRef {
     inst_id: u32,
+    strand_id: u32,
+    seg_id: u32,
+    packed_field: u32,
+}
+
+struct FinePageMeta {
+    seg_ref_base: u32,
+    seg_ref_count: u32,
+    work_base: u32,
+    work_count: u32,
+    coarse_tile_id: u32,
+    coarse_z: u32,
+    first_depth_key: u32,
+    flags: u32,
 }
 
 

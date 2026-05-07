@@ -77,10 +77,36 @@ pub struct BinningTask {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RasterWorkItem {
-    pub seg_id: u32,
-    pub strand_id: u32,
+    pub seg_ref_base: u32,
+    pub seg_ref_count: u32,
     pub frustum_id: u32,
+    pub screen_tile_id: u32,
+    pub depth_key: u32,
+    pub load_score: u32,
+    pub page_idx: u32,
+    pub cell_idx: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FineSegRef {
     pub inst_id: u32,
+    pub strand_id: u32,
+    pub seg_id: u32,
+    pub packed_field: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FinePageMeta {
+    pub seg_ref_base: u32,
+    pub seg_ref_count: u32,
+    pub work_base: u32,
+    pub work_count: u32,
+    pub coarse_tile_id: u32,
+    pub coarse_z: u32,
+    pub first_depth_key: u32,
+    pub flags: u32,
 }
 
 #[inline]

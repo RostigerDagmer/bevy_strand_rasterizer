@@ -30,6 +30,12 @@ pub mod prepass {
     pub const COARSE_COUNT_PAGE_TABLE: u32 = 32;
     pub const COARSE_COUNT_PAGES: u32 = 33;
     pub const STRAND_INSTANCES: u32 = 34;
+    pub const FINE_PAGE_META: u32 = 35;
+    pub const FINE_CELL_OFFSETS: u32 = 36;
+    pub const FINE_CELL_WRITE_CURSORS: u32 = 37;
+    pub const FINE_SEG_REFS: u32 = 38;
+    pub const COARSE_TILE_WORK_COUNTS: u32 = 39;
+    pub const COARSE_TILE_WORK_OFFSETS: u32 = 40;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -64,6 +70,12 @@ pub mod prepass {
             ShaderDefVal::UInt("COARSE_COUNT_PAGE_TABLE".into(), COARSE_COUNT_PAGE_TABLE),
             ShaderDefVal::UInt("COARSE_COUNT_PAGES".into(), COARSE_COUNT_PAGES),
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
+            ShaderDefVal::UInt("FINE_PAGE_META".into(), FINE_PAGE_META),
+            ShaderDefVal::UInt("FINE_CELL_OFFSETS".into(), FINE_CELL_OFFSETS),
+            ShaderDefVal::UInt("FINE_CELL_WRITE_CURSORS".into(), FINE_CELL_WRITE_CURSORS),
+            ShaderDefVal::UInt("FINE_SEG_REFS".into(), FINE_SEG_REFS),
+            ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
+            ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
         ]
     }
 }

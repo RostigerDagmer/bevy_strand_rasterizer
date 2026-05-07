@@ -38,7 +38,7 @@ use crate::{
         shadows::*,
         task_contract::{
             BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MAX_CHUNKS, BINNING_POOL_MIN_CHUNKS,
-            BINNING_POOL_NUM_HEADS, QUEUE_HEADER_WORDS, RasterWorkItem,
+            BINNING_POOL_NUM_HEADS, FinePageMeta, FineSegRef, QUEUE_HEADER_WORDS, RasterWorkItem,
         },
         tile_debug::*,
     },
@@ -324,6 +324,11 @@ fn use_prepass_buffers(
     let coarse_count_page_capacity = coarse_count_page_table_capacity
         .div_ceil(COARSE_COUNT_PAGE_CAPACITY_DIVISOR)
         .max(1);
+    let fine_cell_capacity = coarse_count_page_capacity.saturating_mul(COARSE_COUNT_PAGE_SIZE);
+    let fine_seg_ref_capacity = binning_capacity
+        .saturating_mul(4)
+        .next_power_of_two()
+        .max(binning_capacity.max(1024));
     let raster_work_capacity = binning_capacity
         .saturating_mul(2)
         .next_power_of_two()
@@ -347,6 +352,12 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_range_lookup.is_none()
         || prepass_resources.coarse_count_page_table.is_none()
         || prepass_resources.coarse_count_pages.is_none()
+        || prepass_resources.fine_page_meta.is_none()
+        || prepass_resources.fine_cell_offsets.is_none()
+        || prepass_resources.fine_cell_write_cursors.is_none()
+        || prepass_resources.fine_seg_refs.is_none()
+        || prepass_resources.coarse_tile_work_counts.is_none()
+        || prepass_resources.coarse_tile_work_offsets.is_none()
         || prepass_resources.strand_instances.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
@@ -357,7 +368,8 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_depth_tile_capacity < coarse_depth_tile_capacity
         || prepass_resources.coarse_range_capacity < coarse_range_capacity
         || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
-        || prepass_resources.coarse_count_page_capacity < coarse_count_page_capacity;
+        || prepass_resources.coarse_count_page_capacity < coarse_count_page_capacity
+        || prepass_resources.fine_seg_ref_capacity < fine_seg_ref_capacity;
 
     if needs_realloc {
         let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -399,6 +411,18 @@ fn use_prepass_buffers(
             + (coarse_count_page_capacity as u64)
                 * (COARSE_COUNT_PAGE_SIZE as u64)
                 * std::mem::size_of::<u32>() as u64;
+        let fine_page_meta_bytes =
+            (coarse_count_page_capacity as u64) * std::mem::size_of::<FinePageMeta>() as u64;
+        let fine_cell_offsets_bytes =
+            (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let fine_cell_write_cursors_bytes =
+            (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let fine_seg_refs_bytes = std::mem::size_of::<u32>() as u64
+            + (fine_seg_ref_capacity as u64) * std::mem::size_of::<FineSegRef>() as u64;
+        let coarse_tile_work_counts_bytes =
+            (coarse_depth_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let coarse_tile_work_offsets_bytes =
+            (coarse_depth_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -514,6 +538,43 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.fine_page_meta = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_fine_page_meta"),
+            size: fine_page_meta_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.fine_cell_offsets = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_fine_cell_offsets"),
+            size: fine_cell_offsets_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.fine_cell_write_cursors = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_fine_cell_write_cursors"),
+            size: fine_cell_write_cursors_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.fine_seg_refs = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_fine_seg_refs"),
+            size: fine_seg_refs_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_tile_work_counts = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_tile_work_counts"),
+            size: coarse_tile_work_counts_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_tile_work_offsets =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_coarse_tile_work_offsets"),
+                size: coarse_tile_work_offsets_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
@@ -527,9 +588,10 @@ fn use_prepass_buffers(
         prepass_resources.coarse_range_capacity = coarse_range_capacity;
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
         prepass_resources.coarse_count_page_capacity = coarse_count_page_capacity;
+        prepass_resources.fine_seg_ref_capacity = fine_seg_ref_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} raster_work_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={}",
             total_strands,
             total_segment_budget,
             instance_count,
@@ -541,6 +603,7 @@ fn use_prepass_buffers(
             coarse_range_capacity,
             coarse_interval_ref_capacity,
             coarse_count_page_capacity,
+            fine_seg_ref_capacity,
             raster_work_capacity,
         );
     }
@@ -558,6 +621,9 @@ fn use_prepass_buffers(
     }
     if let Some(queue_buf) = &prepass_resources.raster_work_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(seg_refs) = &prepass_resources.fine_seg_refs {
+        render_queue.write_buffer(seg_refs, 0, bytemuck::cast_slice(&[0u32]));
     }
     if let Some(queue_buf) = &prepass_resources.coarse_range_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
