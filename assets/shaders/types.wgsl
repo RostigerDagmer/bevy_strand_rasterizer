@@ -55,6 +55,15 @@ struct StrandGeo {
     pad_c: vec4<u32>,
 } // align(16)
 
+struct StrandInstance {
+    asset_id: u32,
+    material_id: u32,
+    pad_a: u32,
+    pad_b: u32,
+    world_from_local: mat4x4<f32>,
+    local_from_world: mat4x4<f32>,
+}
+
 struct StrandMeta {
     count: u32,     // Number of vertices in strand
     offset: u32,    // Start index in the original indices buffer (or vertices buffer?)

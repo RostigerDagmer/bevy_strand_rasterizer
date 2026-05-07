@@ -14,6 +14,7 @@ use bevy::{
         renderer::{RenderDevice, RenderQueue},
         view::ExtractedView,
     },
+    transform::TransformSystems,
     window::WindowResized,
 };
 use bevy_vsms::{
@@ -95,6 +96,7 @@ impl Plugin for StrandRasterizerPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
+            ExtractComponentPlugin::<StrandInstanceTransform>::default(),
             ExtractComponentPlugin::<StrandMaterial>::default(),
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
@@ -112,6 +114,10 @@ impl Plugin for StrandRasterizerPlugin {
                 flag_realloc_on_tie_change,
                 tie_view_to_froxel_config,
             ),
+        );
+        app.add_systems(
+            PostUpdate,
+            sync_strand_instance_transforms.after(TransformSystems::Propagate),
         );
     }
     fn finish(&self, app: &mut App) {
@@ -186,8 +192,9 @@ impl Plugin for StrandRasterizerPlugin {
 }
 
 fn use_prepass_buffers(
-    geometry_query: Query<&StrandGeometry>,
+    geometry_query: Query<(Entity, &StrandGeometry, Option<&StrandInstanceTransform>)>,
     light_frusta_query: Query<Entity, With<ExtractedDirectionalLight>>,
+    storage_buffers: Res<RenderAssets<GpuVirtualShaderStorageBuffer>>,
     device: Res<RenderDevice>,
     render_queue: Res<bevy::render::renderer::RenderQueue>,
     mut prepass_resources: ResMut<StrandPrepassResources>,
@@ -196,14 +203,27 @@ fn use_prepass_buffers(
 ) {
     let mut total_strands = 0u32;
     let mut total_segment_budget = 0u32;
-    let mut geo_count = 0u32;
-    for geom in &geometry_query {
+    let mut instances = Vec::new();
+    let mut sorted_geometry: Vec<_> = geometry_query.iter().collect();
+    sorted_geometry.sort_by_key(|(entity, _, _)| entity.index());
+    for (entity, geom, transform) in sorted_geometry {
+        let Some(asset_id) = strand_asset_table_id(entity, geom, &storage_buffers) else {
+            continue;
+        };
         total_strands = total_strands.saturating_add(geom.strand_count);
         total_segment_budget = total_segment_budget.saturating_add(
             geom.strand_count
                 .saturating_mul(geom.max_segments_in_strand),
         );
-        geo_count = geo_count.saturating_add(1);
+        let transform = transform.copied().unwrap_or_default();
+        instances.push(StrandInstance {
+            asset_id,
+            material_id: asset_id,
+            pad0: 0,
+            pad1: 0,
+            world_from_local: transform.world_from_local,
+            local_from_world: transform.local_from_world,
+        });
     }
 
     if total_strands == 0 {
@@ -216,7 +236,8 @@ fn use_prepass_buffers(
     let base_binning_capacity = total_segment_budget
         .next_power_of_two()
         .max(prepass_capacity);
-    let geo_capacity = geo_count.next_power_of_two().max(2048);
+    let instance_count = instances.len() as u32;
+    let instance_capacity = instance_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
     let mut coarse_depth_tile_base = 0u32;
@@ -292,7 +313,7 @@ fn use_prepass_buffers(
         .saturating_mul(COARSE_DEPTH_SLICES)
         .next_power_of_two()
         .max(1);
-    let coarse_range_capacity = geo_capacity
+    let coarse_range_capacity = instance_capacity
         .saturating_mul(frustum_capacity)
         .next_power_of_two()
         .max(1);
@@ -326,9 +347,10 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_range_lookup.is_none()
         || prepass_resources.coarse_count_page_table.is_none()
         || prepass_resources.coarse_count_pages.is_none()
+        || prepass_resources.strand_instances.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
-        || prepass_resources.geo_capacity < geo_capacity
+        || prepass_resources.instance_capacity < instance_capacity
         || prepass_resources.frustum_capacity < frustum_capacity
         || prepass_resources.froxel_bucket_capacity < froxel_bucket_capacity
         || prepass_resources.raster_work_capacity < raster_work_capacity
@@ -342,8 +364,11 @@ fn use_prepass_buffers(
             + (prepass_capacity as u64) * (std::mem::size_of::<FinePrepassTask>() as u64);
         let binning_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
-        let geo_bytes = (geo_capacity as u64) * (std::mem::size_of::<u32>() as u64);
-        let geo_prefix_bytes = ((geo_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
+        let instance_id_bytes = (instance_capacity as u64) * (std::mem::size_of::<u32>() as u64);
+        let instance_prefix_bytes =
+            ((instance_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
+        let strand_instances_bytes =
+            (instance_capacity as u64) * (std::mem::size_of::<StrandInstance>() as u64);
         let chunk_count = raster_work_capacity
             .max(BINNING_POOL_MIN_CHUNKS)
             .min(BINNING_POOL_MAX_CHUNKS);
@@ -389,19 +414,25 @@ fn use_prepass_buffers(
         }));
         prepass_resources.visibility_flags_buffer = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_visible_flags"),
-            size: geo_bytes,
+            size: instance_id_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         prepass_resources.visible_geos_buffer = Some(device.create_buffer(&BufferDescriptor {
-            label: Some("strand_prepass_visible_geos"),
-            size: geo_bytes,
+            label: Some("strand_prepass_visible_instances"),
+            size: instance_id_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         prepass_resources.geos_prefix_buffer = Some(device.create_buffer(&BufferDescriptor {
-            label: Some("strand_prepass_geo_prefix"),
-            size: geo_prefix_bytes,
+            label: Some("strand_prepass_instance_prefix"),
+            size: instance_prefix_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.strand_instances = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_instances"),
+            size: strand_instances_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -486,7 +517,8 @@ fn use_prepass_buffers(
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
-        prepass_resources.geo_capacity = geo_capacity;
+        prepass_resources.instance_capacity = instance_capacity;
+        prepass_resources.instance_count = instance_count;
         prepass_resources.frustum_capacity = frustum_capacity;
         prepass_resources.frustum_count = frustum_descs.len() as u32;
         prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
@@ -497,10 +529,10 @@ fn use_prepass_buffers(
         prepass_resources.coarse_count_page_capacity = coarse_count_page_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} raster_work_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} raster_work_cap={}",
             total_strands,
             total_segment_budget,
-            geo_count,
+            instance_count,
             frustum_descs.len(),
             prepass_capacity,
             binning_capacity,
@@ -512,6 +544,7 @@ fn use_prepass_buffers(
             raster_work_capacity,
         );
     }
+    prepass_resources.instance_count = instance_count;
     prepass_resources.frustum_count = frustum_descs.len() as u32;
 
     let zero_queue_hdr = [0u32, 0u32];
@@ -549,6 +582,64 @@ fn use_prepass_buffers(
     }
     if let Some(frustum_table) = &prepass_resources.frustum_table {
         render_queue.write_buffer(frustum_table, 0, bytemuck::cast_slice(&frustum_descs));
+    }
+    if let Some(strand_instances) = &prepass_resources.strand_instances {
+        render_queue.write_buffer(strand_instances, 0, bytemuck::cast_slice(&instances));
+    }
+}
+
+fn strand_asset_table_id(
+    entity: Entity,
+    geometry: &StrandGeometry,
+    storage_buffers: &RenderAssets<GpuVirtualShaderStorageBuffer>,
+) -> Option<u32> {
+    let ids = [
+        ("vertices", &geometry.vertices),
+        ("indices", &geometry.indices),
+        ("metadata", &geometry.meta),
+        ("geos", &geometry.geos),
+    ]
+    .map(|(label, handle)| {
+        let gpu_buffer = storage_buffers.get(handle)?;
+        let (allocation, _) = gpu_buffer.allocation.as_ref()?;
+        Some((label, allocation.id.0))
+    });
+
+    let [
+        Some((_, vertex_id)),
+        Some((_, index_id)),
+        Some((_, meta_id)),
+        Some((_, geo_id)),
+    ] = ids
+    else {
+        return None;
+    };
+
+    if vertex_id != geo_id || index_id != geo_id || meta_id != geo_id {
+        warn!(
+            "Skipping strand entity {:?}: allocator table ids differ (vertices={}, indices={}, metadata={}, geos={})",
+            entity, vertex_id, index_id, meta_id, geo_id
+        );
+        return None;
+    }
+
+    Some(geo_id)
+}
+
+fn sync_strand_instance_transforms(
+    mut commands: Commands,
+    query: Query<(Entity, &GlobalTransform, Option<&StrandInstanceTransform>), With<StrandAsset>>,
+) {
+    for (entity, global_transform, current) in &query {
+        let next = StrandInstanceTransform::from(global_transform);
+        match current {
+            Some(current)
+                if current.world_from_local == next.world_from_local
+                    && current.local_from_world == next.local_from_world => {}
+            _ => {
+                commands.entity(entity).insert(next);
+            }
+        }
     }
 }
 
@@ -669,6 +760,9 @@ fn set_strand_geometry(
             max_segments_in_strand,
             aabb,
         });
+        commands
+            .entity(entity)
+            .insert(StrandInstanceTransform::default());
     }
 }
 

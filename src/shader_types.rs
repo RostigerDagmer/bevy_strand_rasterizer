@@ -1,5 +1,5 @@
 use bevy::{
-    math::{Vec3, bounding::Aabb3d},
+    math::{Mat4, Vec3, bounding::Aabb3d},
     render::render_resource::ShaderType,
 };
 use bytemuck::{Pod, Zeroable};
@@ -68,6 +68,30 @@ pub struct StrandGeo {
     pad2: u32,
     pub aabb: Aabb,
     pad3: [u32; 4],
+}
+
+#[derive(Debug, Clone, Copy, ShaderType, Pod, Zeroable)]
+#[repr(C)]
+pub struct StrandInstance {
+    pub asset_id: u32,
+    pub material_id: u32,
+    pub pad0: u32,
+    pub pad1: u32,
+    pub world_from_local: Mat4,
+    pub local_from_world: Mat4,
+}
+
+impl Default for StrandInstance {
+    fn default() -> Self {
+        Self {
+            asset_id: u32::MAX,
+            material_id: 0,
+            pad0: 0,
+            pad1: 0,
+            world_from_local: Mat4::IDENTITY,
+            local_from_world: Mat4::IDENTITY,
+        }
+    }
 }
 
 #[derive(Debug, Clone, ShaderType)]

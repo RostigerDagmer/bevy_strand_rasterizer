@@ -20,6 +20,7 @@
     Geos,
     Meta,
     StrandGeo,
+    StrandInstance,
     FroxelConfig,
     PushConstants,
 }
@@ -161,12 +162,13 @@ struct RasterWorkQueue {
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_RANGE_LOOKUP}) var<storage, read_write> coarse_range_lookup: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_COUNT_PAGE_TABLE}) var<storage, read_write> coarse_count_page_table: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_COUNT_PAGES}) var<storage, read_write> coarse_count_pages: CoarseCountPages;
+@group(#{PREPASS_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 
-fn stochastic_cull_camera(cam: View, aabb: Aabb, sample_threshold: f32) -> bool {
+fn stochastic_cull_camera(cam: View, aabb: Aabb, world_from_local: mat4x4<f32>, sample_threshold: f32) -> bool {
     if pc.stochastic_cull_enabled == 0u {
         return false;
     }
-    let aabb_center = (aabb.max + aabb.min) * 0.5;
+    let aabb_center = (world_from_local * vec4<f32>((aabb.max + aabb.min) * 0.5, 1.0)).xyz;
     let distance_to_cam = length(cam.world_position - aabb_center);
     let cull_max = max(pc.cull_max_dist, 1e-5);
     let norm_distance = max(distance_to_cam - pc.cull_min_dist, 0.0) / cull_max;
@@ -273,7 +275,7 @@ fn dequantize_depth01(z_q: u32) -> f32 {
     return f32(z_q) / f32(DEPTH_QUANT_MAX);
 }
 
-fn emit_coarse_asset_range_for_aabb(geo_id: u32, frustum_id: u32, aabb: Aabb) {
+fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) {
     if frustum_id >= arrayLength(&frustum_table) {
         return;
     }
@@ -284,14 +286,14 @@ fn emit_coarse_asset_range_for_aabb(geo_id: u32, frustum_id: u32, aabb: Aabb) {
 
     let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
     let corners = array<vec4<f32>, 8>(
-        vec4<f32>(aabb.min, 1.0),
-        vec4<f32>(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
-        vec4<f32>(aabb.min.x, aabb.max.y, aabb.min.z, 1.0),
-        vec4<f32>(aabb.min.x, aabb.max.y, aabb.max.z, 1.0),
-        vec4<f32>(aabb.max.x, aabb.min.y, aabb.min.z, 1.0),
-        vec4<f32>(aabb.max.x, aabb.min.y, aabb.max.z, 1.0),
-        vec4<f32>(aabb.max.x, aabb.max.y, aabb.min.z, 1.0),
-        vec4<f32>(aabb.max, 1.0),
+        world_from_local * vec4<f32>(aabb.min, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.max.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.max.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.min.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.min.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.max.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max, 1.0),
     );
 
     var screen_min = vec2<f32>(1e30, 1e30);
@@ -361,12 +363,12 @@ fn emit_coarse_asset_range_for_aabb(geo_id: u32, frustum_id: u32, aabb: Aabb) {
     if range_idx >= arrayLength(&coarse_range_queue.ranges) {
         return;
     }
-    let lookup_idx = geo_id * pc.frustum_count + frustum_id;
+    let lookup_idx = inst_id * pc.frustum_count + frustum_id;
     if lookup_idx < arrayLength(&coarse_range_lookup) {
         coarse_range_lookup[lookup_idx] = range_idx;
     }
     coarse_range_queue.ranges[range_idx] = CoarseAssetRange(
-        geo_id,
+        inst_id,
         frustum_id,
         min_cx,
         max_cx,
@@ -386,15 +388,22 @@ fn broad_prepass(
     let global_invocation = ((workgroup_id.z * num_workgroups.y + workgroup_id.y) * num_workgroups.x + workgroup_id.x) * WORKGROUP_SIZE + local_id.x;
     let total_invocations = num_workgroups.x * num_workgroups.y * num_workgroups.z * WORKGROUP_SIZE;
 
-    let n_geos = arrayLength(&t_geos);
-    var geo_idx = global_invocation;
+    let instance_count = min(pc.num_elements, arrayLength(&strand_instances));
+    var inst_idx = global_invocation;
 
-    while geo_idx < n_geos {
-        let geo_ptr = t_geos[geo_idx];
-        let meta_ptr = t_strand_metadata[geo_idx];
+    while inst_idx < instance_count {
+        let instance = strand_instances[inst_idx];
+        let asset_id = instance.asset_id;
+        if asset_id >= arrayLength(&t_geos) || asset_id >= arrayLength(&t_strand_metadata) {
+            inst_idx += total_invocations;
+            continue;
+        }
+
+        let geo_ptr = t_geos[asset_id];
+        let meta_ptr = t_strand_metadata[asset_id];
 
         if !is_valid_ptr(geo_ptr) || !is_valid_ptr(meta_ptr) {
-            geo_idx += total_invocations;
+            inst_idx += total_invocations;
             continue;
         }
 
@@ -403,8 +412,8 @@ fn broad_prepass(
         let strand_count = min(strand_count_from_meta, geo.strand_count);
         let geo_visible = true; // TODO: frustrum test?
 
-        if geo_idx < arrayLength(&visible_flags) {
-            visible_flags[geo_idx] = u32(geo_visible);
+        if inst_idx < arrayLength(&visible_flags) {
+            visible_flags[inst_idx] = u32(geo_visible);
         }
 
         if geo_visible {
@@ -412,24 +421,24 @@ fn broad_prepass(
             for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
                 let frustum = frustum_table[fi];
                 if frustum.kind <= 1u {
-                    emit_coarse_asset_range_for_aabb(geo_idx, fi, geo.aabb);
+                    emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local);
                 }
             }
 
             for (var strand_local = 0u; strand_local < strand_count; strand_local = strand_local + 1u) {
-                let strand_hash = wang_hash(geo_idx + strand_local);
-                let strand_visible = !stochastic_cull_camera(view, geo.aabb, hash_to_unit_float(strand_hash));
+                let strand_hash = wang_hash(inst_idx + strand_local);
+                let strand_visible = !stochastic_cull_camera(view, geo.aabb, instance.world_from_local, hash_to_unit_float(strand_hash));
                 if strand_visible {
                     let task_index = atomicAdd(&fine_phase_queue.tail, 1u);
                     if task_index >= arrayLength(&fine_phase_queue.tasks) {
                         break;
                     }
-                    fine_phase_queue.tasks[task_index] = FinePrepassTask(geo_idx, strand_local);
+                    fine_phase_queue.tasks[task_index] = FinePrepassTask(inst_idx, strand_local);
                 }
             }
         }
 
-        geo_idx += total_invocations;
+        inst_idx += total_invocations;
     }
 }
 
@@ -637,12 +646,18 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let task = fine_phase_queue.tasks[task_idx];
 
-    if task.inst_id >= arrayLength(&t_strand_metadata) || task.inst_id >= arrayLength(&t_indices) {
+    if task.inst_id >= arrayLength(&strand_instances) {
         return;
     }
 
-    let meta_ptr = t_strand_metadata[task.inst_id];
-    let index_ptr = t_indices[task.inst_id];
+    let instance = strand_instances[task.inst_id];
+    let asset_id = instance.asset_id;
+    if asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_indices) {
+        return;
+    }
+
+    let meta_ptr = t_strand_metadata[asset_id];
+    let index_ptr = t_indices[asset_id];
 
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) {
         return;
@@ -1101,13 +1116,19 @@ fn process_binning_task(task_idx: u32, mark_only: bool) {
     let frustum = frustum_table[frustum_id];
     let frustum_cfg = frustum_to_config(frustum);
     let inst_id = task.id_info;
-    if inst_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&t_indices) || inst_id >= arrayLength(&t_geos) {
+    if inst_id >= arrayLength(&strand_instances) {
         return;
     }
 
-    let vertex_ptr = t_vertices[inst_id];
-    let index_ptr = t_indices[inst_id];
-    let geo_ptr = t_geos[inst_id];
+    let instance = strand_instances[inst_id];
+    let asset_id = instance.asset_id;
+    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_geos) {
+        return;
+    }
+
+    let vertex_ptr = t_vertices[asset_id];
+    let index_ptr = t_indices[asset_id];
+    let geo_ptr = t_geos[asset_id];
     if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(geo_ptr) {
         return;
     }
@@ -1124,8 +1145,8 @@ fn process_binning_task(task_idx: u32, mark_only: bool) {
 
     let vi0 = indices[index_ptr.slab].is[index_base + task.seg_idx];
     let vi1 = indices[index_ptr.slab].is[index_base + task.seg_idx + 1u];
-    let p0_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi0], 1.0);
-    let p1_world = vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi1], 1.0);
+    let p0_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi0], 1.0);
+    let p1_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi1], 1.0);
     let p0_raw = world_to_screen_raw(
         p0_world,
         clip_from_world,

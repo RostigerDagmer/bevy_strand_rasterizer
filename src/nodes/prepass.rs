@@ -125,6 +125,7 @@ impl Node for WorkPreparationNode {
             coarse_count_page_table,
             coarse_count_pages,
             prepass_resources.frustum_count,
+            prepass_resources.instance_count,
             prepass_resources.coarse_depth_tile_capacity,
             prepass_resources.coarse_range_capacity,
         );

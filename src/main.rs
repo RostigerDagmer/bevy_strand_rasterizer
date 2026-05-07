@@ -55,6 +55,8 @@ fn setup(
             pad2: 0,
         },
         // StrandMaterial::default(),
+        Transform::from_translation(Vec3::new(-0.5, 0.0, 0.0)),
+        GlobalTransform::default(),
     ));
 
     commands.spawn((
@@ -86,7 +88,8 @@ fn setup(
             pad1: 0,
             pad2: 0,
         },
-        // StrandMaterial::default(),
+        Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
+        GlobalTransform::default(), // StrandMaterial::default(),
     ));
 
     commands.spawn((

@@ -3,7 +3,7 @@ use crate::{
     pipelines::layouts,
     pipelines::task_contract::{BINNING_POOL_CHUNK_SIZE, BINNING_POOL_NUM_HEADS},
     resources::ComputeInvocationDims,
-    shader_types::{PushConstants, StrandGeo, StrandMeta},
+    shader_types::{PushConstants, StrandGeo, StrandInstance, StrandMeta},
 };
 use bevy::{
     pbr::ViewLightsUniformOffset,
@@ -30,6 +30,7 @@ pub struct StrandPrepassResources {
     pub geos_prefix_buffer: Option<Buffer>,
     pub prepass_queue: Option<Buffer>,
     pub binning_queue: Option<Buffer>,
+    pub strand_instances: Option<Buffer>,
     // products
     pub indirect_args: Option<Buffer>,
     // queue-binning allocator buffers
@@ -48,7 +49,8 @@ pub struct StrandPrepassResources {
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
-    pub geo_capacity: u32,
+    pub instance_capacity: u32,
+    pub instance_count: u32,
     pub frustum_capacity: u32,
     pub frustum_count: u32,
     pub froxel_bucket_capacity: u32,
@@ -127,6 +129,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::COARSE_RANGE_LOOKUP, false),
                 Self::storage_entry(layouts::prepass::COARSE_COUNT_PAGE_TABLE, false),
                 Self::storage_entry(layouts::prepass::COARSE_COUNT_PAGES, false),
+                Self::storage_entry(layouts::prepass::STRAND_INSTANCES, true),
             ],
         )
     }
@@ -184,6 +187,10 @@ fn queue_prepass_pipeline(
             std::mem::size_of::<StrandMeta>() as u32,
         ),
         ShaderDefVal::UInt("SIZEOF_GEO".into(), std::mem::size_of::<StrandGeo>() as u32),
+        ShaderDefVal::UInt(
+            "SIZEOF_INSTANCE".into(),
+            std::mem::size_of::<StrandInstance>() as u32,
+        ),
         ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
         ShaderDefVal::UInt("POOL_NUM_HEADS".into(), BINNING_POOL_NUM_HEADS),
         ShaderDefVal::UInt(
@@ -282,6 +289,7 @@ pub fn create_prepass_bind_group(
     let coarse_range_lookup = resources.coarse_range_lookup.as_ref().ok_or(())?;
     let coarse_count_page_table = resources.coarse_count_page_table.as_ref().ok_or(())?;
     let coarse_count_pages = resources.coarse_count_pages.as_ref().ok_or(())?;
+    let strand_instances = resources.strand_instances.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -380,6 +388,10 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::COARSE_COUNT_PAGES,
                     resource: coarse_count_pages.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::STRAND_INSTANCES,
+                    resource: strand_instances.as_entire_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -401,6 +413,7 @@ pub fn run_prepass(
     coarse_count_page_table: &Buffer,
     coarse_count_pages: &Buffer,
     frustum_count: u32,
+    instance_count: u32,
     coarse_depth_tile_capacity: u32,
     coarse_range_capacity: u32,
 ) {
@@ -508,6 +521,7 @@ pub fn run_prepass(
         ..default()
     });
     let pushconstants = PushConstants {
+        num_elements: instance_count,
         frustum_count,
         stochastic_cull_enabled: u32::from(cull_settings.enabled),
         cull_min_dist: cull_settings.min_dist,

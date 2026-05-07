@@ -29,6 +29,7 @@ pub mod prepass {
     pub const COARSE_RANGE_LOOKUP: u32 = 31;
     pub const COARSE_COUNT_PAGE_TABLE: u32 = 32;
     pub const COARSE_COUNT_PAGES: u32 = 33;
+    pub const STRAND_INSTANCES: u32 = 34;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -62,6 +63,7 @@ pub mod prepass {
             ShaderDefVal::UInt("COARSE_RANGE_LOOKUP".into(), COARSE_RANGE_LOOKUP),
             ShaderDefVal::UInt("COARSE_COUNT_PAGE_TABLE".into(), COARSE_COUNT_PAGE_TABLE),
             ShaderDefVal::UInt("COARSE_COUNT_PAGES".into(), COARSE_COUNT_PAGES),
+            ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
         ]
     }
 }

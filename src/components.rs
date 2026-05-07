@@ -1,5 +1,5 @@
 use bevy::{
-    math::{Vec4, bounding::Aabb3d},
+    math::{Mat4, Vec4, bounding::Aabb3d},
     prelude::*,
     render::{
         extract_component::ExtractComponent, mesh::allocator::SlabId, render_resource::ShaderType,
@@ -28,6 +28,31 @@ pub struct StrandGeometry {
     pub strand_count: u32,
     pub max_segments_in_strand: u32,
     pub aabb: Aabb3d,
+}
+
+#[derive(Component, ExtractComponent, Debug, Clone, Copy)]
+pub struct StrandInstanceTransform {
+    pub world_from_local: Mat4,
+    pub local_from_world: Mat4,
+}
+
+impl Default for StrandInstanceTransform {
+    fn default() -> Self {
+        Self {
+            world_from_local: Mat4::IDENTITY,
+            local_from_world: Mat4::IDENTITY,
+        }
+    }
+}
+
+impl From<&GlobalTransform> for StrandInstanceTransform {
+    fn from(transform: &GlobalTransform) -> Self {
+        let world_from_local = transform.to_matrix();
+        Self {
+            world_from_local,
+            local_from_world: world_from_local.inverse(),
+        }
+    }
 }
 
 #[derive(Component, ExtractComponent, ShaderType, Reflect, Copy, Clone, Pod, Zeroable)]
