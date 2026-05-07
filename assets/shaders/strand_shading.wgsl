@@ -22,6 +22,7 @@
     Materials,
     Meta,
     PushConstants,
+    StrandInstance,
 }
 
 #import "shaders/task_contract.wgsl"::{
@@ -49,6 +50,7 @@ const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
 const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
+const SIZEOF_VERTEX: u32 = #SIZEOF_VERTEX;
 
 var<push_constant> pc: PushConstants;
 struct FrustumDesc {
@@ -60,6 +62,10 @@ struct FrustumDesc {
     bucket_base: u32,
     bucket_count: u32,
     kind: u32,
+    coarse_depth_tile_base: u32,
+    coarse_depth_tile_count: u32,
+    coarse_tiles_x: u32,
+    coarse_tiles_y: u32,
 }
 
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
@@ -77,6 +83,7 @@ struct FrustumDesc {
 @group(#{SHADING_GROUP}) @binding(#{BINNING_QUEUE}) var<storage, read> binning_queue: BinningQueue;
 @group(#{SHADING_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
 @group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d_array<rgba8unorm, write>;
+@group(#{SHADING_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -449,7 +456,7 @@ fn marschner(point: vec4<f32>, direction: vec3<f32>, view_normal: vec3<f32>, lig
 fn shade_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
-    let task_idx = global_id.x;
+    let task_idx = global_id.y * pc.workgroup_offset + global_id.x;
     if task_idx >= pc.num_elements {
         return;
     }
@@ -467,14 +474,19 @@ fn shade_strands(
     }
 
     let inst_id = task.id_info;
-    if inst_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&t_indices) || inst_id >= arrayLength(&t_strand_metadata) || inst_id >= arrayLength(&t_materials) {
+    if inst_id >= arrayLength(&strand_instances) {
+        return;
+    }
+    let instance = strand_instances[inst_id];
+    let asset_id = instance.asset_id;
+    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_materials) {
         return;
     }
 
-    let vertex_ptr = t_vertices[inst_id];
-    let index_ptr = t_indices[inst_id];
-    let meta_ptr = t_strand_metadata[inst_id];
-    let material_ptr = t_materials[inst_id];
+    let vertex_ptr = t_vertices[asset_id];
+    let index_ptr = t_indices[asset_id];
+    let meta_ptr = t_strand_metadata[asset_id];
+    let material_ptr = t_materials[asset_id];
     if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return;
     }
@@ -503,15 +515,17 @@ fn shade_strands(
         return;
     }
 
-    let i0 = indices[index_ptr.slab].is[seg_idx];
-    let i1 = indices[index_ptr.slab].is[seg_idx + 1u];
-    let vertex_count = vertex_ptr.size / 12u;
+    let index_base = index_ptr.offset / 4u;
+    let vertex_base = vertex_ptr.offset / SIZEOF_VERTEX;
+    let i0 = indices[index_ptr.slab].is[index_base + seg_idx];
+    let i1 = indices[index_ptr.slab].is[index_base + seg_idx + 1u];
+    let vertex_count = vertex_ptr.size / SIZEOF_VERTEX;
     if i0 >= vertex_count || i1 >= vertex_count {
         return;
     }
 
-    let v0 = vec4<f32>(vertices[vertex_ptr.slab].vs[i0], 1.0);
-    let v1 = vec4<f32>(vertices[vertex_ptr.slab].vs[i1], 1.0);
+    let v0 = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + i0], 1.0);
+    let v1 = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + i1], 1.0);
     let U = normalize(v1.xyz - v0.xyz);
     if all(U == vec3<f32>(0.0)) {
         return;

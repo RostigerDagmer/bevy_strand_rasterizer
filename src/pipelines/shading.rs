@@ -98,6 +98,16 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::STRAND_INSTANCES,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         )
     }
@@ -159,6 +169,10 @@ pub fn update_strand_shading_pipeline(
                 "SIZEOF_MATERIAL".into(),
                 std::mem::size_of::<crate::components::StrandMaterial>() as u32,
             ),
+            ShaderDefVal::UInt(
+                "SIZEOF_VERTEX".into(),
+                std::mem::size_of::<bevy::math::Vec4>() as u32,
+            ),
         ],
         layouts::shading::shader_defs(),
         allocator.shader_defs(),
@@ -207,6 +221,7 @@ pub fn create_strand_shading_bind_group(
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
     let binning_queue = prepass_resources.binning_queue.as_ref().ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
+    let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -232,6 +247,10 @@ pub fn create_strand_shading_bind_group(
                 BindGroupEntry {
                     binding: layouts::shading::OUTPUT_TEXTURE,
                     resource: BindingResource::TextureView(output_texture),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::STRAND_INSTANCES,
+                    resource: strand_instances.as_entire_binding(),
                 },
             ],
         ),
@@ -298,8 +317,17 @@ pub fn run_shading_pass(
         return;
     }
 
-    let workgroups = task_capacity.div_ceil(SHADING_WORKGROUP_SIZE);
-    if workgroups == 0 {
+    let total_workgroups = task_capacity.div_ceil(SHADING_WORKGROUP_SIZE);
+    if total_workgroups == 0 {
+        return;
+    }
+    let workgroups_x = total_workgroups.min(65_535);
+    let workgroups_y = total_workgroups.div_ceil(workgroups_x);
+    if workgroups_y > 65_535 {
+        warn!(
+            "Shading dispatch too large: workgroups=({}, {}, 1), task_capacity={}",
+            workgroups_x, workgroups_y, task_capacity
+        );
         return;
     }
 
@@ -319,11 +347,11 @@ pub fn run_shading_pass(
 
     let pushconstants = PushConstants {
         num_elements: task_capacity,
-        workgroup_offset: resources.max_segments_in_strand.unwrap_or(0),
+        workgroup_offset: workgroups_x.saturating_mul(SHADING_WORKGROUP_SIZE),
         scan_load_base: 0,
         scan_save_base: 0,
         ..Default::default()
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
-    pass.dispatch_workgroups(workgroups, 1, 1);
+    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
 }

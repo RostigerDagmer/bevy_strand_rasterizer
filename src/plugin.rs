@@ -131,10 +131,12 @@ impl Plugin for StrandRasterizerPlugin {
             table_group_idx: 1,
         });
         render_app.init_resource::<StrandRasterizerResources>();
+        render_app.init_resource::<StrandShadingResources>();
         render_app.init_resource::<StrandShadowResources>();
         render_app.init_resource::<StrandPrepassResources>();
         render_app.init_resource::<ComputeInvocationDims>();
         render_app.init_resource::<StrandPrepassPipeline>();
+        render_app.init_resource::<StrandShadingPipeline>();
         render_app.init_resource::<StrandRasterizerPipeline>();
         render_app.init_resource::<CompositionPipeline>();
         render_app.init_resource::<TileDebugPipeline>();
@@ -153,6 +155,7 @@ impl Plugin for StrandRasterizerPlugin {
             Render,
             (
                 update_strand_prepass_pipeline,
+                update_strand_shading_pipeline,
                 update_strand_raster_pipeline,
             )
                 .chain()
@@ -167,6 +170,10 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::raster::StrandRasterizerLabel,
             )
+            .add_render_graph_node::<nodes::shading::StrandShadingNode>(
+                Core3d,
+                nodes::shading::StrandShadingLabel,
+            )
             .add_render_graph_node::<nodes::composite::CompositionNode>(
                 Core3d,
                 nodes::composite::CompositionLabel,
@@ -179,6 +186,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
+                nodes::shading::StrandShadingLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::shading::StrandShadingLabel,
                 nodes::raster::StrandRasterizerLabel,
             )
             .add_render_graph_edge(
@@ -207,10 +219,13 @@ fn use_prepass_buffers(
     render_queue: Res<bevy::render::renderer::RenderQueue>,
     mut prepass_resources: ResMut<StrandPrepassResources>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
+    mut shading_resources: ResMut<StrandShadingResources>,
     mut shadow_resources: ResMut<StrandShadowResources>,
 ) {
     let mut total_strands = 0u32;
     let mut total_segment_budget = 0u32;
+    let mut max_strands_in_instance = 0u32;
+    let mut max_segments_in_strand = 0u32;
     let mut instances = Vec::new();
     let mut sorted_geometry: Vec<_> = geometry_query.iter().collect();
     sorted_geometry.sort_by_key(|(entity, _, _)| entity.index());
@@ -223,6 +238,8 @@ fn use_prepass_buffers(
             geom.strand_count
                 .saturating_mul(geom.max_segments_in_strand),
         );
+        max_strands_in_instance = max_strands_in_instance.max(geom.strand_count);
+        max_segments_in_strand = max_segments_in_strand.max(geom.max_segments_in_strand);
         let transform = transform.copied().unwrap_or_default();
         instances.push(StrandInstance {
             asset_id,
@@ -245,6 +262,14 @@ fn use_prepass_buffers(
         .next_power_of_two()
         .max(prepass_capacity);
     let instance_count = instances.len() as u32;
+    let needs_shading_realloc = shading_resources.output_texture.is_none()
+        || shading_resources.max_segments_in_strand != Some(max_segments_in_strand)
+        || shading_resources.max_strands_in_instance != Some(max_strands_in_instance)
+        || shading_resources.layer_count != Some(instance_count);
+    shading_resources.strand_count = Some(total_strands);
+    shading_resources.max_segments_in_strand = Some(max_segments_in_strand);
+    shading_resources.max_strands_in_instance = Some(max_strands_in_instance);
+    shading_resources.layer_count = Some(instance_count);
     let instance_capacity = instance_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
@@ -614,6 +639,16 @@ fn use_prepass_buffers(
             fine_seg_ref_capacity,
             raster_work_capacity,
         );
+    }
+    if needs_shading_realloc {
+        let (texture, view) = create_shading_target_texture(
+            &device,
+            instance_count,
+            max_strands_in_instance,
+            max_segments_in_strand,
+        );
+        shading_resources.output_texture_resource = Some(texture);
+        shading_resources.output_texture = Some(view);
     }
     prepass_resources.instance_count = instance_count;
     prepass_resources.frustum_count = frustum_descs.len() as u32;

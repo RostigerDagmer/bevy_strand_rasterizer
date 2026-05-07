@@ -8,7 +8,8 @@ use bevy::{
             CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
             ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
             StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+            TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -25,7 +26,7 @@ use crate::{
     resources::ComputeInvocationDims, shader_types::PushConstants,
 };
 
-use super::prepass::StrandPrepassResources;
+use super::{prepass::StrandPrepassResources, shading::StrandShadingResources};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -182,6 +183,16 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         )
     }
@@ -300,6 +311,7 @@ pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
+    shading_resources: &StrandShadingResources,
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -323,6 +335,7 @@ pub fn create_strand_raster_bind_group(
         .coarse_tile_work_offsets
         .as_ref()
         .ok_or(())?;
+    let shading_texture = shading_resources.output_texture.as_ref().ok_or(())?;
     Ok((
         device.create_bind_group(
             Some("strand_rasterizer_bind_group"),
@@ -375,6 +388,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
                     resource: coarse_tile_work_offsets.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    resource: BindingResource::TextureView(shading_texture),
                 },
             ],
         ),

@@ -30,8 +30,8 @@ const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
 const SIZEOF_GEO: u32 = #SIZEOF_GEO;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
+const MIN_HAIR_RADIUS_PIXELS : f32 = 0.4; // Example: Thickness in pixels
+const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
@@ -79,6 +79,7 @@ struct FineSegRefBuffer {
 #ifndef SHADOWS
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
+@group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_2d_array<f32>;
 #endif
 @group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
@@ -556,11 +557,21 @@ fn rasterize_strands(
                         if seg_local >= (strand_meta.count - 1u) {
                             continue;
                         }
-                        let mat = get_segment_material(asset_id, segment_ref);
-                        let ambient = max(lights.ambient_color.xyz / 255.0, vec3<f32>(0.2));
-                        let material_alpha = clamp(mat.absorption_color.a, 0.0, 1.0);
-                        let shaded = mat.absorption_color.rgb * ambient;
-                        let hair_fragment = vec4<f32>(shaded, material_alpha * coverage);
+                        let layer = inst_id;
+                        if layer >= textureNumLayers(shading_buffer) {
+                            continue;
+                        }
+                        let dims = textureDimensions(shading_buffer, 0);
+                        if seg_local >= dims.x || segment_ref.strand_idx >= dims.y {
+                            continue;
+                        }
+                        let shaded = textureLoad(
+                            shading_buffer,
+                            vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
+                            i32(layer),
+                            0,
+                        );
+                        let hair_fragment = vec4<f32>(shaded.rgb, shaded.a * coverage);
                         froxel_color = blend_over(froxel_color, hair_fragment);
                         g_min_depth = max(g_min_depth, p_frag.z);
                     }

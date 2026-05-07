@@ -254,6 +254,7 @@ pub mod shading {
     pub const BINNING_QUEUE: u32 = 2;
     pub const FRUSTUM_TABLE: u32 = 3;
     pub const OUTPUT_TEXTURE: u32 = 4;
+    pub const STRAND_INSTANCES: u32 = 5;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -263,6 +264,7 @@ pub mod shading {
             ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
+            ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
         ]
     }
 }

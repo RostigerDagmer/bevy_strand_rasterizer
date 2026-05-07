@@ -17,6 +17,7 @@ use crate::pipelines::{
         StrandRasterizerPipeline, StrandRasterizerResources, create_strand_raster_bind_group,
         run_raster_pass,
     },
+    shading::StrandShadingResources,
 };
 use crate::resources::ComputeInvocationDims;
 
@@ -46,6 +47,7 @@ impl Node for StrandRasterizerNode {
         let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
+        let shading_resources = world.resource::<StrandShadingResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let invocation_dims = world.resource::<ComputeInvocationDims>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
@@ -102,6 +104,7 @@ impl Node for StrandRasterizerNode {
             render_device,
             &raster_pipeline,
             &raster_resources,
+            &shading_resources,
             &prepass_resources,
             &view_binding,
             &light_binding,
