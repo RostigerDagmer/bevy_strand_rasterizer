@@ -13,6 +13,7 @@
     Meta,
     SegmentRef,
     StrandGeo,
+    StrandInstance,
     StrandMeta,
     StrandMaterial,
     Vertices,
@@ -20,6 +21,7 @@
 }
 #import "shaders/task_contract.wgsl"::{
     RasterWorkItem,
+    FineSegRef,
 }
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
@@ -31,6 +33,7 @@ const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute p
 const MIN_HAIR_RADIUS_PIXELS : f32 = 0.5; // Example: Thickness in pixels
 const MAX_HAIR_RADIUS_PIXELS : f32 = 4.0; // Example: Thickness in pixels
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
+const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const DEBUG_FORCE_SINGLE_LIGHT: bool = false;
 var<push_constant> pc: PushConstants;
@@ -44,12 +47,21 @@ struct FrustumDesc {
     bucket_base: u32,
     bucket_count: u32,
     kind: u32,
+    coarse_depth_tile_base: u32,
+    coarse_depth_tile_count: u32,
+    coarse_tiles_x: u32,
+    coarse_tiles_y: u32,
 }
 
 struct RasterWorkQueue {
     head: atomic<u32>,
     tail: atomic<u32>,
     items: array<RasterWorkItem>,
+}
+
+struct FineSegRefBuffer {
+    tail: atomic<u32>,
+    refs: array<FineSegRef>,
 }
 
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
@@ -67,9 +79,6 @@ struct RasterWorkQueue {
 #ifndef SHADOWS
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
-@group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_2d_array<f32>;
-@group(#{RASTER_GROUP}) @binding(#{DEEP_OPACITY_TEXTURE_O_VIEW}) var deep_opacity_maps: texture_3d<f32>;
-@group(#{RASTER_GROUP}) @binding(#{DEEP_OPACITY_TEXTURE_D_VIEW}) var deep_opacity_depth_maps: texture_2d_array<f32>;
 #endif
 @group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
@@ -77,10 +86,10 @@ struct RasterWorkQueue {
 @group(#{RASTER_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<atomic<u32>>;
 @group(#{RASTER_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read> chunk_pool_words: array<u32>;
 @group(#{RASTER_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read> raster_work_queue: RasterWorkQueue;
-
-
-var<private> g_inst_id: u32 = 0u;
-
+@group(#{RASTER_GROUP}) @binding(#{FINE_SEG_REFS}) var<storage, read> fine_seg_refs: FineSegRefBuffer;
+@group(#{RASTER_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
+@group(#{RASTER_GROUP}) @binding(#{COARSE_TILE_WORK_COUNTS}) var<storage, read> coarse_tile_work_counts: array<u32>;
+@group(#{RASTER_GROUP}) @binding(#{COARSE_TILE_WORK_OFFSETS}) var<storage, read> coarse_tile_work_offsets: array<u32>;
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
@@ -127,12 +136,12 @@ fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
     );
 }
 
-fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) || g_inst_id >= arrayLength(&t_materials) {
+fn get_segment_material(asset_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_materials) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
-    let meta_ptr = t_strand_metadata[g_inst_id];
-    let material_ptr = t_materials[g_inst_id];
+    let meta_ptr = t_strand_metadata[asset_id];
+    let material_ptr = t_materials[asset_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
@@ -155,11 +164,11 @@ fn get_segment_material(segment_ref: SegmentRef) -> StrandMaterial {
 
 #ifndef SHADOWS
 
-fn get_segment_meta(segment_ref: SegmentRef) -> StrandMeta {
-    if arrayLength(&t_strand_metadata) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) {
+fn get_segment_meta(asset_id: u32, segment_ref: SegmentRef) -> StrandMeta {
+    if arrayLength(&t_strand_metadata) == 0u || asset_id >= arrayLength(&t_strand_metadata) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
-    let meta_ptr = t_strand_metadata[g_inst_id];
+    let meta_ptr = t_strand_metadata[asset_id];
     if !is_valid_ptr(meta_ptr) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
@@ -172,61 +181,15 @@ fn get_segment_meta(segment_ref: SegmentRef) -> StrandMeta {
     return strand_metadata[meta_ptr.slab].ms[meta_base + strand_local];
 }
 
-fn sample_dom_occlusion(fragment_world_pos: vec4<f32>, light_idx: u32) -> f32 {
-    let dom_light_idx = select(light_idx, 0u, DEBUG_FORCE_SINGLE_LIGHT);
-    let layer_count = textureNumLayers(deep_opacity_depth_maps);
-    if layer_count == 0u || dom_light_idx >= layer_count {
-        return 0.0;
-    }
-    let depth_dims = textureDimensions(deep_opacity_depth_maps, 0);
-    if depth_dims.x == 0u || depth_dims.y == 0u {
-        return 0.0;
-    }
-    let light = lights.directional_lights[dom_light_idx];
-    let light_clip_from_world = light.cascades[0].clip_from_world;
-    let light_frag = world_to_screen_raw(
-        fragment_world_pos,
-        light_clip_from_world,
-        vec4<f32>(0.0, 0.0, f32(depth_dims.x), f32(depth_dims.y)),
-    );
-    if light_frag.x < 0.0 || light_frag.y < 0.0 || light_frag.x >= f32(depth_dims.x) || light_frag.y >= f32(depth_dims.y) {
-        return 0.0;
-    }
-    let light_z = normalize_depth01(light_frag.z);
-    if light_z < 0.0 || light_z > 1.0 {
-        return 0.0;
-    }
-    let px = vec2<i32>(i32(light_frag.x), i32(light_frag.y));
-    let min_depth = textureLoad(deep_opacity_depth_maps, px, i32(dom_light_idx), 0).x;
-    // Empty pixel in DOM pass stores far depth.
-    if min_depth >= 0.99999 {
-        return 0.0;
-    }
-    if light_z <= min_depth {
-        return 0.0;
-    }
-
-    let opacity_dims = textureDimensions(deep_opacity_maps, 0);
-    if opacity_dims.z == 0u {
-        return 0.0;
-    }
-    let slices_per_light = max(1u, opacity_dims.z / layer_count);
-    let span = max(1e-6, 1.0 - min_depth);
-    let dzp = max(0.0, light_z - min_depth) / span;
-    let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
-    let slice = min(u32(u * f32(slices_per_light)), slices_per_light - 1u);
-    let z = dom_light_idx * slices_per_light + slice;
-    return textureLoad(deep_opacity_maps, vec3<i32>(px, i32(z)), 0).x;
-}
 #endif
 
-fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || g_inst_id >= arrayLength(&t_strand_metadata) || g_inst_id >= arrayLength(&t_indices) || g_inst_id >= arrayLength(&t_vertices) {
+fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) -> mat2x4<f32> {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&strand_instances) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
-    let meta_ptr = t_strand_metadata[g_inst_id];
-    let index_ptr = t_indices[g_inst_id];
-    let vertex_ptr = t_vertices[g_inst_id];
+    let meta_ptr = t_strand_metadata[asset_id];
+    let index_ptr = t_indices[asset_id];
+    let vertex_ptr = t_vertices[asset_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
@@ -239,23 +202,26 @@ fn get_segment_vertices(segment_ref: SegmentRef) -> mat2x4<f32> {
     }
     let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + strand_local];
 
-    let v0_idx = segment_ref.segment_start_idx;
-    let v1_idx = segment_ref.segment_start_idx + 1u;
+    let index_base = index_ptr.offset / 4u;
+    let vertex_base = vertex_ptr.offset / 16u;
+    let v0_idx = index_base + segment_ref.segment_start_idx;
+    let v1_idx = index_base + segment_ref.segment_start_idx + 1u;
     let index_count = index_ptr.size / 4u;
-    if v1_idx >= index_count || (v1_idx - strand_meta.offset) >= strand_meta.count - 1u {
+    if segment_ref.segment_start_idx + 1u >= index_count || (segment_ref.segment_start_idx + 1u - strand_meta.offset) >= strand_meta.count - 1u {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
 
     let v0_strand_idx = indices[index_ptr.slab].is[v0_idx];
     let v1_strand_idx = indices[index_ptr.slab].is[v1_idx];
-    let vertex_count = vertex_ptr.size / 12u;
+    let vertex_count = vertex_ptr.size / 16u;
     if v0_strand_idx >= vertex_count || v1_strand_idx >= vertex_count {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
+    let world_from_local = strand_instances[inst_id].world_from_local;
 
     return mat2x4<f32>(
-        vec4<f32>(vertices[vertex_ptr.slab].vs[v0_strand_idx], 1.0),
-        vec4<f32>(vertices[vertex_ptr.slab].vs[v1_strand_idx], 1.0),
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v1_strand_idx], 1.0),
     );
 }
 
@@ -359,9 +325,10 @@ fn rasterize_strands(
                     if work_item.frustum_id != active_frustum_id {
                         continue;
                     }
-                    g_inst_id = work_item.inst_id;
+                    let inst_id = work_item.inst_id;
+                    let asset_id = strand_instances[inst_id].asset_id;
                     let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
-                    let V = get_segment_vertices(segment_ref);
+                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -437,9 +404,10 @@ fn rasterize_strands(
                     if work_item.frustum_id != active_frustum_id {
                         continue;
                     }
-                    g_inst_id = work_item.inst_id;
+                    let inst_id = work_item.inst_id;
+                    let asset_id = strand_instances[inst_id].asset_id;
                     let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
-                    let V = get_segment_vertices(segment_ref);
+                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -460,7 +428,7 @@ fn rasterize_strands(
                         continue;
                     }
 
-                    let mat = get_segment_material(segment_ref);
+                    let mat = get_segment_material(asset_id, segment_ref);
                     let dzp = max(0.0, p.z - z0) * inv_span;
                     let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(DOM_SLICES);
@@ -514,8 +482,7 @@ fn rasterize_strands(
     let active_config = frustum_to_config(active_desc);
     let total_pixels = active_config.screen_width * active_config.screen_height;
     let camera_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
-    let active_bucket_base = active_desc.bucket_base;
-    let active_bucket_count = active_desc.bucket_count;
+    let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
 
     for (var pixel_idx = thread_idx; pixel_idx < total_pixels; pixel_idx = pixel_idx + thread_stride) {
         let pixel_u = vec2<u32>(
@@ -526,53 +493,44 @@ fn rasterize_strands(
         let pixel_center = vec2<f32>(pixel_u) + vec2<f32>(0.5, 0.5);
         let tile_coord_x = pixel_u.x / active_config.froxel_size_x;
         let tile_coord_y = pixel_u.y / active_config.froxel_size_y;
+        let screen_tile_id = tile_coord_y * fine_tiles_x + tile_coord_x;
+        let coarse_x = tile_coord_x / COARSE_FINE_TILE_EXTENT;
+        let coarse_y = tile_coord_y / COARSE_FINE_TILE_EXTENT;
+        if coarse_x >= active_desc.coarse_tiles_x || coarse_y >= active_desc.coarse_tiles_y {
+            continue;
+        }
+        let coarse_tile_idx = active_desc.coarse_depth_tile_base + coarse_y * active_desc.coarse_tiles_x + coarse_x;
+        if coarse_tile_idx >= arrayLength(&coarse_tile_work_counts) || coarse_tile_idx >= arrayLength(&coarse_tile_work_offsets) {
+            continue;
+        }
+        let work_base = coarse_tile_work_offsets[coarse_tile_idx];
+        let work_count = coarse_tile_work_counts[coarse_tile_idx];
+        let work_end = min(work_base + work_count, arrayLength(&raster_work_queue.items));
 
         var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
         var g_min_depth: f32 = 0.0;
 
-        for (var dz: u32 = 0; dz < active_config.depth_slices; dz = dz + 1u) {
-            let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
-            if local_froxel_idx >= active_bucket_count {
-                break;
-            }
-            let bucket_idx = active_bucket_base + local_froxel_idx;
-            if bucket_idx >= arrayLength(&froxel_bucket_heads) {
-                break;
+        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+            let work_item = raster_work_queue.items[work_idx];
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
+                continue;
             }
 
             var froxel_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-            var chunk_idx = atomicLoad(&froxel_bucket_heads[bucket_idx]);
-            loop {
-                if chunk_idx == 0xFFFFFFFFu {
-                    break;
-                }
-                let chunk_word_base = chunk_idx * CHUNK_WORD_STRIDE;
-                if chunk_word_base + 1u >= arrayLength(&chunk_pool_words) {
-                    break;
-                }
-                let next_chunk = chunk_pool_words[chunk_word_base];
-                let item_count = min(chunk_pool_words[chunk_word_base + 1u], POOL_CHUNK_SIZE);
+            let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
+                    let seg_ref = fine_seg_refs.refs[ref_idx];
+                    let inst_id = seg_ref.inst_id;
+                    if inst_id >= arrayLength(&strand_instances) {
+                        continue;
+                    }
+                    let asset_id = strand_instances[inst_id].asset_id;
+                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
 
-                for (var ci: u32 = 0u; ci < item_count; ci = ci + 1u) {
-                    let payload_idx = chunk_word_base + 2u + ci;
-                    if payload_idx >= arrayLength(&chunk_pool_words) {
-                        continue;
-                    }
-                    let work_idx = chunk_pool_words[payload_idx];
-                    if work_idx >= arrayLength(&raster_work_queue.items) {
-                        continue;
-                    }
-                    let work_item = raster_work_queue.items[work_idx];
-                    if work_item.frustum_id != active_frustum_id {
-                        continue;
-                    }
-                    g_inst_id = work_item.inst_id;
-                    let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
-
-                    let strand_meta = get_segment_meta(segment_ref);
+                    let strand_meta = get_segment_meta(asset_id, segment_ref);
                     if strand_meta.count < 2u { continue; }
 
-                    let V = get_segment_vertices(segment_ref);
+                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
                     let v0_world = V[0];
                     let v1_world = V[1];
 
@@ -580,10 +538,6 @@ fn rasterize_strands(
                     let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, camera_viewport);
 
                     if p0_screen.x < 0.0 && p1_screen.x < 0.0 { continue; }
-
-                    let geo_ptr = t_geos[g_inst_id];
-                    let geo = geos[geo_ptr.slab].gs[geo_ptr.offset / SIZEOF_GEO];
-                    // let clip_bounds = find_clip_bounds(view.unjittered_clip_from_world, geo.aabb.min, geo.aabb.max);
 
                     let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
                     if t < 0.0 || t > 1.0 { continue; }
@@ -602,49 +556,17 @@ fn rasterize_strands(
                         if seg_local >= (strand_meta.count - 1u) {
                             continue;
                         }
-                        let layer = work_item.inst_id;
-                        if layer >= textureNumLayers(shading_buffer) {
-                            continue;
-                        }
-                        let dims = textureDimensions(shading_buffer, 0);
-                        if seg_local >= dims.x || segment_ref.strand_idx >= dims.y {
-                            continue;
-                        }
-                        let shaded = textureLoad(
-                            shading_buffer,
-                            vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
-                            i32(layer),
-                            0,
-                        );
-                        let fragment_world_pos = vec4<f32>(mix(v0_world.xyz, v1_world.xyz, clamp(t, 0.0, 1.0)), 1.0);
-                        var occlusion = 0.0;
-                        // if lights.n_directional_lights > 0u && textureNumLayers(deep_opacity_depth_maps) > 0u {
-                        //     if DEBUG_FORCE_SINGLE_LIGHT {
-                        //         occlusion = sample_dom_occlusion(fragment_world_pos, 0u);
-                        //     } else {
-                        //         let light_count = min(lights.n_directional_lights, textureNumLayers(deep_opacity_depth_maps));
-                        //         for (var li = 0u; li < light_count; li = li + 1u) {
-                        //             occlusion = occlusion + sample_dom_occlusion(fragment_world_pos, li);
-                        //         }
-                        //         occlusion = occlusion / f32(light_count);
-                        //     }
-                        // }
-                        let mat = get_segment_material(segment_ref);
-                        let ambient = mat.absorption_color.xyz * mat.ambient_factor + (lights.ambient_color.xyz / 255.0) * mat.ambient_factor;
-                        let lit = max(shaded.rgb - ambient, vec3<f32>(0.0));
-                        let shaded_shadowed = ambient + lit * (1.0 - occlusion);
-                        let hair_fragment = vec4<f32>(shaded_shadowed, shaded.a * coverage);
+                        let mat = get_segment_material(asset_id, segment_ref);
+                        let ambient = max(lights.ambient_color.xyz / 255.0, vec3<f32>(0.2));
+                        let material_alpha = clamp(mat.absorption_color.a, 0.0, 1.0);
+                        let shaded = mat.absorption_color.rgb * ambient;
+                        let hair_fragment = vec4<f32>(shaded, material_alpha * coverage);
                         froxel_color = blend_over(froxel_color, hair_fragment);
                         g_min_depth = max(g_min_depth, p_frag.z);
                     }
                     if froxel_color.a > 0.9995 {
                         break;
                     }
-                }
-                if froxel_color.a > 0.9995 {
-                    break;
-                }
-                chunk_idx = next_chunk;
             }
 
             final_color = blend_over(final_color, froxel_color);

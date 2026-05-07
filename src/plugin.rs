@@ -135,6 +135,8 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandPrepassResources>();
         render_app.init_resource::<ComputeInvocationDims>();
         render_app.init_resource::<StrandPrepassPipeline>();
+        render_app.init_resource::<StrandRasterizerPipeline>();
+        render_app.init_resource::<CompositionPipeline>();
         render_app.init_resource::<TileDebugPipeline>();
         render_app.add_systems(
             Render,
@@ -149,16 +151,25 @@ impl Plugin for StrandRasterizerPlugin {
         );
         render_app.add_systems(
             Render,
-            update_strand_prepass_pipeline.after(RenderSystems::PrepareBindGroups),
+            (
+                update_strand_prepass_pipeline,
+                update_strand_raster_pipeline,
+            )
+                .chain()
+                .after(RenderSystems::PrepareBindGroups),
         );
         render_app
             .add_render_graph_node::<nodes::prepass::WorkPreparationNode>(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
             )
-            .add_render_graph_node::<nodes::debug::TileDebugNode>(
+            .add_render_graph_node::<nodes::raster::StrandRasterizerNode>(
                 Core3d,
-                nodes::debug::TileDebugLabel,
+                nodes::raster::StrandRasterizerLabel,
+            )
+            .add_render_graph_node::<nodes::composite::CompositionNode>(
+                Core3d,
+                nodes::composite::CompositionLabel,
             )
             .add_render_graph_edge(
                 Core3d,
@@ -168,26 +179,23 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
-                nodes::debug::TileDebugLabel,
+                nodes::raster::StrandRasterizerLabel,
             )
-            // Keep the debug overlay after the standard 3D main pass while the strand raster,
-            // shading, composition, and shadow passes are disconnected during the hierarchy rewrite.
+            .add_render_graph_edge(
+                Core3d,
+                nodes::raster::StrandRasterizerLabel,
+                nodes::composite::CompositionLabel,
+            )
             .add_render_graph_edge(
                 Core3d,
                 bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
-                nodes::debug::TileDebugLabel,
+                nodes::composite::CompositionLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::composite::CompositionLabel,
+                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
             );
-        // Disabled transition graph:
-        // WorkPreparation -> Shading -> Raster -> Composition -> Debug
-        // WorkPreparation -> ShadowRaster
-        //
-        // The current migration target is:
-        // WorkPreparation -> Debug -> PostProcessing
-        // .add_render_graph_edge(
-        //     Core3d,
-        //     nodes::debug::TileDebugLabel,
-        //     bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
-        // );
     }
 }
 
@@ -1011,7 +1019,7 @@ fn use_froxel_buffer(
     device: Res<RenderDevice>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
 ) {
-    for (entity, config, _extracted_view) in query.iter() {
+    for (entity, config, extracted_view) in query.iter() {
         let config_buffer = create_froxel_config_buffer(&device, config);
 
         raster_resources
@@ -1020,6 +1028,14 @@ fn use_froxel_buffer(
         raster_resources
             .frustrum_config
             .insert(entity, config.clone());
+        if extracted_view.is_some() {
+            let (target_texture, target_view) = recreate_render_target_texture(&device, config);
+            let (depth_texture, depth_view) = recreate_render_target_depth_texture(&device, config);
+            raster_resources.output_texture_resource = Some(target_texture);
+            raster_resources.output_texture = Some(target_view);
+            raster_resources.output_depth_resource = Some(depth_texture);
+            raster_resources.output_depth = Some(depth_view);
+        }
         debug!("Updated froxel config + render targets");
     }
 }

@@ -117,6 +117,10 @@ pub mod rasterizer {
     pub const FROXEL_BUCKET_HEADS: u32 = 26;
     pub const CHUNK_POOL: u32 = 27;
     pub const RASTER_WORK_QUEUE: u32 = 28;
+    pub const FINE_SEG_REFS: u32 = 29;
+    pub const STRAND_INSTANCES: u32 = 30;
+    pub const COARSE_TILE_WORK_COUNTS: u32 = 31;
+    pub const COARSE_TILE_WORK_OFFSETS: u32 = 32;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -174,6 +178,10 @@ pub mod rasterizer {
             ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
             ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
             ShaderDefVal::UInt("RASTER_WORK_QUEUE".into(), RASTER_WORK_QUEUE),
+            ShaderDefVal::UInt("FINE_SEG_REFS".into(), FINE_SEG_REFS),
+            ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
+            ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
+            ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
         ]
     }
 }

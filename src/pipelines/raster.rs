@@ -8,8 +8,7 @@ use bevy::{
             CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
             ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
             StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-            TextureViewDimension,
+            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -26,10 +25,7 @@ use crate::{
     resources::ComputeInvocationDims, shader_types::PushConstants,
 };
 
-use super::{
-    prepass::StrandPrepassResources, shading::StrandShadingResources,
-    shadows::StrandShadowResources,
-};
+use super::prepass::StrandPrepassResources;
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -147,32 +143,42 @@ impl StrandRasterizerPipeline {
                     count: None,
                 },
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::SHADING_BUFFER,
+                    binding: layouts::rasterizer::FINE_SEG_REFS,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2Array,
-                        multisampled: false,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
+                    binding: layouts::rasterizer::STRAND_INSTANCES,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D3,
-                        multisampled: false,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2Array,
-                        multisampled: false,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -247,6 +253,10 @@ pub fn update_strand_raster_pipeline(
                 std::mem::size_of::<crate::shader_types::StrandGeo>() as u32,
             ),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
+            ShaderDefVal::UInt(
+                "COARSE_FINE_TILE_EXTENT".into(),
+                crate::plugin::COARSE_FINE_TILE_EXTENT,
+            ),
             ShaderDefVal::UInt("WORKGROUP_SIZE".into(), workgroup_size),
         ],
         layouts::rasterizer::shader_defs(),
@@ -290,8 +300,6 @@ pub fn create_strand_raster_bind_group(
     device: &RenderDevice,
     pipeline: &StrandRasterizerPipeline,
     resources: &StrandRasterizerResources,
-    shading_resources: &StrandShadingResources,
-    shadow_resources: &StrandShadowResources,
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
@@ -305,9 +313,16 @@ pub fn create_strand_raster_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
-    let shading_texture = shading_resources.output_texture.as_ref().ok_or(())?;
-    let (dom_opacity, dom_depth) = shadow_resources.dom_array_targets.as_ref().ok_or(())?;
-
+    let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
+    let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
+    let coarse_tile_work_counts = prepass_resources
+        .coarse_tile_work_counts
+        .as_ref()
+        .ok_or(())?;
+    let coarse_tile_work_offsets = prepass_resources
+        .coarse_tile_work_offsets
+        .as_ref()
+        .ok_or(())?;
     Ok((
         device.create_bind_group(
             Some("strand_rasterizer_bind_group"),
@@ -346,16 +361,20 @@ pub fn create_strand_raster_bind_group(
                     resource: raster_work_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::SHADING_BUFFER,
-                    resource: BindingResource::TextureView(shading_texture),
+                    binding: layouts::rasterizer::FINE_SEG_REFS,
+                    resource: fine_seg_refs.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_O_VIEW,
-                    resource: BindingResource::TextureView(dom_opacity),
+                    binding: layouts::rasterizer::STRAND_INSTANCES,
+                    resource: strand_instances.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::rasterizer::DEEP_OPACITY_TEXTURE_D_VIEW,
-                    resource: BindingResource::TextureView(dom_depth),
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
+                    resource: coarse_tile_work_counts.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
+                    resource: coarse_tile_work_offsets.as_entire_binding(),
                 },
             ],
         ),
@@ -416,7 +435,6 @@ pub fn run_raster_pass(
     _froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
-    shading_resources: &StrandShadingResources,
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
     dispatch_size: (u32, u32, u32),
@@ -459,7 +477,7 @@ pub fn run_raster_pass(
         // Set push constants if needed
         let pushconstants = PushConstants {
             num_elements: resources.strand_count.unwrap_or(0),
-            workgroup_offset: shading_resources.max_segments_in_strand.unwrap_or(0), // TODO: maybe its time to make this its own field
+            workgroup_offset: 0,
             scan_load_base: frustum_id,
             scan_save_base: 0,
             ..Default::default()
