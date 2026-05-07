@@ -77,6 +77,7 @@ struct StrandMaterial {
 struct PushConstants {
     workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
     num_elements: u32,    // Generic count (e.g., num_strands or num_tiles)
+    frustum_count: u32,
     scan_load_base: u32,
     scan_save_base: u32,
     stochastic_cull_enabled: u32,

@@ -18,10 +18,7 @@ use bevy::{
 };
 use bevy_vsms::{
     allocator::VirtualSurfaceRuntime,
-    lifecycle::reconcile_virtual_surfaces,
-    plugin::BevyVsmsPlugin,
     prelude::{VirtualSurfaceConfigBuilder, VirtualSurfaceKind, VirtualSurfaceResidencyMode},
-    residency::sync_virtual_surface_device_state,
 };
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashSet;
@@ -49,6 +46,10 @@ use crate::{
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
+pub const COARSE_FINE_TILE_EXTENT: u32 = 4;
+pub const COARSE_DEPTH_SLICES: u32 = 16;
+pub const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = 2;
+const COARSE_INTERVAL_REFS_PER_TILE: u32 = 64;
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 enum DomVsmsProxyKind {
@@ -95,7 +96,6 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
             GpuPagingAllocatorPlugin,
-            BevyVsmsPlugin,
         ));
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
@@ -122,21 +122,15 @@ impl Plugin for StrandRasterizerPlugin {
             table_group_idx: 1,
         });
         render_app.init_resource::<StrandRasterizerResources>();
-        render_app.init_resource::<StrandRasterizerPipeline>();
-        render_app.init_resource::<StrandShadingPipeline>();
-        render_app.init_resource::<StrandShadingResources>();
-        render_app.init_resource::<StrandShadowPipeline>();
         render_app.init_resource::<StrandShadowResources>();
         render_app.init_resource::<StrandPrepassResources>();
         render_app.init_resource::<ComputeInvocationDims>();
         render_app.init_resource::<StrandPrepassPipeline>();
-        render_app.init_resource::<CompositionPipeline>();
         render_app.init_resource::<TileDebugPipeline>();
         render_app.add_systems(
             Render,
             ((
                 use_froxel_buffer,
-                use_deep_opacity_maps,
                 use_prepass_buffers,
                 update_material_buffer,
                 // use_strand_geometry.after(prepare_view_uniforms),
@@ -146,31 +140,7 @@ impl Plugin for StrandRasterizerPlugin {
         );
         render_app.add_systems(
             Render,
-            sync_vsms_dom_configs
-                .before(reconcile_virtual_surfaces)
-                .in_set(RenderSystems::Prepare),
-        );
-        render_app.add_systems(
-            Render,
-            bind_vsms_dom_targets
-                .after(sync_virtual_surface_device_state)
-                .in_set(RenderSystems::Queue),
-        );
-        render_app.add_systems(
-            Render,
             update_strand_prepass_pipeline.after(RenderSystems::PrepareBindGroups),
-        );
-        render_app.add_systems(
-            Render,
-            update_strand_raster_pipeline.after(RenderSystems::PrepareBindGroups),
-        );
-        render_app.add_systems(
-            Render,
-            update_strand_shadow_pipeline.after(RenderSystems::PrepareBindGroups),
-        );
-        render_app.add_systems(
-            Render,
-            update_strand_shading_pipeline.after(RenderSystems::PrepareBindGroups),
         );
         render_app
             .add_render_graph_node::<nodes::prepass::WorkPreparationNode>(
@@ -181,75 +151,33 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::debug::TileDebugLabel,
             )
-            .add_render_graph_node::<nodes::raster::StrandRasterizerNode>(
-                Core3d,
-                nodes::raster::StrandRasterizerLabel,
-            )
-            .add_render_graph_node::<nodes::shading::StrandShadingNode>(
-                Core3d,
-                nodes::shading::StrandShadingLabel,
-            )
-            .add_render_graph_node::<nodes::shadows::StrandShadowRasterizerNode>(
-                Core3d,
-                nodes::shadows::StrandShadowRasterizerLabel,
-            )
-            .add_render_graph_node::<nodes::composite::CompositionNode>(
-                Core3d,
-                nodes::composite::CompositionLabel,
-            )
-            // connect nodes
-            // .add_render_graph_edge(
-            //     Core3d,
-            //     bevy::core_pipeline::core_3d::graph::Node3d::EndPrepasses,
-            //     StrandShadowRasterizerLabel,
-            // )
-            // .add_render_graph_edge(Core3d, StrandShadowRasterizerLabel, StrandShadingLabel)
-            // .add_render_graph_edge(Core3d, StrandShadingLabel, StrandRasterizerLabel) // run after ALL shadow maps are present
-            // .add_render_graph_edge(
-            //     Core3d,
-            //     StrandRasterizerLabel,
-            //     CompositionLabel, // Run after strand rasterization
-            // )
             .add_render_graph_edge(
                 Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass, // Run before composition
+                bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass,
                 nodes::prepass::WorkPreparationLabel,
             )
-            // .add_render_graph_edge(
-            //     Core3d,
-            //     nodes::prepass::WorkPreparationLabel,
-            //     nodes::shadows::StrandShadowRasterizerLabel,
-            // )
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
-                nodes::shading::StrandShadingLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::shading::StrandShadingLabel,
-                nodes::raster::StrandRasterizerLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::raster::StrandRasterizerLabel,
-                nodes::composite::CompositionLabel,
-            )
-            // .add_render_graph_edge(
-            //     Core3d,
-            //     nodes::prepass::WorkPreparationLabel,
-            //     nodes::debug::TileDebugLabel,
-            // )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::composite::CompositionLabel,
                 nodes::debug::TileDebugLabel,
             )
+            // Keep the debug overlay after the standard 3D main pass while the strand raster,
+            // shading, composition, and shadow passes are disconnected during the hierarchy rewrite.
             .add_render_graph_edge(
                 Core3d,
-                // nodes::debug::TileDebugLabel, // Run after composition
-                nodes::composite::CompositionLabel, // Run after composition
-                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing, // Before standard post-processing
+                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
+                nodes::debug::TileDebugLabel,
+            )
+            // Disabled transition graph:
+            // WorkPreparation -> Shading -> Raster -> Composition -> Debug
+            // WorkPreparation -> ShadowRaster
+            //
+            // The current migration target is:
+            // WorkPreparation -> Debug -> PostProcessing
+            .add_render_graph_edge(
+                Core3d,
+                nodes::debug::TileDebugLabel,
+                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
             );
     }
 }
@@ -261,14 +189,11 @@ fn use_prepass_buffers(
     render_queue: Res<bevy::render::renderer::RenderQueue>,
     mut prepass_resources: ResMut<StrandPrepassResources>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
-    mut shading_resources: ResMut<StrandShadingResources>,
     mut shadow_resources: ResMut<StrandShadowResources>,
 ) {
     let mut total_strands = 0u32;
     let mut total_segment_budget = 0u32;
     let mut geo_count = 0u32;
-    let mut max_segments_in_instance = 1u32;
-    let mut max_strands_in_instance = 1u32;
     for geom in &geometry_query {
         total_strands = total_strands.saturating_add(geom.strand_count);
         total_segment_budget = total_segment_budget.saturating_add(
@@ -276,18 +201,13 @@ fn use_prepass_buffers(
                 .saturating_mul(geom.max_segments_in_strand),
         );
         geo_count = geo_count.saturating_add(1);
-        max_segments_in_instance = max_segments_in_instance.max(geom.max_segments_in_strand);
-        max_strands_in_instance = max_strands_in_instance.max(geom.strand_count);
     }
 
     if total_strands == 0 {
         return;
     }
 
-    let allocated_max_segments = shading_resources.max_segments_in_strand.unwrap_or(0);
-    let allocated_max_strands = shading_resources.max_strands_in_instance.unwrap_or(0);
     raster_resources.strand_count = Some(total_strands);
-    shading_resources.strand_count = Some(total_strands);
 
     let prepass_capacity = total_strands.next_power_of_two().max(2048);
     let base_binning_capacity = total_segment_budget
@@ -296,6 +216,7 @@ fn use_prepass_buffers(
     let geo_capacity = geo_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
+    let mut coarse_depth_tile_base = 0u32;
     let light_entities: HashSet<Entity> = light_frusta_query.iter().collect();
     raster_resources.frustum_ids.clear();
     shadow_resources.light_layer_by_frustum.clear();
@@ -317,7 +238,10 @@ fn use_prepass_buffers(
                 .insert(frustum_id as u32, light_layer);
             light_layer = light_layer.saturating_add(1);
         }
-        let (_, _, bucket_count) = cfg.get_num_tiles();
+        let (fine_tiles_x, fine_tiles_y, bucket_count) = cfg.get_num_tiles();
+        let coarse_tiles_x = fine_tiles_x.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
+        let coarse_tiles_y = fine_tiles_y.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
+        let coarse_depth_tile_count = coarse_tiles_x.saturating_mul(coarse_tiles_y);
         frustum_descs.push(GpuFrustumDesc {
             screen_width: cfg.screen_width,
             screen_height: cfg.screen_height,
@@ -327,8 +251,13 @@ fn use_prepass_buffers(
             bucket_base,
             bucket_count,
             kind: u32::from(is_light), // 0 = camera, 1 = light
+            coarse_depth_tile_base,
+            coarse_depth_tile_count,
+            coarse_tiles_x,
+            coarse_tiles_y,
         });
         bucket_base = bucket_base.saturating_add(bucket_count);
+        coarse_depth_tile_base = coarse_depth_tile_base.saturating_add(coarse_depth_tile_count);
     }
     if frustum_descs.is_empty() {
         frustum_descs.push(GpuFrustumDesc {
@@ -340,8 +269,13 @@ fn use_prepass_buffers(
             bucket_base: 0,
             bucket_count: 1,
             kind: 0,
+            coarse_depth_tile_base: 0,
+            coarse_depth_tile_count: 1,
+            coarse_tiles_x: 1,
+            coarse_tiles_y: 1,
         });
         bucket_base = 1;
+        coarse_depth_tile_base = 1;
     }
     let frustum_task_multiplier = (frustum_descs.len() as u32).max(1);
     let binning_capacity = base_binning_capacity
@@ -350,29 +284,19 @@ fn use_prepass_buffers(
         .max(base_binning_capacity);
     let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
-    let shading_layer_capacity = geo_capacity.max(1).min(32);
+    let coarse_depth_tile_capacity = coarse_depth_tile_base.next_power_of_two().max(1);
+    let coarse_range_capacity = geo_capacity
+        .saturating_mul(frustum_capacity)
+        .next_power_of_two()
+        .max(1);
+    let coarse_interval_ref_capacity = coarse_depth_tile_capacity
+        .saturating_mul(COARSE_INTERVAL_REFS_PER_TILE)
+        .next_power_of_two()
+        .max(coarse_range_capacity);
     let raster_work_capacity = binning_capacity
         .saturating_mul(2)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
-
-    let needs_shading_realloc = shading_resources.output_texture.is_none()
-        || shading_resources.layer_count.unwrap_or(0) < shading_layer_capacity
-        || allocated_max_segments < max_segments_in_instance
-        || allocated_max_strands < max_strands_in_instance;
-    if needs_shading_realloc {
-        let (tex, view) = create_shading_target_texture(
-            &device,
-            shading_layer_capacity,
-            max_strands_in_instance,
-            max_segments_in_instance,
-        );
-        shading_resources.output_texture_resource = Some(tex);
-        shading_resources.output_texture = Some(view);
-        shading_resources.layer_count = Some(shading_layer_capacity);
-        shading_resources.max_segments_in_strand = Some(max_segments_in_instance);
-        shading_resources.max_strands_in_instance = Some(max_strands_in_instance);
-    }
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -385,12 +309,19 @@ fn use_prepass_buffers(
         || prepass_resources.frustum_table.is_none()
         || prepass_resources.froxel_bucket_heads.is_none()
         || prepass_resources.raster_work_queue.is_none()
+        || prepass_resources.coarse_depth_lut.is_none()
+        || prepass_resources.coarse_range_queue.is_none()
+        || prepass_resources.coarse_interval_heads.is_none()
+        || prepass_resources.coarse_interval_refs.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
         || prepass_resources.geo_capacity < geo_capacity
         || prepass_resources.frustum_capacity < frustum_capacity
         || prepass_resources.froxel_bucket_capacity < froxel_bucket_capacity
-        || prepass_resources.raster_work_capacity < raster_work_capacity;
+        || prepass_resources.raster_work_capacity < raster_work_capacity
+        || prepass_resources.coarse_depth_tile_capacity < coarse_depth_tile_capacity
+        || prepass_resources.coarse_range_capacity < coarse_range_capacity
+        || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity;
 
     if needs_realloc {
         let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -411,6 +342,16 @@ fn use_prepass_buffers(
             (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (raster_work_capacity as u64) * (std::mem::size_of::<RasterWorkItem>() as u64);
+        let coarse_depth_lut_bytes = (coarse_depth_tile_capacity as u64)
+            * (COARSE_DEPTH_SLICES as u64)
+            * (std::mem::size_of::<GpuCoarseDepthLutEntry>() as u64);
+        let coarse_range_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (coarse_range_capacity as u64) * (std::mem::size_of::<GpuCoarseAssetRange>() as u64);
+        let coarse_interval_heads_bytes =
+            (coarse_depth_tile_capacity as u64) * (std::mem::size_of::<u32>() as u64);
+        let coarse_interval_refs_bytes = std::mem::size_of::<u32>() as u64
+            + (coarse_interval_ref_capacity as u64)
+                * (std::mem::size_of::<GpuCoarseIntervalRef>() as u64);
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -478,16 +419,44 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.coarse_depth_lut = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_depth_lut"),
+            size: coarse_depth_lut_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_range_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_range_queue"),
+            size: coarse_range_queue_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_interval_heads = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_interval_heads"),
+            size: coarse_interval_heads_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.coarse_interval_refs = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_coarse_interval_refs"),
+            size: coarse_interval_refs_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
         prepass_resources.geo_capacity = geo_capacity;
         prepass_resources.frustum_capacity = frustum_capacity;
+        prepass_resources.frustum_count = frustum_descs.len() as u32;
         prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
         prepass_resources.raster_work_capacity = raster_work_capacity;
+        prepass_resources.coarse_depth_tile_capacity = coarse_depth_tile_capacity;
+        prepass_resources.coarse_range_capacity = coarse_range_capacity;
+        prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} raster_work_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} geos={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} raster_work_cap={}",
             total_strands,
             total_segment_budget,
             geo_count,
@@ -495,9 +464,13 @@ fn use_prepass_buffers(
             prepass_capacity,
             binning_capacity,
             froxel_bucket_capacity,
+            coarse_depth_tile_capacity,
+            coarse_range_capacity,
+            coarse_interval_ref_capacity,
             raster_work_capacity,
         );
     }
+    prepass_resources.frustum_count = frustum_descs.len() as u32;
 
     let zero_queue_hdr = [0u32, 0u32];
     let zero_dispatch = [0u32, 1u32, 1u32];
@@ -511,6 +484,12 @@ fn use_prepass_buffers(
     if let Some(queue_buf) = &prepass_resources.raster_work_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
+    if let Some(queue_buf) = &prepass_resources.coarse_range_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(interval_refs) = &prepass_resources.coarse_interval_refs {
+        render_queue.write_buffer(interval_refs, 0, bytemuck::cast_slice(&[0u32]));
+    }
     if let Some(indirect) = &prepass_resources.indirect_args {
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
     }
@@ -521,6 +500,18 @@ fn use_prepass_buffers(
     if let Some(bucket_heads) = &prepass_resources.froxel_bucket_heads {
         let invalid_heads = vec![u32::MAX; prepass_resources.froxel_bucket_capacity as usize];
         render_queue.write_buffer(bucket_heads, 0, bytemuck::cast_slice(&invalid_heads));
+    }
+    if let Some(interval_heads) = &prepass_resources.coarse_interval_heads {
+        let invalid_heads = vec![u32::MAX; prepass_resources.coarse_depth_tile_capacity as usize];
+        render_queue.write_buffer(interval_heads, 0, bytemuck::cast_slice(&invalid_heads));
+    }
+    if let Some(lut) = &prepass_resources.coarse_depth_lut {
+        let zero_lut = vec![
+            GpuCoarseDepthLutEntry::default();
+            (prepass_resources.coarse_depth_tile_capacity * COARSE_DEPTH_SLICES)
+                as usize
+        ];
+        render_queue.write_buffer(lut, 0, bytemuck::cast_slice(&zero_lut));
     }
     if let Some(frustum_table) = &prepass_resources.frustum_table {
         render_queue.write_buffer(frustum_table, 0, bytemuck::cast_slice(&frustum_descs));
@@ -702,6 +693,41 @@ struct GpuFrustumDesc {
     bucket_base: u32,
     bucket_count: u32,
     kind: u32,
+    coarse_depth_tile_base: u32,
+    coarse_depth_tile_count: u32,
+    coarse_tiles_x: u32,
+    coarse_tiles_y: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct GpuCoarseDepthLutEntry {
+    z_min_q: u32,
+    z_max_q: u32,
+    virtual_start_q: u32,
+    virtual_count_q: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct GpuCoarseAssetRange {
+    geo_id: u32,
+    frustum_id: u32,
+    min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
+    z_min_q: u32,
+    z_max_q: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct GpuCoarseIntervalRef {
+    next: u32,
+    range_id: u32,
+    z_min_q: u32,
+    z_max_q: u32,
 }
 
 pub fn create_froxel_config_buffer(device: &RenderDevice, config: &FroxelConfig) -> Buffer {
@@ -791,21 +817,9 @@ fn use_froxel_buffer(
     device: Res<RenderDevice>,
     mut raster_resources: ResMut<StrandRasterizerResources>,
 ) {
-    for (entity, config, extracted_view) in query.iter() {
+    for (entity, config, _extracted_view) in query.iter() {
         let config_buffer = create_froxel_config_buffer(&device, config);
 
-        // Only the active view/camera should drive render target extent.
-        if extracted_view.is_some() {
-            let (target_texture, target_view) = recreate_render_target_texture(&device, config);
-            let (depth_texture, depth_view) = recreate_render_target_depth_texture(&device, config);
-
-            info!("Recreated render target from view froxels: {:?}", config);
-
-            raster_resources.output_texture_resource = Some(target_texture);
-            raster_resources.output_depth_resource = Some(depth_texture);
-            raster_resources.output_texture = Some(target_view);
-            raster_resources.output_depth = Some(depth_view);
-        }
         raster_resources
             .froxel_config_buffer
             .insert(entity, config_buffer);

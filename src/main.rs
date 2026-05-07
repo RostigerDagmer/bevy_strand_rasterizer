@@ -1,4 +1,3 @@
-#![feature(lazy_type_alias)]
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
@@ -94,9 +93,9 @@ fn setup(
         FroxelConfig {
             screen_height: 2160,
             screen_width: 2160,
-            depth_slices: 512,
-            froxel_size_x: 32,
-            froxel_size_y: 32,
+            depth_slices: 16,
+            froxel_size_x: 8,
+            froxel_size_y: 8,
             ..Default::default()
         },
         Transform::from_xyz(-2.0, 4.5, 0.0).looking_at(Vec3::new(-1.0, 1., 0.), Vec3::Y),

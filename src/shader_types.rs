@@ -10,6 +10,7 @@ pub struct PushConstants {
     // pub strand_count: u32, // stub in case we need push constants
     pub workgroup_offset: u32, // For dispatch_workgroup_ext compatibility
     pub num_elements: u32,     // Generic count (e.g., num_strands or num_tiles)
+    pub frustum_count: u32,    // Number of live entries in the frustum table.
     pub scan_load_base: u32,
     pub scan_save_base: u32,
     pub stochastic_cull_enabled: u32,

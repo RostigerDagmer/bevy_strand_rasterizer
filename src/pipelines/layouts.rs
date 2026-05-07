@@ -22,6 +22,10 @@ pub mod prepass {
     pub const CHUNK_POOL: u32 = 23;
     pub const FREE_HEADS: u32 = 24;
     pub const RASTER_WORK_QUEUE: u32 = 25;
+    pub const COARSE_DEPTH_LUT: u32 = 27;
+    pub const COARSE_RANGE_QUEUE: u32 = 28;
+    pub const COARSE_INTERVAL_HEADS: u32 = 29;
+    pub const COARSE_INTERVAL_REFS: u32 = 30;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -48,6 +52,10 @@ pub mod prepass {
             ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),
             ShaderDefVal::UInt("FREE_HEADS".into(), FREE_HEADS),
             ShaderDefVal::UInt("RASTER_WORK_QUEUE".into(), RASTER_WORK_QUEUE),
+            ShaderDefVal::UInt("COARSE_DEPTH_LUT".into(), COARSE_DEPTH_LUT),
+            ShaderDefVal::UInt("COARSE_RANGE_QUEUE".into(), COARSE_RANGE_QUEUE),
+            ShaderDefVal::UInt("COARSE_INTERVAL_HEADS".into(), COARSE_INTERVAL_HEADS),
+            ShaderDefVal::UInt("COARSE_INTERVAL_REFS".into(), COARSE_INTERVAL_REFS),
         ]
     }
 }

@@ -16,6 +16,10 @@ struct FrustumDesc {
     bucket_base: u32,
     bucket_count: u32,
     kind: u32,
+    coarse_depth_tile_base: u32,
+    coarse_depth_tile_count: u32,
+    coarse_tiles_x: u32,
+    coarse_tiles_y: u32,
 }
 
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;

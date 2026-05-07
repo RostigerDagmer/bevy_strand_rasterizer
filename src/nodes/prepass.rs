@@ -111,6 +111,9 @@ impl Node for WorkPreparationNode {
             &prepass_bind_group,
             &dynamic_offsets,
             indirect_args,
+            prepass_resources.frustum_count,
+            prepass_resources.coarse_depth_tile_capacity,
+            prepass_resources.coarse_range_capacity,
         );
         info!("Finished prepass");
 

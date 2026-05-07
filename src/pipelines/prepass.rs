@@ -38,13 +38,21 @@ pub struct StrandPrepassResources {
     pub frustum_table: Option<Buffer>,
     pub froxel_bucket_heads: Option<Buffer>,
     pub raster_work_queue: Option<Buffer>,
+    pub coarse_depth_lut: Option<Buffer>,
+    pub coarse_range_queue: Option<Buffer>,
+    pub coarse_interval_heads: Option<Buffer>,
+    pub coarse_interval_refs: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
     pub geo_capacity: u32,
     pub frustum_capacity: u32,
+    pub frustum_count: u32,
     pub froxel_bucket_capacity: u32,
     pub raster_work_capacity: u32,
+    pub coarse_depth_tile_capacity: u32,
+    pub coarse_range_capacity: u32,
+    pub coarse_interval_ref_capacity: u32,
 }
 
 #[derive(Resource)]
@@ -53,6 +61,8 @@ pub struct StrandPrepassPipeline {
     pub broad_pipeline: Option<CachedComputePipelineId>,
     pub finalize_pipeline: Option<CachedComputePipelineId>,
     pub fine_pipeline: Option<CachedComputePipelineId>,
+    pub coarse_interval_pipeline: Option<CachedComputePipelineId>,
+    pub build_depth_warp_pipeline: Option<CachedComputePipelineId>,
     pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
     pub binning_pipeline: Option<CachedComputePipelineId>,
 }
@@ -104,6 +114,10 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
                 Self::storage_entry(layouts::prepass::FREE_HEADS, false),
                 Self::storage_entry(layouts::prepass::RASTER_WORK_QUEUE, false),
+                Self::storage_entry(layouts::prepass::COARSE_DEPTH_LUT, false),
+                Self::storage_entry(layouts::prepass::COARSE_RANGE_QUEUE, false),
+                Self::storage_entry(layouts::prepass::COARSE_INTERVAL_HEADS, false),
+                Self::storage_entry(layouts::prepass::COARSE_INTERVAL_REFS, false),
             ],
         )
     }
@@ -163,6 +177,18 @@ fn queue_prepass_pipeline(
         ShaderDefVal::UInt("SIZEOF_GEO".into(), std::mem::size_of::<StrandGeo>() as u32),
         ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
         ShaderDefVal::UInt("POOL_NUM_HEADS".into(), BINNING_POOL_NUM_HEADS),
+        ShaderDefVal::UInt(
+            "COARSE_FINE_TILE_EXTENT".into(),
+            crate::plugin::COARSE_FINE_TILE_EXTENT,
+        ),
+        ShaderDefVal::UInt(
+            "COARSE_DEPTH_SLICES".into(),
+            crate::plugin::COARSE_DEPTH_SLICES,
+        ),
+        ShaderDefVal::UInt(
+            "COARSE_MAX_SLICES_PER_ASSET_INTERVAL".into(),
+            crate::plugin::COARSE_MAX_SLICES_PER_ASSET_INTERVAL,
+        ),
     ]);
 
     let max_group = allocator
@@ -202,6 +228,8 @@ impl FromWorld for StrandPrepassPipeline {
             broad_pipeline: None,
             finalize_pipeline: None,
             fine_pipeline: None,
+            coarse_interval_pipeline: None,
+            build_depth_warp_pipeline: None,
             finalize_binning_pipeline: None,
             binning_pipeline: None,
         }
@@ -232,6 +260,10 @@ pub fn create_prepass_bind_group(
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
     let free_heads = resources.free_heads.as_ref().ok_or(())?;
     let raster_work_queue = resources.raster_work_queue.as_ref().ok_or(())?;
+    let coarse_depth_lut = resources.coarse_depth_lut.as_ref().ok_or(())?;
+    let coarse_range_queue = resources.coarse_range_queue.as_ref().ok_or(())?;
+    let coarse_interval_heads = resources.coarse_interval_heads.as_ref().ok_or(())?;
+    let coarse_interval_refs = resources.coarse_interval_refs.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -302,6 +334,22 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_DEPTH_LUT,
+                    resource: coarse_depth_lut.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_RANGE_QUEUE,
+                    resource: coarse_range_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_INTERVAL_HEADS,
+                    resource: coarse_interval_heads.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::COARSE_INTERVAL_REFS,
+                    resource: coarse_interval_refs.as_entire_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -319,6 +367,9 @@ pub fn run_prepass(
     bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
+    frustum_count: u32,
+    coarse_depth_tile_capacity: u32,
+    coarse_range_capacity: u32,
 ) {
     let encoder = render_context.command_encoder();
     let Some(allocator_buffer_bind_group) = &allocator.buffer_bind_group else {
@@ -342,6 +393,14 @@ pub fn run_prepass(
         warn!("Fine prepass pipeline id not ready yet");
         return;
     };
+    let Some(coarse_interval_pipeline_id) = pipeline.coarse_interval_pipeline else {
+        warn!("Coarse interval pipeline id not ready yet");
+        return;
+    };
+    let Some(build_depth_warp_pipeline_id) = pipeline.build_depth_warp_pipeline else {
+        warn!("Depth warp pipeline id not ready yet");
+        return;
+    };
     let Some(finalize_binning_pipeline_id) = pipeline.finalize_binning_pipeline else {
         warn!("Finalize binning pipeline id not ready yet");
         return;
@@ -362,6 +421,18 @@ pub fn run_prepass(
         warn!("Fine prepass pipeline not found");
         return;
     };
+    let Some(coarse_interval_pipeline) =
+        pipeline_cache.get_compute_pipeline(coarse_interval_pipeline_id)
+    else {
+        warn!("Coarse interval pipeline not found");
+        return;
+    };
+    let Some(build_depth_warp_pipeline) =
+        pipeline_cache.get_compute_pipeline(build_depth_warp_pipeline_id)
+    else {
+        warn!("Depth warp pipeline not found");
+        return;
+    };
     let Some(finalize_binning_pipeline) =
         pipeline_cache.get_compute_pipeline(finalize_binning_pipeline_id)
     else {
@@ -377,6 +448,7 @@ pub fn run_prepass(
         ..default()
     });
     let pushconstants = PushConstants {
+        frustum_count,
         stochastic_cull_enabled: u32::from(cull_settings.enabled),
         cull_min_dist: cull_settings.min_dist,
         cull_max_dist: cull_settings.max_dist,
@@ -401,6 +473,24 @@ pub fn run_prepass(
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(fine_pipeline);
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+    let coarse_interval_pushconstants = PushConstants {
+        num_elements: coarse_range_capacity,
+        ..pushconstants
+    };
+    pass.set_pipeline(coarse_interval_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_interval_pushconstants));
+    pass.dispatch_workgroups(coarse_range_capacity, 1, 1);
+    let depth_warp_pushconstants = PushConstants {
+        num_elements: coarse_depth_tile_capacity,
+        ..pushconstants
+    };
+    pass.set_pipeline(build_depth_warp_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&depth_warp_pushconstants));
+    pass.dispatch_workgroups(
+        coarse_depth_tile_capacity.div_ceil(settings.threads_per_workgroup),
+        1,
+        1,
+    );
     pass.set_pipeline(finalize_binning_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(binning_pipeline);
@@ -431,6 +521,8 @@ pub fn update_strand_prepass_pipeline(
     let broad_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let coarse_interval_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let build_depth_warp_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
@@ -465,6 +557,26 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(coarse_interval_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        coarse_interval_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "coarse_interval_pass",
+    ) else {
+        return;
+    };
+    let Some(build_depth_warp_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        build_depth_warp_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "build_depth_warp_lut",
+    ) else {
+        return;
+    };
     let Some(finalize_binning_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         finalize_binning_shader,
@@ -488,13 +600,17 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
     pipeline_res.fine_pipeline = Some(fine_pipeline_id);
+    pipeline_res.coarse_interval_pipeline = Some(coarse_interval_pipeline_id);
+    pipeline_res.build_depth_warp_pipeline = Some(build_depth_warp_pipeline_id);
     pipeline_res.finalize_binning_pipeline = Some(finalize_binning_pipeline_id);
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} finalize_binning={:?} binning={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} binning={:?}",
         broad_pipeline_id,
         finalize_pipeline_id,
         fine_pipeline_id,
+        coarse_interval_pipeline_id,
+        build_depth_warp_pipeline_id,
         finalize_binning_pipeline_id,
         binning_pipeline_id
     );

@@ -43,6 +43,10 @@ const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
 const SIZEOF_GEO: u32 = #SIZEOF_GEO;
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const POOL_NUM_HEADS: u32 = #POOL_NUM_HEADS;
+const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
+const COARSE_DEPTH_SLICES: u32 = #COARSE_DEPTH_SLICES;
+const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = #COARSE_MAX_SLICES_PER_ASSET_INTERVAL;
+const DEPTH_QUANT_MAX: u32 = 16777215u;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const INVALID_PTR: u32 = 0xFFFFFFFFu;
 var<push_constant> pc: PushConstants;
@@ -56,6 +60,46 @@ struct FrustumDesc {
     bucket_base: u32,
     bucket_count: u32,
     kind: u32,
+    coarse_depth_tile_base: u32,
+    coarse_depth_tile_count: u32,
+    coarse_tiles_x: u32,
+    coarse_tiles_y: u32,
+}
+
+struct CoarseDepthLutEntry {
+    z_min_q: u32,
+    z_max_q: u32,
+    virtual_start_q: u32,
+    virtual_count_q: u32,
+}
+
+struct CoarseAssetRange {
+    geo_id: u32,
+    frustum_id: u32,
+    min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
+    z_min_q: u32,
+    z_max_q: u32,
+}
+
+struct CoarseAssetRangeQueue {
+    head: atomic<u32>,
+    tail: atomic<u32>,
+    ranges: array<CoarseAssetRange>,
+}
+
+struct CoarseIntervalRef {
+    next: u32,
+    range_id: u32,
+    z_min_q: u32,
+    z_max_q: u32,
+}
+
+struct CoarseIntervalRefPool {
+    tail: atomic<u32>,
+    refs: array<CoarseIntervalRef>,
 }
 
 struct RasterWorkQueue {
@@ -91,6 +135,10 @@ struct RasterWorkQueue {
 @group(#{PREPASS_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read_write> chunk_pool_words: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
+@group(#{PREPASS_GROUP}) @binding(#{COARSE_DEPTH_LUT}) var<storage, read_write> coarse_depth_lut: array<CoarseDepthLutEntry>;
+@group(#{PREPASS_GROUP}) @binding(#{COARSE_RANGE_QUEUE}) var<storage, read_write> coarse_range_queue: CoarseAssetRangeQueue;
+@group(#{PREPASS_GROUP}) @binding(#{COARSE_INTERVAL_HEADS}) var<storage, read_write> coarse_interval_heads: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{COARSE_INTERVAL_REFS}) var<storage, read_write> coarse_interval_refs: CoarseIntervalRefPool;
 
 fn stochastic_cull_camera(cam: View, aabb: Aabb, sample_threshold: f32) -> bool {
     if pc.stochastic_cull_enabled == 0u {
@@ -195,6 +243,87 @@ fn in_bounds(f: vec3<i32>, max_f: vec3<i32>) -> bool {
     return all(f >= vec3(0)) && all(f < max_f);
 }
 
+fn quantize_depth01(z: f32) -> u32 {
+    return u32(round(clamp(z, 0.0, 1.0) * f32(DEPTH_QUANT_MAX)));
+}
+
+fn emit_coarse_asset_range_for_aabb(geo_id: u32, frustum_id: u32, aabb: Aabb) {
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    if frustum.coarse_depth_tile_count == 0u {
+        return;
+    }
+
+    let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
+    let corners = array<vec4<f32>, 8>(
+        vec4<f32>(aabb.min, 1.0),
+        vec4<f32>(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
+        vec4<f32>(aabb.min.x, aabb.max.y, aabb.min.z, 1.0),
+        vec4<f32>(aabb.min.x, aabb.max.y, aabb.max.z, 1.0),
+        vec4<f32>(aabb.max.x, aabb.min.y, aabb.min.z, 1.0),
+        vec4<f32>(aabb.max.x, aabb.min.y, aabb.max.z, 1.0),
+        vec4<f32>(aabb.max.x, aabb.max.y, aabb.min.z, 1.0),
+        vec4<f32>(aabb.max, 1.0),
+    );
+
+    var screen_min = vec2<f32>(1e30, 1e30);
+    var screen_max = vec2<f32>(-1e30, -1e30);
+    var z_min = 1.0;
+    var z_max = 0.0;
+    var any_corner = false;
+
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let raw = world_to_screen_raw(corners[i], view.unjittered_clip_from_world, viewport);
+        if raw.x < 0.0 {
+            continue;
+        }
+        any_corner = true;
+        screen_min = min(screen_min, raw.xy);
+        screen_max = max(screen_max, raw.xy);
+        let z = to_log_depth(raw.z);
+        z_min = min(z_min, z);
+        z_max = max(z_max, z);
+    }
+
+    if !any_corner {
+        return;
+    }
+    if screen_max.x < 0.0 || screen_max.y < 0.0 || screen_min.x >= viewport.z || screen_min.y >= viewport.w {
+        return;
+    }
+    if z_max < 0.0 || z_min > 1.0 {
+        return;
+    }
+
+    let coarse_tile_px_x = max(1u, frustum.froxel_size_x * COARSE_FINE_TILE_EXTENT);
+    let coarse_tile_px_y = max(1u, frustum.froxel_size_y * COARSE_FINE_TILE_EXTENT);
+    let clamped_min = clamp(screen_min, vec2<f32>(0.0, 0.0), vec2<f32>(viewport.z - 1.0, viewport.w - 1.0));
+    let clamped_max = clamp(screen_max, vec2<f32>(0.0, 0.0), vec2<f32>(viewport.z - 1.0, viewport.w - 1.0));
+    let min_cx = min(u32(clamped_min.x) / coarse_tile_px_x, frustum.coarse_tiles_x - 1u);
+    let max_cx = min(u32(clamped_max.x) / coarse_tile_px_x, frustum.coarse_tiles_x - 1u);
+    let min_cy = min(u32(clamped_min.y) / coarse_tile_px_y, frustum.coarse_tiles_y - 1u);
+    let max_cy = min(u32(clamped_max.y) / coarse_tile_px_y, frustum.coarse_tiles_y - 1u);
+    let min_q = quantize_depth01(z_min);
+    let max_q = quantize_depth01(z_max);
+
+    let range_idx = atomicAdd(&coarse_range_queue.tail, 1u);
+    if range_idx >= arrayLength(&coarse_range_queue.ranges) {
+        return;
+    }
+    coarse_range_queue.ranges[range_idx] = CoarseAssetRange(
+        geo_id,
+        frustum_id,
+        min_cx,
+        max_cx,
+        min_cy,
+        max_cy,
+        min_q,
+        max_q,
+    );
+}
+
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn broad_prepass(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
@@ -226,6 +355,14 @@ fn broad_prepass(
         }
 
         if geo_visible {
+            let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
+            for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
+                let frustum = frustum_table[fi];
+                if frustum.kind <= 1u {
+                    emit_coarse_asset_range_for_aabb(geo_idx, fi, geo.aabb);
+                }
+            }
+
             for (var strand_local = 0u; strand_local < strand_count; strand_local = strand_local + 1u) {
                 let strand_hash = wang_hash(geo_idx + strand_local);
                 let strand_visible = !stochastic_cull_camera(view, geo.aabb, hash_to_unit_float(strand_hash));
@@ -257,6 +394,189 @@ fn finalize_binning() {
     dispatch_args[0] = ceil_div_u32(binning_task_count, FINE_WORKGROUP_SIZE);
     dispatch_args[1] = 1u;
     dispatch_args[2] = 1u;
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn coarse_interval_pass(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    let range_idx = workgroup_id.x;
+    let range_count = atomicLoad(&coarse_range_queue.tail);
+    if range_idx >= pc.num_elements || range_idx >= range_count || range_idx >= arrayLength(&coarse_range_queue.ranges) {
+        return;
+    }
+
+    let range = coarse_range_queue.ranges[range_idx];
+    if range.frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[range.frustum_id];
+    if frustum.coarse_depth_tile_count == 0u || range.max_x < range.min_x || range.max_y < range.min_y {
+        return;
+    }
+
+    let width = range.max_x - range.min_x + 1u;
+    let height = range.max_y - range.min_y + 1u;
+    let covered = width * height;
+    var covered_idx = local_id.x;
+    while covered_idx < covered {
+        let dx = covered_idx % width;
+        let dy = covered_idx / width;
+        let cx = range.min_x + dx;
+        let cy = range.min_y + dy;
+        let local_tile = cy * frustum.coarse_tiles_x + cx;
+        if local_tile < frustum.coarse_depth_tile_count {
+            let tile_idx = frustum.coarse_depth_tile_base + local_tile;
+            if tile_idx < arrayLength(&coarse_interval_heads) {
+                let ref_idx = atomicAdd(&coarse_interval_refs.tail, 1u);
+                if ref_idx < arrayLength(&coarse_interval_refs.refs) {
+                    let prev = atomicExchange(&coarse_interval_heads[tile_idx], ref_idx);
+                    coarse_interval_refs.refs[ref_idx] = CoarseIntervalRef(
+                        prev,
+                        range_idx,
+                        range.z_min_q,
+                        range.z_max_q,
+                    );
+                }
+            }
+        }
+        covered_idx = covered_idx + WORKGROUP_SIZE;
+    }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn build_depth_warp_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let tile_idx = gid.x;
+    if tile_idx >= pc.num_elements || tile_idx >= arrayLength(&coarse_interval_heads) {
+        return;
+    }
+
+    let base = tile_idx * COARSE_DEPTH_SLICES;
+    if base + COARSE_DEPTH_SLICES > arrayLength(&coarse_depth_lut) {
+        return;
+    }
+
+    var interval_mins: array<u32, COARSE_DEPTH_SLICES>;
+    var interval_maxs: array<u32, COARSE_DEPTH_SLICES>;
+    var interval_count = 0u;
+    var ref_idx = atomicLoad(&coarse_interval_heads[tile_idx]);
+    var guard = 0u;
+    loop {
+        if ref_idx == INVALID_PTR || ref_idx >= arrayLength(&coarse_interval_refs.refs) || guard >= 256u {
+            break;
+        }
+        let interval_ref = coarse_interval_refs.refs[ref_idx];
+        var z_min = min(interval_ref.z_min_q, interval_ref.z_max_q);
+        var z_max = max(interval_ref.z_min_q, interval_ref.z_max_q);
+        var merged = false;
+        for (var i = 0u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
+            if i >= interval_count {
+                break;
+            }
+            if z_min <= interval_maxs[i] + 1u && z_max + 1u >= interval_mins[i] {
+                interval_mins[i] = min(interval_mins[i], z_min);
+                interval_maxs[i] = max(interval_maxs[i], z_max);
+                merged = true;
+            }
+        }
+        if !merged {
+            if interval_count < COARSE_DEPTH_SLICES {
+                interval_mins[interval_count] = z_min;
+                interval_maxs[interval_count] = z_max;
+                interval_count = interval_count + 1u;
+            } else {
+                var best = 0u;
+                var best_gap = 0xFFFFFFFFu;
+                for (var i = 0u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
+                    let gap = select(
+                        interval_mins[i] - z_max,
+                        z_min - interval_maxs[i],
+                        interval_maxs[i] < z_min,
+                    );
+                    if gap < best_gap {
+                        best_gap = gap;
+                        best = i;
+                    }
+                }
+                interval_mins[best] = min(interval_mins[best], z_min);
+                interval_maxs[best] = max(interval_maxs[best], z_max);
+            }
+        }
+        ref_idx = interval_ref.next;
+        guard = guard + 1u;
+    }
+
+    if interval_count == 0u {
+        for (var i = 0u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
+            coarse_depth_lut[base + i] = CoarseDepthLutEntry(0u, 0u, 0u, 0u);
+        }
+        return;
+    }
+
+    for (var i = 1u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
+        if i >= interval_count {
+            break;
+        }
+        var j = i;
+        let key_min = interval_mins[i];
+        let key_max = interval_maxs[i];
+        loop {
+            if j == 0u || interval_mins[j - 1u] <= key_min {
+                break;
+            }
+            interval_mins[j] = interval_mins[j - 1u];
+            interval_maxs[j] = interval_maxs[j - 1u];
+            j = j - 1u;
+        }
+        interval_mins[j] = key_min;
+        interval_maxs[j] = key_max;
+    }
+
+    // TODO: Replace this equal-share cap with a proportional slice_count_for_interval policy
+    // once we have a test scene with wide-depth assets and separated overlapping intervals.
+    let capped_slices_per_interval = max(
+        1u,
+        min(
+            COARSE_MAX_SLICES_PER_ASSET_INTERVAL,
+            max(1u, COARSE_DEPTH_SLICES / interval_count),
+        ),
+    );
+    var out_slice = 0u;
+    for (var interval_idx = 0u; interval_idx < COARSE_DEPTH_SLICES; interval_idx = interval_idx + 1u) {
+        if interval_idx >= interval_count {
+            break;
+        }
+        let slice_count = capped_slices_per_interval;
+        let z_min = interval_mins[interval_idx];
+        let z_max = interval_maxs[interval_idx];
+        let span = max(1u, z_max - z_min + 1u);
+        for (var local_slice = 0u; local_slice < COARSE_DEPTH_SLICES; local_slice = local_slice + 1u) {
+            if local_slice >= slice_count || out_slice >= COARSE_DEPTH_SLICES {
+                break;
+            }
+            let start_q = z_min + (span * local_slice) / slice_count;
+            let exclusive_end_q = z_min + (span * (local_slice + 1u)) / slice_count;
+            let end_q = min(select(start_q, exclusive_end_q - 1u, exclusive_end_q > start_q), z_max);
+            coarse_depth_lut[base + out_slice] = CoarseDepthLutEntry(
+                start_q,
+                end_q,
+                start_q,
+                max(1u, end_q - start_q + 1u),
+            );
+            out_slice = out_slice + 1u;
+        }
+    }
+    while out_slice < COARSE_DEPTH_SLICES {
+        let fallback_interval = interval_count - 1u;
+        coarse_depth_lut[base + out_slice] = CoarseDepthLutEntry(
+            interval_mins[fallback_interval],
+            interval_maxs[fallback_interval],
+            interval_mins[fallback_interval],
+            max(1u, interval_maxs[fallback_interval] - interval_mins[fallback_interval] + 1u),
+        );
+        out_slice = out_slice + 1u;
+    }
 }
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
@@ -293,7 +613,7 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let segment_count = strand_meta.count - 1u;
-    let frustum_count = arrayLength(&frustum_table);
+    let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
 
     for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
         let frustum = frustum_table[fi];
