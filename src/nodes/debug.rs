@@ -8,8 +8,8 @@ use bevy::{
     },
 };
 use wgpu::{
-    BindGroupEntry, Color, LoadOp, Operations, RenderPassColorAttachment, RenderPassDescriptor,
-    StoreOp, util::BufferInitDescriptor,
+    BindGroupEntry, BindingResource, LoadOp, Operations, RenderPassColorAttachment,
+    RenderPassDescriptor, StoreOp, util::BufferInitDescriptor,
 };
 
 use crate::{
@@ -97,6 +97,7 @@ impl Node for TileDebugNode {
                     usage: bevy::render::render_resource::BufferUsages::UNIFORM,
                 });
 
+        let post_process = view_target.post_process_write();
         let bind_group = render_context.render_device().create_bind_group(
             "tile_debug_bind_group",
             &pipeline_res.layout,
@@ -125,17 +126,24 @@ impl Node for TileDebugNode {
                     binding: layouts::tile_debug::PARAMS,
                     resource: params_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::tile_debug::INPUT_TEXTURE,
+                    resource: BindingResource::TextureView(post_process.source),
+                },
+                BindGroupEntry {
+                    binding: layouts::tile_debug::INPUT_SAMPLER,
+                    resource: BindingResource::Sampler(&pipeline_res.sampler),
+                },
             ],
         );
 
-        let post_process = view_target.post_process_write();
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("tile_debug_pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: post_process.destination,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Clear(Color::BLACK),
+                    load: LoadOp::Load,
                     store: StoreOp::Store,
                 },
                 depth_slice: None,

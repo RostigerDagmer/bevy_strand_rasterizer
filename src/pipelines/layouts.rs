@@ -287,6 +287,8 @@ pub mod tile_debug {
     pub const COARSE_COUNT_PAGE_TABLE: u32 = 3;
     pub const COARSE_COUNT_PAGES: u32 = 4;
     pub const PARAMS: u32 = 5;
+    pub const INPUT_TEXTURE: u32 = 6;
+    pub const INPUT_SAMPLER: u32 = 7;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -296,6 +298,8 @@ pub mod tile_debug {
             ShaderDefVal::UInt("COARSE_COUNT_PAGE_TABLE".into(), COARSE_COUNT_PAGE_TABLE),
             ShaderDefVal::UInt("COARSE_COUNT_PAGES".into(), COARSE_COUNT_PAGES),
             ShaderDefVal::UInt("PARAMS".into(), PARAMS),
+            ShaderDefVal::UInt("INPUT_TEXTURE".into(), INPUT_TEXTURE),
+            ShaderDefVal::UInt("INPUT_SAMPLER".into(), INPUT_SAMPLER),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
             ShaderDefVal::UInt("COARSE_FINE_TILE_EXTENT".into(), COARSE_FINE_TILE_EXTENT),
             ShaderDefVal::UInt("COARSE_DEPTH_SLICES".into(), COARSE_DEPTH_SLICES),

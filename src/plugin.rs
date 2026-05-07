@@ -178,6 +178,10 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::composite::CompositionLabel,
             )
+            .add_render_graph_node::<nodes::debug::TileDebugNode>(
+                Core3d,
+                nodes::debug::TileDebugLabel,
+            )
             .add_render_graph_edge(
                 Core3d,
                 bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass,
@@ -206,6 +210,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::composite::CompositionLabel,
+                nodes::debug::TileDebugLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::debug::TileDebugLabel,
                 bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
             );
     }

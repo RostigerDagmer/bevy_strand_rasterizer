@@ -40,6 +40,8 @@ struct CoarseCountPages {
 @group(0) @binding(#{COARSE_COUNT_PAGE_TABLE}) var<storage, read> coarse_count_page_table: array<u32>;
 @group(0) @binding(#{COARSE_COUNT_PAGES}) var<storage, read> coarse_count_pages: CoarseCountPages;
 @group(0) @binding(#{PARAMS}) var<uniform> params: TileDebugParams;
+@group(0) @binding(#{INPUT_TEXTURE}) var input_texture: texture_2d<f32>;
+@group(0) @binding(#{INPUT_SAMPLER}) var input_sampler: sampler;
 
 fn heatmap_precise(value: f32) -> vec3<f32> {
     let v = clamp(value, 0.0, 1.0);
@@ -61,12 +63,13 @@ fn heatmap_precise(value: f32) -> vec3<f32> {
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let scene_color = textureSample(input_texture, input_sampler, in.uv);
     if params.frustum_id >= arrayLength(&frustum_table) {
-        return vec4<f32>(0.0);
+        return scene_color;
     }
     let config = frustum_table[params.frustum_id];
     if config.screen_width == 0u || config.screen_height == 0u {
-        return vec4<f32>(0.0);
+        return scene_color;
     }
 
     let sx = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(config.screen_width)), config.screen_width - 1u);
@@ -99,10 +102,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     if frag_count == 0u {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        return scene_color;
     }
 
     let norm = clamp(f32(frag_count) * params.inv_norm * params.gain, 0.0, 1.0);
     let debug_color = heatmap_precise(norm);
-    return vec4<f32>(debug_color, params.alpha);
+    return vec4<f32>(mix(scene_color.rgb, debug_color, params.alpha), scene_color.a);
 }

@@ -8,8 +8,9 @@ use bevy::{
             BindingType, BlendState, BufferBindingType, BufferInitDescriptor,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp,
             MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
-            RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, StoreOp,
-            TextureFormat,
+            RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+            SamplerDescriptor, ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType,
+            TextureViewDimension,
         },
         renderer::RenderContext,
         view::ViewTarget,
@@ -32,6 +33,7 @@ pub struct TileDebugParams {
 pub struct TileDebugPipeline {
     pub layout: BindGroupLayout,
     pub pipeline: CachedRenderPipelineId,
+    pub sampler: Sampler,
 }
 
 impl FromWorld for TileDebugPipeline {
@@ -102,10 +104,27 @@ impl FromWorld for TileDebugPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::tile_debug::INPUT_TEXTURE,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::tile_debug::INPUT_SAMPLER,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         );
         let layout = render_device
             .create_bind_group_layout(layout_descriptor.label.as_ref(), &layout_descriptor.entries);
+        let sampler = render_device.create_sampler(&SamplerDescriptor::default());
 
         let shader = world
             .resource::<AssetServer>()
@@ -133,6 +152,10 @@ impl FromWorld for TileDebugPipeline {
             zero_initialize_workgroup_memory: false,
         });
 
-        Self { layout, pipeline }
+        Self {
+            layout,
+            pipeline,
+            sampler,
+        }
     }
 }
