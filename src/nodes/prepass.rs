@@ -10,6 +10,7 @@ use bevy::{
     },
 };
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_vsms::request::VirtualSurfaceRequestBitmapRuntime;
 
 use crate::{
     pipelines::prepass::{
@@ -38,6 +39,7 @@ impl Node for WorkPreparationNode {
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
+        let request_runtime = world.resource::<VirtualSurfaceRequestBitmapRuntime>();
         let invocation_dims = world.resource::<ComputeInvocationDims>();
         let cull_settings = world.resource::<StochasticCullSettings>();
         let view_uniforms = world.resource::<ViewUniforms>();
@@ -93,6 +95,7 @@ impl Node for WorkPreparationNode {
             &cluster_indices_binding,
             &cluster_offsets_binding,
             &clusterable_objects,
+            request_runtime,
         ) else {
             warn!("Failed to create prepass bind groups.");
             return Ok(());

@@ -10,6 +10,7 @@
     l_and,
     normalize_depth01,
     to_log_depth,
+    to_reverse_log_depth,
 }
 
 #import "shaders/types.wgsl"::{
@@ -35,6 +36,11 @@
     unpack_binning_frustum,
 }
 
+#import bevy_vsms::virtual_surface_types::{
+    VirtualSurfaceRequestMetaRow,
+    vsms_request_local_tile_index,
+}
+
 #import "shaders/queues.wgsl"::{
     FinePrepassQueue,
     BinningQueue,
@@ -50,6 +56,7 @@ const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const COARSE_DEPTH_SLICES: u32 = #COARSE_DEPTH_SLICES;
 const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = #COARSE_MAX_SLICES_PER_ASSET_INTERVAL;
 const COARSE_COUNT_PAGE_SIZE: u32 = #COARSE_COUNT_PAGE_SIZE;
+const DOM_PAGE_XY: u32 = #DOM_PAGE_XY;
 const DEPTH_QUANT_MAX: u32 = 16777215u;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const INVALID_PTR: u32 = 0xFFFFFFFFu;
@@ -182,6 +189,9 @@ struct FineSegRefBuffer {
 @group(#{PREPASS_GROUP}) @binding(#{FINE_SEG_REFS}) var<storage, read_write> fine_seg_refs: FineSegRefBuffer;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_TILE_WORK_COUNTS}) var<storage, read_write> coarse_tile_work_counts: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_TILE_WORK_OFFSETS}) var<storage, read_write> coarse_tile_work_offsets: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{VSMS_REQUEST_META}) var<storage, read> vsms_request_meta: array<VirtualSurfaceRequestMetaRow>;
+@group(#{PREPASS_GROUP}) @binding(#{VSMS_REQUEST_BITS}) var<storage, read_write> vsms_request_bits: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 
 fn stochastic_cull_camera(cam: View, aabb: Aabb, world_from_local: mat4x4<f32>, sample_threshold: f32) -> bool {
     if pc.stochastic_cull_enabled == 0u {
@@ -206,6 +216,42 @@ fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
         desc.froxel_size_y,
         desc.depth_slices,
     );
+}
+
+fn light_layer_from_frustum(frustum_id: u32) -> u32 {
+    if frustum_id >= arrayLength(&frustum_table) {
+        return INVALID_PTR;
+    }
+    if frustum_table[frustum_id].kind != 1u {
+        return INVALID_PTR;
+    }
+    var layer = 0u;
+    for (var i = 0u; i < frustum_id; i = i + 1u) {
+        if frustum_table[i].kind == 1u {
+            layer = layer + 1u;
+        }
+    }
+    if layer >= lights.n_directional_lights {
+        return INVALID_PTR;
+    }
+    return layer;
+}
+
+fn clip_from_world_for_frustum(frustum_id: u32) -> mat4x4<f32> {
+    if frustum_id < arrayLength(&frustum_table) && frustum_table[frustum_id].kind == 1u {
+        let light_layer = light_layer_from_frustum(frustum_id);
+        if light_layer < lights.n_directional_lights {
+            return lights.directional_lights[light_layer].cascades[0].clip_from_world;
+        }
+    }
+    return view.unjittered_clip_from_world;
+}
+
+fn depth_key_for_frustum(raw_z: f32, frustum: FrustumDesc) -> f32 {
+    if frustum.kind == 1u {
+        return to_reverse_log_depth(raw_z);
+    }
+    return to_log_depth(raw_z);
 }
 
 fn chunk_capacity() -> u32 {
@@ -302,8 +348,12 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
     if frustum.coarse_depth_tile_count == 0u {
         return;
     }
+    if frustum.kind == 1u && light_layer_from_frustum(frustum_id) == INVALID_PTR {
+        return;
+    }
 
     let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
+    let clip_from_world = clip_from_world_for_frustum(frustum_id);
     let corners = array<vec4<f32>, 8>(
         world_from_local * vec4<f32>(aabb.min, 1.0),
         world_from_local * vec4<f32>(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
@@ -323,7 +373,7 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
     var clipped_by_near = false;
 
     for (var i = 0u; i < 8u; i = i + 1u) {
-        let clip = view.unjittered_clip_from_world * corners[i];
+        let clip = clip_from_world * corners[i];
         if clip.w <= 1e-6 {
             clipped_by_near = true;
             continue;
@@ -342,7 +392,7 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
         any_corner = true;
         screen_min = min(screen_min, raw.xy);
         screen_max = max(screen_max, raw.xy);
-        let z = to_log_depth(raw.z);
+        let z = depth_key_for_frustum(raw.z, frustum);
         z_min = min(z_min, z);
         z_max = max(z_max, z);
     }
@@ -1204,7 +1254,13 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
 
     let vertex_base = vertex_ptr.offset / 16u;
     let index_base = index_ptr.offset / 4u;
-    let clip_from_world = view.unjittered_clip_from_world;
+    if frustum.kind == 1u {
+        let light_layer = light_layer_from_frustum(frustum_id);
+        if light_layer == INVALID_PTR {
+            return;
+        }
+    }
+    let clip_from_world = clip_from_world_for_frustum(frustum_id);
     let viewport = vec4<f32>(0.0, 0.0, f32(frustum_cfg.screen_width), f32(frustum_cfg.screen_height));
 
     let vi0 = indices[index_ptr.slab].is[index_base + task.seg_idx];
@@ -1221,8 +1277,8 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
         clip_from_world,
         viewport,
     );
-    let p0 = vec3<f32>(p0_raw.xy, to_log_depth(p0_raw.z));
-    let p1 = vec3<f32>(p1_raw.xy, to_log_depth(p1_raw.z));
+    let p0 = vec3<f32>(p0_raw.xy, depth_key_for_frustum(p0_raw.z, frustum));
+    let p1 = vec3<f32>(p1_raw.xy, depth_key_for_frustum(p1_raw.z, frustum));
 
     visit_segment_asset_coarse_tiles(p0, p1, frustum, frustum_id, inst_id, mark_only, fill_refs, task);
 }
@@ -1423,6 +1479,43 @@ fn raster_depth_key(page_table_idx: u32, fine_z: u32) -> u32 {
     return lut.virtual_start_q + (lut.virtual_count_q * fine_z) / COARSE_DEPTH_SLICES;
 }
 
+fn mark_vsms_request(surface_id: u32, page_tile: vec3<u32>) {
+    if surface_id == INVALID_PTR || surface_id >= arrayLength(&vsms_request_meta) {
+        return;
+    }
+    let request_row = vsms_request_meta[surface_id];
+    let addr = vsms_request_local_tile_index(request_row, page_tile, 0u, 0u);
+    if addr.valid == 0u || addr.word_index >= arrayLength(&vsms_request_bits) {
+        return;
+    }
+    atomicOr(&vsms_request_bits[addr.word_index], addr.bit_mask);
+}
+
+fn request_shadow_dom_pages(frustum_id: u32, frustum: FrustumDesc, fine_x: u32, fine_y: u32) {
+    if frustum.kind != 1u || frustum_id >= arrayLength(&shadow_dom_surface_ids) {
+        return;
+    }
+    let surface_ids = shadow_dom_surface_ids[frustum_id];
+    if surface_ids.x == INVALID_PTR || surface_ids.y == INVALID_PTR {
+        return;
+    }
+
+    let pixel_min_x = fine_x * frustum.froxel_size_x;
+    let pixel_min_y = fine_y * frustum.froxel_size_y;
+    let pixel_max_x = min(pixel_min_x + frustum.froxel_size_x - 1u, frustum.screen_width - 1u);
+    let pixel_max_y = min(pixel_min_y + frustum.froxel_size_y - 1u, frustum.screen_height - 1u);
+    let page_min = vec2<u32>(pixel_min_x / DOM_PAGE_XY, pixel_min_y / DOM_PAGE_XY);
+    let page_max = vec2<u32>(pixel_max_x / DOM_PAGE_XY, pixel_max_y / DOM_PAGE_XY);
+
+    for (var py = page_min.y; py <= page_max.y; py = py + 1u) {
+        for (var px = page_min.x; px <= page_max.x; px = px + 1u) {
+            let page_tile = vec3<u32>(px, py, 0u);
+            mark_vsms_request(surface_ids.x, page_tile);
+            mark_vsms_request(surface_ids.y, page_tile);
+        }
+    }
+}
+
 @compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
 fn emit_raster_work(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
@@ -1484,6 +1577,7 @@ fn emit_raster_work(
                     if seg_ref_count == 0u {
                         continue;
                     }
+                    request_shadow_dom_pages(frustum_id, frustum, fine_x, fine_y);
                     if write_idx >= write_end || write_idx >= arrayLength(&raster_work_queue.items) {
                         return;
                     }

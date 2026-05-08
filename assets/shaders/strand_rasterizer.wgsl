@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 // #import "shaders/spline.wgsl"::{ intersect_catmull_rom_spline_3d, closest_point };
-#import "shaders/common.wgsl"::{ DOM_GAMMA, is_valid_ptr, find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index, normalize_depth01, to_log_depth, }
+#import "shaders/common.wgsl"::{ DOM_GAMMA, is_valid_ptr, find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index, normalize_depth01, to_log_depth, to_reverse_log_depth, }
 #import "shaders/types.wgsl"::{
     Aabb,
     DevicePtr,
@@ -22,6 +22,11 @@
 #import "shaders/task_contract.wgsl"::{
     RasterWorkItem,
     FineSegRef,
+}
+#import bevy_vsms::virtual_surface_types::{
+    VirtualPageTableEntry,
+    VirtualPageTableMetaRow,
+    vsms_virtual_page_table_address,
 }
 
 const MAX_TEXTURE_EXT: u32 = #MAX_TEXTURE_EXTENT;
@@ -91,6 +96,9 @@ struct FineSegRefBuffer {
 @group(#{RASTER_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 @group(#{RASTER_GROUP}) @binding(#{COARSE_TILE_WORK_COUNTS}) var<storage, read> coarse_tile_work_counts: array<u32>;
 @group(#{RASTER_GROUP}) @binding(#{COARSE_TILE_WORK_OFFSETS}) var<storage, read> coarse_tile_work_offsets: array<u32>;
+#ifdef LINEAR
+@group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+#endif
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
@@ -113,6 +121,17 @@ fn fragment_position_line_relative(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> 
     let t = dot(p - a, b - a) / l2_sq;
 
     return t;
+}
+
+fn perspective_correct_line_t(t_screen: f32, w0: f32, w1: f32) -> f32 {
+    let t = clamp(t_screen, 0.0, 1.0);
+    let inv_w0 = 1.0 / max(abs(w0), 1e-6);
+    let inv_w1 = 1.0 / max(abs(w1), 1e-6);
+    let denom = (1.0 - t) * inv_w0 + t * inv_w1;
+    if denom <= 1e-6 {
+        return t;
+    }
+    return (t * inv_w1) / denom;
 }
 
 // Helper: Basic alpha blending (foreground "over" background)
@@ -230,8 +249,12 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
 
 #ifdef SHADOWS
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
-@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps: texture_storage_3d<r32float, write>; // TODO: maybe find a more compact format
-@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps_depth: texture_storage_2d_array<r32float, write>; // TODO: maybe find a more compact format
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps: binding_array<texture_storage_3d<r32float, write> >;
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps_depth: binding_array<texture_storage_2d_array<r32float, write> >;
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> opacity_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> opacity_virtual_pages: array<VirtualPageTableEntry>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> depth_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> depth_virtual_pages: array<VirtualPageTableEntry>;
 
 fn light_layer_from_frustum(frustum_id: u32) -> u32 {
     if frustum_id >= arrayLength(&frustum_table) {
@@ -273,9 +296,21 @@ fn rasterize_strands(
     if light_layer >= lights.n_directional_lights {
         return;
     }
+    let opacity_surface_id = pc.scan_save_base;
+    let depth_surface_id = pc.workgroup_offset;
+    if opacity_surface_id >= arrayLength(&opacity_virtual_meta) || depth_surface_id >= arrayLength(&depth_virtual_meta) {
+        return;
+    }
+    let opacity_meta = opacity_virtual_meta[opacity_surface_id];
+    let depth_meta = depth_virtual_meta[depth_surface_id];
+    if opacity_meta.entry_count == 0u || depth_meta.entry_count == 0u {
+        return;
+    }
     let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
     let active_config = frustum_to_config(active_desc);
     let total_pixels = active_config.screen_width * active_config.screen_height;
+    let light_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
+    let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
     let linear_local = local_id.x;
     let linear_wg = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
     let thread_idx = linear_wg * WORKGROUP_SIZE + linear_local;
@@ -286,57 +321,82 @@ fn rasterize_strands(
             pixel_idx % active_config.screen_width,
             pixel_idx / active_config.screen_width,
         );
-        let px_i = vec2<i32>(px_u);
+        let px_i = vec2<i32>(i32(px_u.x), i32(px_u.y));
         let px_f = vec2<f32>(px_u) + vec2(0.5, 0.5);
         let tile_coord_x = px_u.x / active_config.froxel_size_x;
         let tile_coord_y = px_u.y / active_config.froxel_size_y;
+        let screen_tile_id = tile_coord_y * fine_tiles_x + tile_coord_x;
+        let coarse_x = tile_coord_x / COARSE_FINE_TILE_EXTENT;
+        let coarse_y = tile_coord_y / COARSE_FINE_TILE_EXTENT;
+        if coarse_x >= active_desc.coarse_tiles_x || coarse_y >= active_desc.coarse_tiles_y {
+            continue;
+        }
+        let coarse_tile_idx = active_desc.coarse_depth_tile_base + coarse_y * active_desc.coarse_tiles_x + coarse_x;
+        if coarse_tile_idx >= arrayLength(&coarse_tile_work_counts) || coarse_tile_idx >= arrayLength(&coarse_tile_work_offsets) {
+            continue;
+        }
+        let work_base = coarse_tile_work_offsets[coarse_tile_idx];
+        let work_count = coarse_tile_work_counts[coarse_tile_idx];
+        let work_end = min(work_base + work_count, arrayLength(&raster_work_queue.items));
 
-        // Pass 1: determine nearest depth at this pixel (z0).
-        var z0 = 1e9;
-        for (var dz = 0u; dz < active_config.depth_slices; dz = dz + 1u) {
-            let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
-            if local_froxel_idx >= active_desc.bucket_count {
+        let opacity_page_size = vec3<u32>(
+            max(opacity_meta.page_size_x, 1u),
+            max(opacity_meta.page_size_y, 1u),
+            max(opacity_meta.page_size_z, 1u),
+        );
+        let depth_page_size = vec2<u32>(
+            max(depth_meta.page_size_x, 1u),
+            max(depth_meta.page_size_y, 1u),
+        );
+        let opacity_tile = vec3<u32>(px_u.x / opacity_page_size.x, px_u.y / opacity_page_size.y, 0u);
+        let depth_tile = vec3<u32>(px_u.x / depth_page_size.x, px_u.y / depth_page_size.y, 0u);
+        let opacity_addr = vsms_virtual_page_table_address(opacity_meta, opacity_tile, 0u, 0u);
+        let depth_addr = vsms_virtual_page_table_address(depth_meta, depth_tile, 0u, 0u);
+        if opacity_addr.valid == 0u || depth_addr.valid == 0u {
+            continue;
+        }
+        if opacity_addr.entry_index >= arrayLength(&opacity_virtual_pages) || depth_addr.entry_index >= arrayLength(&depth_virtual_pages) {
+            continue;
+        }
+        let opacity_entry = opacity_virtual_pages[opacity_addr.entry_index];
+        let depth_entry = depth_virtual_pages[depth_addr.entry_index];
+        if opacity_entry.valid == 0u || depth_entry.valid == 0u {
+            continue;
+        }
+        let opacity_px = vec2<i32>(
+            i32(px_u.x % opacity_page_size.x),
+            i32(px_u.y % opacity_page_size.y),
+        );
+        let depth_px = vec2<i32>(
+            i32(px_u.x % depth_page_size.x),
+            i32(px_u.y % depth_page_size.y),
+        );
+
+        // Pass 1: determine nearest depth at this pixel (z0). Bevy directional
+        // light projections use reverse-Z, where larger values are closer.
+        var z0 = -1.0;
+        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+            let work_item = raster_work_queue.items[work_idx];
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
                 continue;
             }
-            let bucket_idx = active_desc.bucket_base + local_froxel_idx;
-            if bucket_idx >= arrayLength(&froxel_bucket_heads) {
-                continue;
-            }
-            var chunk_idx = atomicLoad(&froxel_bucket_heads[bucket_idx]);
-            loop {
-                if chunk_idx == 0xFFFFFFFFu {
-                    break;
-                }
-                let chunk_word_base = chunk_idx * CHUNK_WORD_STRIDE;
-                if chunk_word_base + 1u >= arrayLength(&chunk_pool_words) {
-                    break;
-                }
-                let next_chunk = chunk_pool_words[chunk_word_base];
-                let item_count = min(chunk_pool_words[chunk_word_base + 1u], POOL_CHUNK_SIZE);
-                for (var ci = 0u; ci < item_count; ci = ci + 1u) {
-                    let payload_idx = chunk_word_base + 2u + ci;
-                    if payload_idx >= arrayLength(&chunk_pool_words) {
+            let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
+                    let seg_ref = fine_seg_refs.refs[ref_idx];
+                    let inst_id = seg_ref.inst_id;
+                    if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let work_idx = chunk_pool_words[payload_idx];
-                    if work_idx >= arrayLength(&raster_work_queue.items) {
-                        continue;
-                    }
-                    let work_item = raster_work_queue.items[work_idx];
-                    if work_item.frustum_id != active_frustum_id {
-                        continue;
-                    }
-                    let inst_id = work_item.inst_id;
                     let asset_id = strand_instances[inst_id].asset_id;
-                    let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
+                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
                     let V = get_segment_vertices(inst_id, asset_id, segment_ref);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
                         continue;
                     }
-                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
-                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
+                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
+                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
                     let p0 = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
                     let p1 = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
                     let t = fragment_position_line_relative(px_f, p0.xy, p1.xy);
@@ -349,17 +409,16 @@ fn rasterize_strands(
                     if cov <= 0.0 {
                         continue;
                     }
-                    z0 = min(z0, p.z);
-                }
-                chunk_idx = next_chunk;
+                    z0 = max(z0, p.z);
             }
         }
 
-        let z_base = light_layer * DOM_SLICES;
-        if z0 == 1e9 {
-            textureStore(deep_opacity_maps_depth, px_i, i32(light_layer), vec4<f32>(1.0, 0.0, 0.0, 0.0));
+        if z0 < 0.0 {
+            textureStore(deep_opacity_maps_depth[i32(depth_entry.physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
             for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
-                textureStore(deep_opacity_maps, vec3<i32>(px_i, i32(z_base + i)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+                if i < opacity_page_size.z {
+                    textureStore(deep_opacity_maps[i32(opacity_entry.physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+                }
             }
             continue;
         }
@@ -369,53 +428,31 @@ fn rasterize_strands(
         for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
             alpha[i] = 0.0;
         }
-        let span = max(1e-6, 1.0 - z0);
+        let span = max(1e-6, z0);
         let inv_span = 1.0 / span;
 
-        for (var dz = 0u; dz < active_config.depth_slices; dz = dz + 1u) {
-            let local_froxel_idx = calculate_froxel_index(tile_coord_x, tile_coord_y, dz, active_config);
-            if local_froxel_idx >= active_desc.bucket_count {
+        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+            let work_item = raster_work_queue.items[work_idx];
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
                 continue;
             }
-            let bucket_idx = active_desc.bucket_base + local_froxel_idx;
-            if bucket_idx >= arrayLength(&froxel_bucket_heads) {
-                continue;
-            }
-            var chunk_idx = atomicLoad(&froxel_bucket_heads[bucket_idx]);
-            loop {
-                if chunk_idx == 0xFFFFFFFFu {
-                    break;
-                }
-                let chunk_word_base = chunk_idx * CHUNK_WORD_STRIDE;
-                if chunk_word_base + 1u >= arrayLength(&chunk_pool_words) {
-                    break;
-                }
-                let next_chunk = chunk_pool_words[chunk_word_base];
-                let item_count = min(chunk_pool_words[chunk_word_base + 1u], POOL_CHUNK_SIZE);
-                for (var ci = 0u; ci < item_count; ci = ci + 1u) {
-                    let payload_idx = chunk_word_base + 2u + ci;
-                    if payload_idx >= arrayLength(&chunk_pool_words) {
+            let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
+                    let seg_ref = fine_seg_refs.refs[ref_idx];
+                    let inst_id = seg_ref.inst_id;
+                    if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let work_idx = chunk_pool_words[payload_idx];
-                    if work_idx >= arrayLength(&raster_work_queue.items) {
-                        continue;
-                    }
-                    let work_item = raster_work_queue.items[work_idx];
-                    if work_item.frustum_id != active_frustum_id {
-                        continue;
-                    }
-                    let inst_id = work_item.inst_id;
                     let asset_id = strand_instances[inst_id].asset_id;
-                    let segment_ref = SegmentRef(work_item.strand_id, work_item.seg_id);
+                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
                     let V = get_segment_vertices(inst_id, asset_id, segment_ref);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
                         continue;
                     }
-                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
-                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height)));
+                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
+                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
                     let p0 = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
                     let p1 = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
                     let t = fragment_position_line_relative(px_f, p0.xy, p1.xy);
@@ -430,7 +467,7 @@ fn rasterize_strands(
                     }
 
                     let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
-                    let dzp = max(0.0, p.z - z0) * inv_span;
+                    let dzp = max(0.0, z0 - p.z) * inv_span;
                     let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(DOM_SLICES);
                     let si = min(u32(floor(tL)), DOM_SLICES - 1u);
@@ -443,20 +480,143 @@ fn rasterize_strands(
                         let a1 = alpha[si + 1u];
                         alpha[si + 1u] = clamp(a1 + (1.0 - a1) * w * a, 0.0, 1.0);
                     }
-                }
-                chunk_idx = next_chunk;
             }
         }
 
-        textureStore(deep_opacity_maps_depth, px_i, i32(light_layer), vec4<f32>(z0, 0.0, 0.0, 0.0));
+        textureStore(deep_opacity_maps_depth[i32(depth_entry.physical_index)], depth_px, 0, vec4<f32>(z0, 0.0, 0.0, 0.0));
 
         var acc = 0.0;
         for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
             let a = alpha[i];
             acc = acc + (1.0 - acc) * a;
-            textureStore(deep_opacity_maps, vec3<i32>(px_i, i32(z_base + i)), vec4<f32>(acc, 0.0, 0.0, 0.0));
+            if i < opacity_page_size.z {
+                textureStore(deep_opacity_maps[i32(opacity_entry.physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(acc, 0.0, 0.0, 0.0));
+            }
         }
     }
+}
+#endif
+
+#ifdef LINEAR
+const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
+const INVALID_PTR: u32 = 0xFFFFFFFFu;
+const VSMS_OPACITY_POOL_TEXTURE_COUNT: u32 = #{VSMS_OPACITY_POOL_TEXTURE_COUNT};
+const VSMS_DEPTH_POOL_TEXTURE_COUNT: u32 = #{VSMS_DEPTH_POOL_TEXTURE_COUNT};
+
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_TEXTURE_BINDING}) var shadow_opacity_maps: binding_array<texture_3d<f32> >;
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_SAMPLER_BINDING}) var shadow_opacity_sampler: sampler;
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_POOL_TEXTURE_BINDING}) var shadow_depth_maps: binding_array<texture_2d_array<f32> >;
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_POOL_SAMPLER_BINDING}) var shadow_depth_sampler: sampler;
+
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> opacity_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> opacity_virtual_pages: array<VirtualPageTableEntry>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> depth_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> depth_virtual_pages: array<VirtualPageTableEntry>;
+
+fn light_frustum_from_layer(light_layer: u32) -> u32 {
+    var layer = 0u;
+    for (var frustum_id = 0u; frustum_id < arrayLength(&frustum_table); frustum_id = frustum_id + 1u) {
+        if frustum_table[frustum_id].kind != 1u {
+            continue;
+        }
+        if layer == light_layer {
+            return frustum_id;
+        }
+        layer = layer + 1u;
+    }
+    return INVALID_PTR;
+}
+
+fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
+    let frustum_id = light_frustum_from_layer(light_layer);
+    if frustum_id == INVALID_PTR || frustum_id >= arrayLength(&frustum_table) || frustum_id >= arrayLength(&shadow_dom_surface_ids) {
+        return 1.0;
+    }
+    let surface_ids = shadow_dom_surface_ids[frustum_id];
+    let opacity_surface_id = surface_ids.x;
+    let depth_surface_id = surface_ids.y;
+    if opacity_surface_id == INVALID_PTR || depth_surface_id == INVALID_PTR {
+        return 1.0;
+    }
+    if opacity_surface_id >= arrayLength(&opacity_virtual_meta) || depth_surface_id >= arrayLength(&depth_virtual_meta) {
+        return 1.0;
+    }
+    let opacity_row = opacity_virtual_meta[opacity_surface_id];
+    let depth_row = depth_virtual_meta[depth_surface_id];
+    if opacity_row.entry_count == 0u || depth_row.entry_count == 0u {
+        return 1.0;
+    }
+
+    let desc = frustum_table[frustum_id];
+    let viewport = vec4<f32>(0.0, 0.0, f32(desc.screen_width), f32(desc.screen_height));
+    let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
+    let raw = world_to_screen_raw(vec4<f32>(p_world, 1.0), light_clip_from_world, viewport);
+    if raw.x < 0.0 || raw.y < 0.0 || raw.x >= viewport.z || raw.y >= viewport.w || raw.z < 0.0 || raw.z > 1.0 {
+        return 1.0;
+    }
+
+    let px = vec2<u32>(u32(raw.x), u32(raw.y));
+    let opacity_page_size = vec3<u32>(
+        max(opacity_row.page_size_x, 1u),
+        max(opacity_row.page_size_y, 1u),
+        max(opacity_row.page_size_z, 1u),
+    );
+    let depth_page_size = vec2<u32>(
+        max(depth_row.page_size_x, 1u),
+        max(depth_row.page_size_y, 1u),
+    );
+    let opacity_tile = vec3<u32>(px.x / opacity_page_size.x, px.y / opacity_page_size.y, 0u);
+    let depth_tile = vec3<u32>(px.x / depth_page_size.x, px.y / depth_page_size.y, 0u);
+    let opacity_addr = vsms_virtual_page_table_address(opacity_row, opacity_tile, 0u, 0u);
+    let depth_addr = vsms_virtual_page_table_address(depth_row, depth_tile, 0u, 0u);
+    if opacity_addr.valid == 0u || depth_addr.valid == 0u {
+        return 1.0;
+    }
+    if opacity_addr.entry_index >= arrayLength(&opacity_virtual_pages) || depth_addr.entry_index >= arrayLength(&depth_virtual_pages) {
+        return 1.0;
+    }
+
+    let opacity_entry = opacity_virtual_pages[opacity_addr.entry_index];
+    let depth_entry = depth_virtual_pages[depth_addr.entry_index];
+    if opacity_entry.valid == 0u || depth_entry.valid == 0u {
+        return 1.0;
+    }
+    if opacity_entry.physical_index >= VSMS_OPACITY_POOL_TEXTURE_COUNT || depth_entry.physical_index >= VSMS_DEPTH_POOL_TEXTURE_COUNT {
+        return 1.0;
+    }
+
+    let opacity_px = vec2<i32>(i32(px.x % opacity_page_size.x), i32(px.y % opacity_page_size.y));
+    let depth_px = vec2<i32>(i32(px.x % depth_page_size.x), i32(px.y % depth_page_size.y));
+    let z0 = textureLoad(shadow_depth_maps[i32(depth_entry.physical_index)], depth_px, 0, 0).x;
+    if z0 <= 0.0 {
+        return 1.0;
+    }
+
+    let z = normalize_depth01(raw.z);
+    if z > z0 - 1e-3 {
+        return 1.0;
+    }
+    let u = pow(clamp(max(0.0, z0 - z) / max(z0, 1e-6), 0.0, 1.0), DOM_GAMMA);
+    let slice_f = u * f32(DOM_SLICES);
+    let slice = min(u32(floor(slice_f)), min(DOM_SLICES, opacity_page_size.z) - 1u);
+    let opacity = textureLoad(
+        shadow_opacity_maps[i32(opacity_entry.physical_index)],
+        vec3<i32>(opacity_px, i32(slice)),
+        0,
+    ).x;
+    return clamp(1.0 - opacity, 0.08, 1.0);
+}
+
+fn sample_shadow_visibility(p_world: vec3<f32>) -> f32 {
+    let light_count = min(lights.n_directional_lights, 4u);
+    if light_count == 0u {
+        return 1.0;
+    }
+    var visibility = 0.0;
+    for (var i = 0u; i < light_count; i = i + 1u) {
+        visibility = visibility + sample_shadow_dom_visibility(p_world, i);
+    }
+    return visibility / f32(light_count);
 }
 #endif
 
@@ -543,6 +703,10 @@ fn rasterize_strands(
                     let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
                     if t < 0.0 || t > 1.0 { continue; }
                     let p_frag = mix(p0_screen, p1_screen, t);
+                    let clip0 = view.unjittered_clip_from_world * v0_world;
+                    let clip1 = view.unjittered_clip_from_world * v1_world;
+                    let t_world = perspective_correct_line_t(t, clip0.w, clip1.w);
+                    let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
                     let dist = distance(pixel_center, p_frag.xy);
 
                     let z_cam = to_log_depth(p_frag.z);
@@ -571,7 +735,8 @@ fn rasterize_strands(
                             i32(layer),
                             0,
                         );
-                        let hair_fragment = vec4<f32>(shaded.rgb, shaded.a * coverage);
+                        let shadow_visibility = sample_shadow_visibility(p_world);
+                        let hair_fragment = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
                         froxel_color = blend_over(froxel_color, hair_fragment);
                         g_min_depth = max(g_min_depth, p_frag.z);
                     }

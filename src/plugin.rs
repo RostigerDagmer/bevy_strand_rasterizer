@@ -19,7 +19,10 @@ use bevy::{
 };
 use bevy_vsms::{
     allocator::VirtualSurfaceRuntime,
-    prelude::{VirtualSurfaceConfigBuilder, VirtualSurfaceKind, VirtualSurfaceResidencyMode},
+    prelude::{
+        VirtualSurfaceConfigBuilder, VirtualSurfaceKind, VirtualSurfaceMap,
+        VirtualSurfaceResidencyMode,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashSet;
@@ -54,6 +57,10 @@ pub const COARSE_COUNT_PAGE_SIZE: u32 =
     COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT * COARSE_DEPTH_SLICES;
 const COARSE_COUNT_PAGE_CAPACITY_DIVISOR: u32 = 2;
 const COARSE_INTERVAL_REFS_PER_TILE: u32 = 64;
+const DOM_RESIDENT_PAGE_BUDGET_DIVISOR: u32 = 8;
+const DOM_MIN_RESIDENT_PAGES: u32 = 4;
+const DOM_MAX_RESIDENT_PAGES: u32 = 256;
+pub const DOM_PAGE_XY: u32 = 256;
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 enum DomVsmsProxyKind {
@@ -74,6 +81,13 @@ lazy_static! {
     .iter()
     .copied()
     .collect();
+}
+
+fn dom_resident_page_budget(tile_count: u32) -> u32 {
+    tile_count
+        .div_ceil(DOM_RESIDENT_PAGE_BUDGET_DIVISOR)
+        .clamp(DOM_MIN_RESIDENT_PAGES, DOM_MAX_RESIDENT_PAGES)
+        .min(tile_count.max(1))
 }
 
 lazy_static! {
@@ -138,12 +152,15 @@ impl Plugin for StrandRasterizerPlugin {
         render_app.init_resource::<StrandPrepassPipeline>();
         render_app.init_resource::<StrandShadingPipeline>();
         render_app.init_resource::<StrandRasterizerPipeline>();
+        render_app.init_resource::<StrandShadowPipeline>();
         render_app.init_resource::<CompositionPipeline>();
         render_app.init_resource::<TileDebugPipeline>();
         render_app.add_systems(
             Render,
             ((
                 use_froxel_buffer,
+                sync_vsms_dom_configs,
+                use_deep_opacity_maps,
                 use_prepass_buffers,
                 update_material_buffer,
                 // use_strand_geometry.after(prepare_view_uniforms),
@@ -157,6 +174,8 @@ impl Plugin for StrandRasterizerPlugin {
                 update_strand_prepass_pipeline,
                 update_strand_shading_pipeline,
                 update_strand_raster_pipeline,
+                update_strand_shadow_pipeline,
+                bind_vsms_dom_targets,
             )
                 .chain()
                 .after(RenderSystems::PrepareBindGroups),
@@ -174,6 +193,10 @@ impl Plugin for StrandRasterizerPlugin {
                 Core3d,
                 nodes::shading::StrandShadingLabel,
             )
+            .add_render_graph_node::<nodes::shadows::StrandShadowRasterizerNode>(
+                Core3d,
+                nodes::shadows::StrandShadowRasterizerLabel,
+            )
             .add_render_graph_node::<nodes::composite::CompositionNode>(
                 Core3d,
                 nodes::composite::CompositionLabel,
@@ -190,6 +213,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::prepass::WorkPreparationLabel,
+                nodes::shadows::StrandShadowRasterizerLabel,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::shadows::StrandShadowRasterizerLabel,
                 nodes::shading::StrandShadingLabel,
             )
             .add_render_graph_edge(
@@ -230,6 +258,7 @@ fn use_prepass_buffers(
     mut raster_resources: ResMut<StrandRasterizerResources>,
     mut shading_resources: ResMut<StrandShadingResources>,
     mut shadow_resources: ResMut<StrandShadowResources>,
+    surface_map: Res<VirtualSurfaceMap>,
 ) {
     let mut total_strands = 0u32;
     let mut total_segment_budget = 0u32;
@@ -287,6 +316,7 @@ fn use_prepass_buffers(
     let light_entities: HashSet<Entity> = light_frusta_query.iter().collect();
     raster_resources.frustum_ids.clear();
     shadow_resources.light_layer_by_frustum.clear();
+    let mut shadow_dom_surface_ids: Vec<[u32; 2]> = Vec::new();
     let mut light_layer: u32 = 0;
     let mut frusta: Vec<_> = raster_resources
         .frustrum_config
@@ -305,6 +335,17 @@ fn use_prepass_buffers(
                 .insert(frustum_id as u32, light_layer);
             light_layer = light_layer.saturating_add(1);
         }
+        let dom_surface_ids = shadow_resources
+            .dom_vsms_proxies
+            .get(&entity)
+            .and_then(|(opacity_proxy, depth_proxy)| {
+                Some([
+                    *surface_map.entity_to_surface.get(opacity_proxy)?,
+                    *surface_map.entity_to_surface.get(depth_proxy)?,
+                ])
+            })
+            .unwrap_or([u32::MAX, u32::MAX]);
+        shadow_dom_surface_ids.push(dom_surface_ids);
         let (fine_tiles_x, fine_tiles_y, bucket_count) = cfg.get_num_tiles();
         let coarse_tiles_x = fine_tiles_x.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
         let coarse_tiles_y = fine_tiles_y.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
@@ -401,6 +442,7 @@ fn use_prepass_buffers(
         || prepass_resources.fine_seg_refs.is_none()
         || prepass_resources.coarse_tile_work_counts.is_none()
         || prepass_resources.coarse_tile_work_offsets.is_none()
+        || prepass_resources.shadow_dom_surface_ids.is_none()
         || prepass_resources.strand_instances.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
@@ -432,6 +474,8 @@ fn use_prepass_buffers(
         let chunk_pool_bytes = chunk_count as u64 * chunk_stride_bytes;
         let frustum_table_bytes =
             (frustum_capacity as u64) * (std::mem::size_of::<GpuFrustumDesc>() as u64);
+        let shadow_dom_surface_ids_bytes =
+            (frustum_capacity as u64) * (std::mem::size_of::<[u32; 2]>() as u64);
         let froxel_bucket_heads_bytes =
             (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -524,6 +568,12 @@ fn use_prepass_buffers(
         prepass_resources.frustum_table = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_frustum_table"),
             size: frustum_table_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.shadow_dom_surface_ids = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_shadow_dom_surface_ids"),
+            size: shadow_dom_surface_ids_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -701,6 +751,13 @@ fn use_prepass_buffers(
     }
     if let Some(frustum_table) = &prepass_resources.frustum_table {
         render_queue.write_buffer(frustum_table, 0, bytemuck::cast_slice(&frustum_descs));
+    }
+    if let Some(surface_ids) = &prepass_resources.shadow_dom_surface_ids {
+        render_queue.write_buffer(
+            surface_ids,
+            0,
+            bytemuck::cast_slice(shadow_dom_surface_ids.as_slice()),
+        );
     }
     if let Some(strand_instances) = &prepass_resources.strand_instances {
         render_queue.write_buffer(strand_instances, 0, bytemuck::cast_slice(&instances));
@@ -1171,8 +1228,6 @@ fn sync_vsms_dom_configs(
 
     for (entity, cfg) in light_entities {
         const DOM_VIRTUAL_SCALE: u32 = 2;
-        const DOM_PAGE_XY: u32 = 256;
-
         let virtual_w = cfg
             .screen_width
             .saturating_mul(DOM_VIRTUAL_SCALE)
@@ -1181,13 +1236,13 @@ fn sync_vsms_dom_configs(
             .screen_height
             .saturating_mul(DOM_VIRTUAL_SCALE)
             .clamp(DOM_PAGE_XY, 8192);
-        // TEMP DEBUG: force dense DOM residency (full virtual tile coverage) while fixing
-        // shadow shader logic. Revert to smaller budgets + demand-driven residency afterwards.
         let depth_tile_count = virtual_w
             .div_ceil(DOM_PAGE_XY)
             .saturating_mul(virtual_h.div_ceil(DOM_PAGE_XY))
             .max(1);
         let opacity_tile_count = depth_tile_count.max(1);
+        let depth_resident_pages = dom_resident_page_budget(depth_tile_count);
+        let opacity_resident_pages = dom_resident_page_budget(opacity_tile_count);
         let op_cfg = VirtualSurfaceConfigBuilder::new()
             .enabled(true)
             .surface_kind(VirtualSurfaceKind::Opacity3D)
@@ -1195,11 +1250,9 @@ fn sync_vsms_dom_configs(
             .virtual_extent(UVec3::new(virtual_w, virtual_h, NUM_DOM_SLICES))
             .mip_levels(1)
             .layer_count(1)
-            .max_resident_pages(opacity_tile_count)
+            .max_resident_pages(opacity_resident_pages)
             .priority_bias(1.0)
-            .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
-                opacity_tile_count,
-            ))
+            .residency_mode(VirtualSurfaceResidencyMode::DemandDriven)
             .build();
         let d_cfg = VirtualSurfaceConfigBuilder::new()
             .enabled(true)
@@ -1208,11 +1261,9 @@ fn sync_vsms_dom_configs(
             .virtual_extent(UVec3::new(virtual_w, virtual_h, 1))
             .mip_levels(1)
             .layer_count(1)
-            .max_resident_pages(depth_tile_count)
+            .max_resident_pages(depth_resident_pages)
             .priority_bias(1.0)
-            .residency_mode(VirtualSurfaceResidencyMode::PreallocatePages(
-                depth_tile_count,
-            ))
+            .residency_mode(VirtualSurfaceResidencyMode::DemandDriven)
             .build();
 
         if let Some(&(op_proxy, d_proxy)) = shadow_resources.dom_vsms_proxies.get(&entity) {

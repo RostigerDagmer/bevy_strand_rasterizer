@@ -14,7 +14,7 @@ use bevy::{
     shader::ShaderDefVal,
 };
 use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
-use bevy_vsms::allocator::VirtualSurfaceRuntime;
+use bevy_vsms::allocator::{VirtualSurfacePool, VirtualSurfaceRuntime};
 use std::collections::HashMap;
 
 use crate::{
@@ -41,9 +41,12 @@ pub struct StrandShadowResources {
 #[derive(Resource)]
 pub struct StrandShadowPipeline {
     pub bind_group_layout: BindGroupLayout,
+    pub vsms_table_bind_group_layout: BindGroupLayout,
     pub shadow_pipeline: Option<CachedComputePipelineId>,
     pub allocator_epoch: u64,
     pub workgroup_size: u32,
+    pub opacity_storage_count: u32,
+    pub depth_storage_count: u32,
 }
 
 impl StrandShadowPipeline {
@@ -111,6 +114,74 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::FINE_SEG_REFS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::STRAND_INSTANCES,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        )
+    }
+
+    pub fn vsms_table_bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
+            "strand_shadow_vsms_table_bind_group_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::VSMS_VIRTUAL_META_BINDING,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::VSMS_VIRTUAL_PAGE_TABLE_BINDING,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         )
     }
@@ -125,12 +196,20 @@ impl FromWorld for StrandShadowPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        let vsms_table_descriptor = Self::vsms_table_bind_group_layout_descriptor();
+        let vsms_table_bind_group_layout = device.create_bind_group_layout(
+            vsms_table_descriptor.label.as_ref(),
+            &vsms_table_descriptor.entries,
+        );
 
         StrandShadowPipeline {
             bind_group_layout,
+            vsms_table_bind_group_layout,
             shadow_pipeline: None,
             allocator_epoch: u64::MAX,
             workgroup_size: 0,
+            opacity_storage_count: 0,
+            depth_storage_count: 0,
         }
     }
 }
@@ -145,9 +224,25 @@ pub fn update_strand_shadow_pipeline(
 ) {
     let current_state = allocator.bindgroups_epoch;
     let workgroup_size = invocation_dims.threads_per_workgroup.max(1);
+    let Some(opacity_storage_binding) = vsms_runtime
+        .pool_storage_bindings
+        .get(&bevy_vsms::api::VirtualSurfaceKind::Opacity3D)
+    else {
+        return;
+    };
+    let Some(depth_storage_binding) = vsms_runtime
+        .pool_storage_bindings
+        .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
+    else {
+        return;
+    };
+    let opacity_storage_count = opacity_storage_binding.texture_count;
+    let depth_storage_count = depth_storage_binding.texture_count;
     if pipeline.shadow_pipeline.is_some()
         && pipeline.allocator_epoch == current_state
         && pipeline.workgroup_size == workgroup_size
+        && pipeline.opacity_storage_count == opacity_storage_count
+        && pipeline.depth_storage_count == depth_storage_count
     {
         return;
     }
@@ -166,20 +261,8 @@ pub fn update_strand_shadow_pipeline(
         "gpu_paging_allocator_table_layout",
         &allocator_layout_entries.page_tables,
     );
-    let Some(opacity_storage_layout) = vsms_runtime
-        .pool_storage_bindings
-        .get(&bevy_vsms::api::VirtualSurfaceKind::Opacity3D)
-        .map(|b| b.layout_descriptor.clone())
-    else {
-        return;
-    };
-    let Some(depth_storage_layout) = vsms_runtime
-        .pool_storage_bindings
-        .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
-        .map(|b| b.layout_descriptor.clone())
-    else {
-        return;
-    };
+    let opacity_storage_layout = opacity_storage_binding.layout_descriptor.clone();
+    let depth_storage_layout = depth_storage_binding.layout_descriptor.clone();
 
     let cdefs = [
         vec![
@@ -199,6 +282,10 @@ pub fn update_strand_shadow_pipeline(
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
             ShaderDefVal::UInt("NUM_DOM_SLICES".into(), NUM_DOM_SLICES),
             ShaderDefVal::UInt("WORKGROUP_SIZE".into(), workgroup_size),
+            ShaderDefVal::UInt(
+                "COARSE_FINE_TILE_EXTENT".into(),
+                crate::plugin::COARSE_FINE_TILE_EXTENT,
+            ),
             "SHADOWS".into(),
         ],
         layouts::rasterizer::shader_defs(),
@@ -211,14 +298,19 @@ pub fn update_strand_shadow_pipeline(
         .max(allocator.table_group_idx)
         .max(layouts::rasterizer::RASTER_GROUP)
         .max(layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP)
-        .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP);
+        .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP)
+        .max(layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP)
+        .max(layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP);
     let shadow_layout = StrandShadowPipeline::bind_group_layout_descriptor();
+    let vsms_table_layout = StrandShadowPipeline::vsms_table_bind_group_layout_descriptor();
     let mut layout = vec![shadow_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::rasterizer::RASTER_GROUP as usize] = shadow_layout;
     layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_storage_layout;
     layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout;
+    layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
+    layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
     pipeline.shadow_pipeline = Some(pipeline_cache.queue_compute_pipeline(
@@ -237,6 +329,8 @@ pub fn update_strand_shadow_pipeline(
     ));
     pipeline.allocator_epoch = current_state;
     pipeline.workgroup_size = workgroup_size;
+    pipeline.opacity_storage_count = opacity_storage_count;
+    pipeline.depth_storage_count = depth_storage_count;
 }
 
 pub fn create_strand_shadow_bind_group(
@@ -254,6 +348,16 @@ pub fn create_strand_shadow_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
+    let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
+    let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
+    let coarse_tile_work_counts = prepass_resources
+        .coarse_tile_work_counts
+        .as_ref()
+        .ok_or(())?;
+    let coarse_tile_work_offsets = prepass_resources
+        .coarse_tile_work_offsets
+        .as_ref()
+        .ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -284,9 +388,49 @@ pub fn create_strand_shadow_bind_group(
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::FINE_SEG_REFS,
+                    resource: fine_seg_refs.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::STRAND_INSTANCES,
+                    resource: strand_instances.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
+                    resource: coarse_tile_work_counts.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
+                    resource: coarse_tile_work_offsets.as_entire_binding(),
+                },
             ],
         ),
         vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
+    ))
+}
+
+pub fn create_vsms_table_bind_group(
+    device: &RenderDevice,
+    layout: &BindGroupLayout,
+    pool: &VirtualSurfacePool,
+    label: &'static str,
+) -> Option<BindGroup> {
+    let meta = pool.virtual_page_table_meta.as_ref()?;
+    let table = pool.virtual_page_table.as_ref()?;
+    Some(device.create_bind_group(
+        Some(label),
+        layout,
+        &[
+            BindGroupEntry {
+                binding: layouts::rasterizer::VSMS_VIRTUAL_META_BINDING,
+                resource: meta.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: layouts::rasterizer::VSMS_VIRTUAL_PAGE_TABLE_BINDING,
+                resource: table.as_entire_binding(),
+            },
+        ],
     ))
 }
 
@@ -297,12 +441,15 @@ pub fn run_shadow_pass(
     allocator: &GpuPagingAllocator,
     opacity_storage_bind_group: &BindGroup,
     depth_storage_bind_group: &BindGroup,
-    _froxel_config: &FroxelConfig,
+    opacity_table_bind_group: &BindGroup,
+    depth_table_bind_group: &BindGroup,
+    froxel_config: &FroxelConfig,
     frustum_id: u32,
+    opacity_surface_id: u32,
+    depth_surface_id: u32,
     resources: &StrandRasterizerResources,
     bind_group: &BindGroup,
     offsets: &[u32],
-    dispatch_size: (u32, u32, u32),
 ) {
     let Some(pipeline_id) = pipeline.shadow_pipeline else {
         warn!("Shadow pipeline id not ready");
@@ -344,15 +491,31 @@ pub fn run_shadow_pass(
         depth_storage_bind_group,
         &[],
     );
+    pass.set_bind_group(
+        layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP,
+        opacity_table_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP,
+        depth_table_bind_group,
+        &[],
+    );
 
     let pushconstants = PushConstants {
         num_elements: resources.strand_count.unwrap_or(0),
-        workgroup_offset: 0,
+        workgroup_offset: depth_surface_id,
         scan_load_base: frustum_id,
-        scan_save_base: 0,
+        scan_save_base: opacity_surface_id,
         ..Default::default()
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-    pass.dispatch_workgroups(dispatch_size.0, dispatch_size.1, dispatch_size.2);
+    let total_pixels = froxel_config
+        .screen_width
+        .saturating_mul(froxel_config.screen_height);
+    let workgroup_count = total_pixels.div_ceil(pipeline.workgroup_size.max(1)).max(1);
+    let workgroups_x = workgroup_count.min(65535);
+    let workgroups_y = workgroup_count.div_ceil(workgroups_x).max(1);
+    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
 }

@@ -22,6 +22,7 @@ use bevy::{
     shader::ShaderDefVal,
 };
 use bevy_gpu_paging_allocator::BindGroupBuilder;
+use bevy_vsms::request::VirtualSurfaceRequestBitmapRuntime;
 
 #[derive(Resource, Default)]
 pub struct StrandPrepassResources {
@@ -53,6 +54,7 @@ pub struct StrandPrepassResources {
     pub fine_seg_refs: Option<Buffer>,
     pub coarse_tile_work_counts: Option<Buffer>,
     pub coarse_tile_work_offsets: Option<Buffer>,
+    pub shadow_dom_surface_ids: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
@@ -148,6 +150,9 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::FINE_SEG_REFS, false),
                 Self::storage_entry(layouts::prepass::COARSE_TILE_WORK_COUNTS, false),
                 Self::storage_entry(layouts::prepass::COARSE_TILE_WORK_OFFSETS, false),
+                Self::storage_entry(layouts::prepass::VSMS_REQUEST_META, true),
+                Self::storage_entry(layouts::prepass::VSMS_REQUEST_BITS, false),
+                Self::storage_entry(layouts::prepass::SHADOW_DOM_SURFACE_IDS, true),
             ],
         )
     }
@@ -231,6 +236,7 @@ fn queue_prepass_pipeline(
             "COARSE_MAX_SLICES_PER_ASSET_INTERVAL".into(),
             crate::plugin::COARSE_MAX_SLICES_PER_ASSET_INTERVAL,
         ),
+        ShaderDefVal::UInt("DOM_PAGE_XY".into(), crate::plugin::DOM_PAGE_XY),
         ShaderDefVal::UInt(
             "COARSE_COUNT_PAGE_SIZE".into(),
             crate::plugin::COARSE_COUNT_PAGE_SIZE,
@@ -299,6 +305,7 @@ pub fn create_prepass_bind_group(
     cluster_indices: &BindingResource,
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
+    request_runtime: &VirtualSurfaceRequestBitmapRuntime,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
@@ -326,6 +333,9 @@ pub fn create_prepass_bind_group(
     let fine_seg_refs = resources.fine_seg_refs.as_ref().ok_or(())?;
     let coarse_tile_work_counts = resources.coarse_tile_work_counts.as_ref().ok_or(())?;
     let coarse_tile_work_offsets = resources.coarse_tile_work_offsets.as_ref().ok_or(())?;
+    let shadow_dom_surface_ids = resources.shadow_dom_surface_ids.as_ref().ok_or(())?;
+    let request_meta = request_runtime.metadata_buffer.as_ref().ok_or(())?;
+    let request_bits = request_runtime.bits_buffer.as_ref().ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -451,6 +461,18 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::COARSE_TILE_WORK_OFFSETS,
                     resource: coarse_tile_work_offsets.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::VSMS_REQUEST_META,
+                    resource: request_meta.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::VSMS_REQUEST_BITS,
+                    resource: request_bits.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::SHADOW_DOM_SURFACE_IDS,
+                    resource: shadow_dom_surface_ids.as_entire_binding(),
                 },
             ],
         ),

@@ -220,6 +220,12 @@ fn to_log_depth(z: f32) -> f32 {
     return clamp(1.0 - log_depth01, 0.0, 1.0);
 }
 
+fn to_reverse_log_depth(z: f32) -> f32 {
+    let reverse_depth01 = normalize_depth01(z);
+    let log_scale = 512.0;
+    return clamp(log2(1.0 + log_scale * reverse_depth01) / log2(1.0 + log_scale), 0.0, 1.0);
+}
+
 fn wang_hash(seed: u32) -> u32 {
     var x = seed;
     x = (x ^ 61u) ^ (x >> 16u);

@@ -10,6 +10,7 @@ use bevy::{
     },
 };
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use crate::pipelines::{
     prepass::StrandPrepassResources,
@@ -18,6 +19,7 @@ use crate::pipelines::{
         run_raster_pass,
     },
     shading::StrandShadingResources,
+    shadows::{StrandShadowPipeline, create_vsms_table_bind_group},
 };
 use crate::resources::ComputeInvocationDims;
 
@@ -45,7 +47,9 @@ impl Node for StrandRasterizerNode {
         // let shading_pipeline = world.resource::<StrandShadingPipeline>();
         // let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let raster_pipeline = world.resource::<StrandRasterizerPipeline>();
+        let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let allocator = world.resource::<GpuPagingAllocator>();
+        let vsms_runtime = world.resource::<VirtualSurfaceRuntime>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
         let raster_resources = world.resource::<StrandRasterizerResources>();
@@ -114,6 +118,42 @@ impl Node for StrandRasterizerNode {
             warn!("Failed to create strand raster bind group.");
             return Ok(());
         };
+        let Some(opacity_pool_bind_group) = vsms_runtime
+            .pool_bindings
+            .get(&VirtualSurfaceKind::Opacity3D)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
+        let Some(depth_pool_bind_group) = vsms_runtime
+            .pool_bindings
+            .get(&VirtualSurfaceKind::Depth2DArray)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
+        let Some(opacity_pool) = vsms_runtime.pools.get(&VirtualSurfaceKind::Opacity3D) else {
+            return Ok(());
+        };
+        let Some(depth_pool) = vsms_runtime.pools.get(&VirtualSurfaceKind::Depth2DArray) else {
+            return Ok(());
+        };
+        let Some(opacity_table_bind_group) = create_vsms_table_bind_group(
+            render_device,
+            &shadow_pipeline.vsms_table_bind_group_layout,
+            opacity_pool,
+            "strand_raster_opacity_vsms_table_bind_group",
+        ) else {
+            return Ok(());
+        };
+        let Some(depth_table_bind_group) = create_vsms_table_bind_group(
+            render_device,
+            &shadow_pipeline.vsms_table_bind_group_layout,
+            depth_pool,
+            "strand_raster_depth_vsms_table_bind_group",
+        ) else {
+            return Ok(());
+        };
         info!("Running raster pass");
         run_raster_pass(
             render_context,
@@ -124,6 +164,10 @@ impl Node for StrandRasterizerNode {
             frustum_id,
             raster_resources,
             &raster_bind_group,
+            opacity_pool_bind_group,
+            depth_pool_bind_group,
+            &opacity_table_bind_group,
+            &depth_table_bind_group,
             &raster_group_offsets,
             invocation_dims.dispatch_size,
         );

@@ -36,6 +36,9 @@ pub mod prepass {
     pub const FINE_SEG_REFS: u32 = 38;
     pub const COARSE_TILE_WORK_COUNTS: u32 = 39;
     pub const COARSE_TILE_WORK_OFFSETS: u32 = 40;
+    pub const VSMS_REQUEST_META: u32 = 41;
+    pub const VSMS_REQUEST_BITS: u32 = 42;
+    pub const SHADOW_DOM_SURFACE_IDS: u32 = 43;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -76,6 +79,9 @@ pub mod prepass {
             ShaderDefVal::UInt("FINE_SEG_REFS".into(), FINE_SEG_REFS),
             ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
             ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
+            ShaderDefVal::UInt("VSMS_REQUEST_META".into(), VSMS_REQUEST_META),
+            ShaderDefVal::UInt("VSMS_REQUEST_BITS".into(), VSMS_REQUEST_BITS),
+            ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
         ]
     }
 }
@@ -86,7 +92,11 @@ pub mod rasterizer {
     pub const RASTER_GROUP: u32 = 2;
     pub const VSMS_OPACITY_WRITE_GROUP: u32 = 3;
     pub const VSMS_DEPTH_WRITE_GROUP: u32 = 4;
+    pub const VSMS_OPACITY_TABLE_GROUP: u32 = 5;
+    pub const VSMS_DEPTH_TABLE_GROUP: u32 = 6;
     pub const VSMS_STORAGE_BINDING: u32 = 0;
+    pub const VSMS_VIRTUAL_META_BINDING: u32 = 0;
+    pub const VSMS_VIRTUAL_PAGE_TABLE_BINDING: u32 = 1;
 
     pub const VERTEX_BUFFER: u32 = 0;
     pub const INDEX_BUFFER: u32 = 1;
@@ -121,13 +131,30 @@ pub mod rasterizer {
     pub const STRAND_INSTANCES: u32 = 30;
     pub const COARSE_TILE_WORK_COUNTS: u32 = 31;
     pub const COARSE_TILE_WORK_OFFSETS: u32 = 32;
+    pub const SHADOW_DOM_SURFACE_IDS: u32 = 33;
+
+    pub const VSMS_POOL_PAGE_TABLE_BINDING: u32 = 0;
+    pub const VSMS_POOL_TEXTURE_BINDING: u32 = 1;
+    pub const VSMS_POOL_SAMPLER_BINDING: u32 = 2;
+    pub const VSMS_OPACITY_POOL_TEXTURE_COUNT_DEF: &str = "VSMS_OPACITY_POOL_TEXTURE_COUNT";
+    pub const VSMS_DEPTH_POOL_TEXTURE_COUNT_DEF: &str = "VSMS_DEPTH_POOL_TEXTURE_COUNT";
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
             ShaderDefVal::UInt("RASTER_GROUP".into(), RASTER_GROUP),
             ShaderDefVal::UInt("VSMS_OPACITY_WRITE_GROUP".into(), VSMS_OPACITY_WRITE_GROUP),
             ShaderDefVal::UInt("VSMS_DEPTH_WRITE_GROUP".into(), VSMS_DEPTH_WRITE_GROUP),
+            ShaderDefVal::UInt("VSMS_OPACITY_TABLE_GROUP".into(), VSMS_OPACITY_TABLE_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_TABLE_GROUP".into(), VSMS_DEPTH_TABLE_GROUP),
             ShaderDefVal::UInt("VSMS_STORAGE_BINDING".into(), VSMS_STORAGE_BINDING),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_META_BINDING".into(),
+                VSMS_VIRTUAL_META_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_PAGE_TABLE_BINDING".into(),
+                VSMS_VIRTUAL_PAGE_TABLE_BINDING,
+            ),
             ShaderDefVal::UInt("VERTEX_BUFFER".into(), VERTEX_BUFFER),
             ShaderDefVal::UInt("INDEX_BUFFER".into(), INDEX_BUFFER),
             ShaderDefVal::UInt("META_BUFFER".into(), META_BUFFER),
@@ -182,6 +209,19 @@ pub mod rasterizer {
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
             ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
             ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
+            ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_PAGE_TABLE_BINDING".into(),
+                VSMS_POOL_PAGE_TABLE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_TEXTURE_BINDING".into(),
+                VSMS_POOL_TEXTURE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_SAMPLER_BINDING".into(),
+                VSMS_POOL_SAMPLER_BINDING,
+            ),
         ]
     }
 }

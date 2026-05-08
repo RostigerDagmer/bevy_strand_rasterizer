@@ -35,7 +35,7 @@ fn setup(
             // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
             // absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
             // absorption_color: Vec4::new(1.0, 209.0 / 255.0, 184.0 / 255.0, 0.8),
-            absorption_color: Vec4::new(0.99, 0.521, 0.261, 0.688),
+            absorption_color: Vec4::new(0.75, 0.42, 0.18, 0.55),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
@@ -133,7 +133,7 @@ fn setup(
 
     commands.spawn((
         DirectionalLight {
-            illuminance: light_consts::lux::OVERCAST_DAY,
+            illuminance: 10000.0,
             shadows_enabled: true,
             ..default()
         },
@@ -144,8 +144,8 @@ fn setup(
         },
         FroxelConfig {
             // TODO: move into plugin
-            screen_width: 512, // shadow map size in this context
-            screen_height: 512,
+            screen_width: 4096, // shadow map size in this context
+            screen_height: 4096,
             froxel_size_x: 8,
             froxel_size_y: 8,
             depth_slices: 16,
@@ -270,6 +270,7 @@ fn rotate_light_around_z_axis(
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(BevyVsmsPlugin)
         .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
         .add_plugins(EguiPlugin::default())
         .add_plugins(StrandRasterizerPlugin)

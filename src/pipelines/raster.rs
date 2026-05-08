@@ -17,6 +17,7 @@ use bevy::{
     shader::ShaderDefVal,
 };
 use bevy_gpu_paging_allocator::BindGroupBuilder;
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use std::collections::HashMap;
 
@@ -26,7 +27,11 @@ use crate::{
     resources::ComputeInvocationDims, shader_types::PushConstants,
 };
 
-use super::{prepass::StrandPrepassResources, shading::StrandShadingResources};
+use super::{
+    prepass::StrandPrepassResources,
+    shading::StrandShadingResources,
+    shadows::{NUM_DOM_SLICES, StrandShadowPipeline},
+};
 
 #[derive(Resource, Default)]
 pub struct StrandRasterizerResources {
@@ -48,6 +53,8 @@ pub struct StrandRasterizerPipeline {
     pub rasterize_pipeline: Option<CachedComputePipelineId>,
     pub allocator_epoch: u64,
     pub workgroup_size: u32,
+    pub opacity_sample_count: u32,
+    pub depth_sample_count: u32,
 }
 
 impl StrandRasterizerPipeline {
@@ -184,6 +191,16 @@ impl StrandRasterizerPipeline {
                     count: None,
                 },
                 BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::SHADOW_DOM_SURFACE_IDS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
                     binding: layouts::rasterizer::SHADING_BUFFER,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Texture {
@@ -213,6 +230,8 @@ impl FromWorld for StrandRasterizerPipeline {
             rasterize_pipeline: None,
             allocator_epoch: u64::MAX,
             workgroup_size: 0,
+            opacity_sample_count: 0,
+            depth_sample_count: 0,
         }
     }
 }
@@ -221,14 +240,31 @@ pub fn update_strand_raster_pipeline(
     mut pipeline: ResMut<StrandRasterizerPipeline>,
     allocator: Res<GpuPagingAllocator>,
     invocation_dims: Res<ComputeInvocationDims>,
+    vsms_runtime: Res<VirtualSurfaceRuntime>,
     shader_loader: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
     let current_state = allocator.bindgroups_epoch;
     let workgroup_size = invocation_dims.threads_per_workgroup.max(1);
+    let Some(opacity_pool_binding) = vsms_runtime
+        .pool_bindings
+        .get(&VirtualSurfaceKind::Opacity3D)
+    else {
+        return;
+    };
+    let Some(depth_pool_binding) = vsms_runtime
+        .pool_bindings
+        .get(&VirtualSurfaceKind::Depth2DArray)
+    else {
+        return;
+    };
+    let opacity_sample_count = opacity_pool_binding.texture_count;
+    let depth_sample_count = depth_pool_binding.texture_count;
     if pipeline.rasterize_pipeline.is_some()
         && pipeline.allocator_epoch == current_state
         && pipeline.workgroup_size == workgroup_size
+        && pipeline.opacity_sample_count == opacity_sample_count
+        && pipeline.depth_sample_count == depth_sample_count
     {
         return;
     }
@@ -247,6 +283,8 @@ pub fn update_strand_raster_pipeline(
         "gpu_paging_allocator_table_layout",
         &allocator_layout_entries.page_tables,
     );
+    let opacity_pool_layout = opacity_pool_binding.layout_descriptor.clone();
+    let depth_pool_layout = depth_pool_binding.layout_descriptor.clone();
 
     let mut cdefs = [
         vec![
@@ -264,6 +302,15 @@ pub fn update_strand_raster_pipeline(
                 std::mem::size_of::<crate::shader_types::StrandGeo>() as u32,
             ),
             ShaderDefVal::UInt("POOL_CHUNK_SIZE".into(), BINNING_POOL_CHUNK_SIZE),
+            ShaderDefVal::UInt("NUM_DOM_SLICES".into(), NUM_DOM_SLICES),
+            ShaderDefVal::UInt(
+                layouts::rasterizer::VSMS_OPACITY_POOL_TEXTURE_COUNT_DEF.into(),
+                opacity_sample_count,
+            ),
+            ShaderDefVal::UInt(
+                layouts::rasterizer::VSMS_DEPTH_POOL_TEXTURE_COUNT_DEF.into(),
+                depth_sample_count,
+            ),
             ShaderDefVal::UInt(
                 "COARSE_FINE_TILE_EXTENT".into(),
                 crate::plugin::COARSE_FINE_TILE_EXTENT,
@@ -279,12 +326,21 @@ pub fn update_strand_raster_pipeline(
     let max_group = allocator
         .buffer_group_idx
         .max(allocator.table_group_idx)
-        .max(layouts::rasterizer::RASTER_GROUP);
+        .max(layouts::rasterizer::RASTER_GROUP)
+        .max(layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP)
+        .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP)
+        .max(layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP)
+        .max(layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP);
     let raster_layout = StrandRasterizerPipeline::bind_group_layout_descriptor();
+    let vsms_table_layout = StrandShadowPipeline::vsms_table_bind_group_layout_descriptor();
     let mut layout = vec![raster_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::rasterizer::RASTER_GROUP as usize] = raster_layout;
+    layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_pool_layout;
+    layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_pool_layout;
+    layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
+    layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
     let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -303,6 +359,8 @@ pub fn update_strand_raster_pipeline(
     pipeline.rasterize_pipeline = Some(rasterize_pipeline);
     pipeline.allocator_epoch = current_state;
     pipeline.workgroup_size = workgroup_size;
+    pipeline.opacity_sample_count = opacity_sample_count;
+    pipeline.depth_sample_count = depth_sample_count;
     info!("Updated rasterizer pipeline.")
 }
 
@@ -333,6 +391,10 @@ pub fn create_strand_raster_bind_group(
         .ok_or(())?;
     let coarse_tile_work_offsets = prepass_resources
         .coarse_tile_work_offsets
+        .as_ref()
+        .ok_or(())?;
+    let shadow_dom_surface_ids = prepass_resources
+        .shadow_dom_surface_ids
         .as_ref()
         .ok_or(())?;
     let shading_texture = shading_resources.output_texture.as_ref().ok_or(())?;
@@ -388,6 +450,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
                     resource: coarse_tile_work_offsets.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADOW_DOM_SURFACE_IDS,
+                    resource: shadow_dom_surface_ids.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::SHADING_BUFFER,
@@ -453,6 +519,10 @@ pub fn run_raster_pass(
     frustum_id: u32,
     resources: &StrandRasterizerResources,
     bind_group: &BindGroup,
+    opacity_pool_bind_group: &BindGroup,
+    depth_pool_bind_group: &BindGroup,
+    opacity_table_bind_group: &BindGroup,
+    depth_table_bind_group: &BindGroup,
     uniform_offsets: &[u32],
     dispatch_size: (u32, u32, u32),
 ) {
@@ -490,6 +560,26 @@ pub fn run_raster_pass(
             layouts::rasterizer::RASTER_GROUP,
             bind_group, // Assume correctly populated bind group
             uniform_offsets,
+        );
+        pass.set_bind_group(
+            layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP,
+            opacity_pool_bind_group,
+            &[],
+        );
+        pass.set_bind_group(
+            layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP,
+            depth_pool_bind_group,
+            &[],
+        );
+        pass.set_bind_group(
+            layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP,
+            opacity_table_bind_group,
+            &[],
+        );
+        pass.set_bind_group(
+            layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP,
+            depth_table_bind_group,
+            &[],
         );
         // Set push constants if needed
         let pushconstants = PushConstants {
