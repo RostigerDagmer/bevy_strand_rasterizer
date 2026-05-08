@@ -137,12 +137,12 @@ fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
     );
 }
 
-fn get_segment_material(asset_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_materials) {
+fn get_segment_material(asset_id: u32, material_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || asset_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
     let meta_ptr = t_strand_metadata[asset_id];
-    let material_ptr = t_materials[asset_id];
+    let material_ptr = t_materials[material_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
     }
@@ -429,7 +429,7 @@ fn rasterize_strands(
                         continue;
                     }
 
-                    let mat = get_segment_material(asset_id, segment_ref);
+                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
                     let dzp = max(0.0, p.z - z0) * inv_span;
                     let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(DOM_SLICES);

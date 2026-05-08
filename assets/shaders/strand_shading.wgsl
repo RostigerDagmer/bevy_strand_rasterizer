@@ -479,14 +479,15 @@ fn shade_strands(
     }
     let instance = strand_instances[inst_id];
     let asset_id = instance.asset_id;
-    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_materials) {
+    let material_id = instance.material_id;
+    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
         return;
     }
 
     let vertex_ptr = t_vertices[asset_id];
     let index_ptr = t_indices[asset_id];
     let meta_ptr = t_strand_metadata[asset_id];
-    let material_ptr = t_materials[asset_id];
+    let material_ptr = t_materials[material_id];
     if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return;
     }

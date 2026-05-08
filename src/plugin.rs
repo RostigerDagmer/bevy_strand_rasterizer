@@ -239,7 +239,8 @@ fn use_prepass_buffers(
     let mut sorted_geometry: Vec<_> = geometry_query.iter().collect();
     sorted_geometry.sort_by_key(|(entity, _, _)| entity.index());
     for (entity, geom, transform) in sorted_geometry {
-        let Some(asset_id) = strand_asset_table_id(entity, geom, &storage_buffers) else {
+        let Some((asset_id, material_id)) = strand_asset_table_ids(entity, geom, &storage_buffers)
+        else {
             continue;
         };
         total_strands = total_strands.saturating_add(geom.strand_count);
@@ -252,7 +253,7 @@ fn use_prepass_buffers(
         let transform = transform.copied().unwrap_or_default();
         instances.push(StrandInstance {
             asset_id,
-            material_id: asset_id,
+            material_id,
             pad0: 0,
             pad1: 0,
             world_from_local: transform.world_from_local,
@@ -706,11 +707,11 @@ fn use_prepass_buffers(
     }
 }
 
-fn strand_asset_table_id(
+fn strand_asset_table_ids(
     entity: Entity,
     geometry: &StrandGeometry,
     storage_buffers: &RenderAssets<GpuVirtualShaderStorageBuffer>,
-) -> Option<u32> {
+) -> Option<(u32, u32)> {
     let ids = [
         ("vertices", &geometry.vertices),
         ("indices", &geometry.indices),
@@ -741,7 +742,15 @@ fn strand_asset_table_id(
         return None;
     }
 
-    Some(geo_id)
+    let material_id = storage_buffers
+        .get(&geometry.materials)?
+        .allocation
+        .as_ref()?
+        .0
+        .id
+        .0;
+
+    Some((geo_id, material_id))
 }
 
 fn sync_strand_instance_transforms(
@@ -906,11 +915,7 @@ pub fn update_material_buffer(
             continue;
         };
         let material_bytes = bytemuck::bytes_of(material);
-        render_queue.write_buffer(
-            &buffer,        // Get the underlying wgpu::Buffer
-            0,              // Offset in the buffer to start writing (0 for the start)
-            material_bytes, // The byte slice to write
-        );
+        render_queue.write_buffer(&buffer, allocation.range.start, material_bytes);
     }
 }
 
