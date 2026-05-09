@@ -89,6 +89,19 @@ pub struct RasterWorkItem {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+pub struct RasterTileRun {
+    pub work_base: u32,
+    pub work_count: u32,
+    pub frustum_id: u32,
+    pub screen_tile_id: u32,
+    pub load_score: u32,
+    pub flags: u32,
+    pub pad0: u32,
+    pub pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct FineSegRef {
     pub inst_id: u32,
     pub strand_id: u32,

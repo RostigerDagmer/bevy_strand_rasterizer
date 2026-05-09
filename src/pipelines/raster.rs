@@ -6,10 +6,10 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
-            ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, ShaderStages,
-            StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-            TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-            TextureViewDimension,
+            ComputePipelineDescriptor, Extent3d, ImageSubresourceRange, PipelineCache,
+            PushConstantRange, ShaderStages, StorageTextureAccess, Texture, TextureAspect,
+            TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+            TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -142,6 +142,17 @@ impl StrandRasterizerPipeline {
                 // Raster work queue items
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Fine tile run queue. One raster workgroup consumes one run.
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::RASTER_TILE_RUN_QUEUE,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -383,6 +394,7 @@ pub fn create_strand_raster_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
+    let raster_tile_run_queue = prepass_resources.raster_tile_run_queue.as_ref().ok_or(())?;
     let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
     let coarse_tile_work_counts = prepass_resources
@@ -434,6 +446,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::RASTER_TILE_RUN_QUEUE,
+                    resource: raster_tile_run_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::FINE_SEG_REFS,
@@ -518,15 +534,30 @@ pub fn run_raster_pass(
     _froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
+    prepass_resources: &StrandPrepassResources,
     bind_group: &BindGroup,
     opacity_pool_bind_group: &BindGroup,
     depth_pool_bind_group: &BindGroup,
     opacity_table_bind_group: &BindGroup,
     depth_table_bind_group: &BindGroup,
     uniform_offsets: &[u32],
-    dispatch_size: (u32, u32, u32),
+    _dispatch_size: (u32, u32, u32),
 ) {
     let encoder = render_context.command_encoder(); // Get CommandEncoder
+    let clear_range = ImageSubresourceRange {
+        aspect: TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: None,
+    };
+    if let Some(output_texture) = resources.output_texture_resource.as_ref() {
+        encoder.clear_texture(output_texture, &clear_range);
+    }
+    if let Some(output_depth) = resources.output_depth_resource.as_ref() {
+        encoder.clear_texture(output_depth, &clear_range);
+    }
+
     // --- Rasterize ---
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -549,7 +580,6 @@ pub fn run_raster_pass(
             warn!("allocator pagetable bind group is not ready yet.");
             return;
         };
-        pass.set_pipeline(raster_pipeline);
         pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
         pass.set_bind_group(
             allocator.table_group_idx,
@@ -589,9 +619,13 @@ pub fn run_raster_pass(
             scan_save_base: 0,
             ..Default::default()
         };
-        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-        pass.dispatch_workgroups(dispatch_size.0, dispatch_size.1, dispatch_size.2);
+        pass.set_pipeline(raster_pipeline);
+        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+        let run_capacity = prepass_resources.raster_tile_run_capacity.max(1);
+        let workgroups_x = run_capacity.min(65_535);
+        let workgroups_y = run_capacity.div_ceil(workgroups_x).max(1);
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 
     // --- Rasterization complete ---

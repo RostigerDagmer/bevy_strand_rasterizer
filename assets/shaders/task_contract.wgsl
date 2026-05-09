@@ -74,6 +74,17 @@ struct RasterWorkItem {
     cell_idx: u32,
 }
 
+struct RasterTileRun {
+    work_base: u32,
+    work_count: u32,
+    frustum_id: u32,
+    screen_tile_id: u32,
+    load_score: u32,
+    flags: u32,
+    pad0: u32,
+    pad1: u32,
+}
+
 struct FineSegRef {
     inst_id: u32,
     strand_id: u32,

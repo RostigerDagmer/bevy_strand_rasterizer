@@ -1,4 +1,11 @@
-use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
+use bevy::{
+    light::CascadeShadowConfigBuilder,
+    prelude::*,
+    render::{
+        RenderPlugin,
+        settings::{RenderCreation, WgpuFeatures, WgpuSettings},
+    },
+};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vsms::prelude::BevyVsmsPlugin;
@@ -15,6 +22,7 @@ mod pipelines;
 mod plugin;
 mod shader_types;
 use bevy_gpu_paging_allocator as allocator;
+use wgpu::Backends;
 
 fn setup(
     mut commands: Commands,
@@ -269,7 +277,15 @@ fn rotate_light_around_z_axis(
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(WgpuSettings {
+                backends: Some(Backends::VULKAN),
+                features: WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                    | WgpuFeatures::CLEAR_TEXTURE,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
         .add_plugins(BevyVsmsPlugin)
         .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
         .add_plugins(EguiPlugin::default())

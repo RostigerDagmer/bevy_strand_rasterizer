@@ -41,6 +41,7 @@ pub struct StrandPrepassResources {
     pub frustum_table: Option<Buffer>,
     pub froxel_bucket_heads: Option<Buffer>,
     pub raster_work_queue: Option<Buffer>,
+    pub raster_tile_run_queue: Option<Buffer>,
     pub coarse_depth_lut: Option<Buffer>,
     pub coarse_range_queue: Option<Buffer>,
     pub coarse_interval_heads: Option<Buffer>,
@@ -67,6 +68,7 @@ pub struct StrandPrepassResources {
     pub frustum_count: u32,
     pub froxel_bucket_capacity: u32,
     pub raster_work_capacity: u32,
+    pub raster_tile_run_capacity: u32,
     pub coarse_depth_tile_capacity: u32,
     pub coarse_range_capacity: u32,
     pub coarse_interval_ref_capacity: u32,
@@ -140,6 +142,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
                 Self::storage_entry(layouts::prepass::FREE_HEADS, false),
                 Self::storage_entry(layouts::prepass::RASTER_WORK_QUEUE, false),
+                Self::storage_entry(layouts::prepass::RASTER_TILE_RUN_QUEUE, false),
                 Self::storage_entry(layouts::prepass::COARSE_DEPTH_LUT, false),
                 Self::storage_entry(layouts::prepass::COARSE_RANGE_QUEUE, false),
                 Self::storage_entry(layouts::prepass::COARSE_INTERVAL_HEADS, false),
@@ -326,6 +329,7 @@ pub fn create_prepass_bind_group(
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
     let free_heads = resources.free_heads.as_ref().ok_or(())?;
     let raster_work_queue = resources.raster_work_queue.as_ref().ok_or(())?;
+    let raster_tile_run_queue = resources.raster_tile_run_queue.as_ref().ok_or(())?;
     let coarse_depth_lut = resources.coarse_depth_lut.as_ref().ok_or(())?;
     let coarse_range_queue = resources.coarse_range_queue.as_ref().ok_or(())?;
     let coarse_interval_heads = resources.coarse_interval_heads.as_ref().ok_or(())?;
@@ -414,6 +418,10 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::RASTER_TILE_RUN_QUEUE,
+                    resource: raster_tile_run_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::COARSE_DEPTH_LUT,
@@ -771,14 +779,14 @@ pub fn run_prepass(
     };
     pass.set_pipeline(count_coarse_tile_work_pipeline);
     pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
-    pass.dispatch_workgroups(coarse_depth_tile_capacity, 1, 1);
+    let coarse_tile_workgroups_x = coarse_depth_tile_capacity.min(65_535).max(1);
+    let coarse_tile_workgroups_y = coarse_depth_tile_capacity
+        .div_ceil(coarse_tile_workgroups_x)
+        .max(1);
+    pass.dispatch_workgroups(coarse_tile_workgroups_x, coarse_tile_workgroups_y, 1);
     pass.set_pipeline(emit_raster_work_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
-    pass.dispatch_workgroups(
-        coarse_count_page_table_capacity.min(65_535),
-        coarse_count_page_table_capacity.div_ceil(65_535),
-        1,
-    );
+    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
+    pass.dispatch_workgroups(coarse_tile_workgroups_x, coarse_tile_workgroups_y, 1);
 }
 
 pub fn update_strand_prepass_pipeline(

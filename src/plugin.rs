@@ -41,7 +41,8 @@ use crate::{
         shadows::*,
         task_contract::{
             BINNING_POOL_CHUNK_SIZE, BINNING_POOL_MAX_CHUNKS, BINNING_POOL_MIN_CHUNKS,
-            BINNING_POOL_NUM_HEADS, FinePageMeta, FineSegRef, QUEUE_HEADER_WORDS, RasterWorkItem,
+            BINNING_POOL_NUM_HEADS, FinePageMeta, FineSegRef, QUEUE_HEADER_WORDS, RasterTileRun,
+            RasterWorkItem,
         },
         tile_debug::*,
     },
@@ -417,6 +418,11 @@ fn use_prepass_buffers(
         .saturating_mul(2)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
+    let raster_tile_run_capacity = coarse_depth_tile_capacity
+        .saturating_mul(COARSE_FINE_TILE_EXTENT)
+        .saturating_mul(COARSE_FINE_TILE_EXTENT)
+        .next_power_of_two()
+        .max(1024);
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -429,6 +435,7 @@ fn use_prepass_buffers(
         || prepass_resources.frustum_table.is_none()
         || prepass_resources.froxel_bucket_heads.is_none()
         || prepass_resources.raster_work_queue.is_none()
+        || prepass_resources.raster_tile_run_queue.is_none()
         || prepass_resources.coarse_depth_lut.is_none()
         || prepass_resources.coarse_range_queue.is_none()
         || prepass_resources.coarse_interval_heads.is_none()
@@ -452,6 +459,7 @@ fn use_prepass_buffers(
         || prepass_resources.frustum_capacity < frustum_capacity
         || prepass_resources.froxel_bucket_capacity < froxel_bucket_capacity
         || prepass_resources.raster_work_capacity < raster_work_capacity
+        || prepass_resources.raster_tile_run_capacity < raster_tile_run_capacity
         || prepass_resources.coarse_depth_tile_capacity < coarse_depth_tile_capacity
         || prepass_resources.coarse_range_capacity < coarse_range_capacity
         || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
@@ -484,6 +492,8 @@ fn use_prepass_buffers(
             (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (raster_work_capacity as u64) * (std::mem::size_of::<RasterWorkItem>() as u64);
+        let raster_tile_run_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (raster_tile_run_capacity as u64) * (std::mem::size_of::<RasterTileRun>() as u64);
         let coarse_depth_lut_bytes = (coarse_depth_tile_capacity as u64)
             * (COARSE_DEPTH_SLICES as u64)
             * (std::mem::size_of::<GpuCoarseDepthLutEntry>() as u64);
@@ -601,6 +611,12 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.raster_tile_run_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_raster_tile_run_queue"),
+            size: raster_tile_run_queue_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
         prepass_resources.coarse_depth_lut = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_coarse_depth_lut"),
             size: coarse_depth_lut_bytes,
@@ -696,6 +712,7 @@ fn use_prepass_buffers(
         prepass_resources.frustum_count = frustum_descs.len() as u32;
         prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
         prepass_resources.raster_work_capacity = raster_work_capacity;
+        prepass_resources.raster_tile_run_capacity = raster_tile_run_capacity;
         prepass_resources.coarse_depth_tile_capacity = coarse_depth_tile_capacity;
         prepass_resources.coarse_range_capacity = coarse_range_capacity;
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
@@ -703,7 +720,7 @@ fn use_prepass_buffers(
         prepass_resources.fine_seg_ref_capacity = fine_seg_ref_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={} raster_tile_run_cap={}",
             total_strands,
             total_segment_budget,
             instance_count,
@@ -717,6 +734,7 @@ fn use_prepass_buffers(
             coarse_count_page_capacity,
             fine_seg_ref_capacity,
             raster_work_capacity,
+            raster_tile_run_capacity,
         );
     }
     if needs_shading_realloc {
@@ -743,6 +761,9 @@ fn use_prepass_buffers(
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
     if let Some(queue_buf) = &prepass_resources.raster_work_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(queue_buf) = &prepass_resources.raster_tile_run_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
     if let Some(seg_refs) = &prepass_resources.fine_seg_refs {

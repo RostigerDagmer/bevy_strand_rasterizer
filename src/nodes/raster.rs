@@ -163,6 +163,7 @@ impl Node for StrandRasterizerNode {
             &frustrum,
             frustum_id,
             raster_resources,
+            prepass_resources,
             &raster_bind_group,
             opacity_pool_bind_group,
             depth_pool_bind_group,

@@ -155,6 +155,7 @@ impl Node for StrandShadowRasterizerNode {
                 opacity_surface_id,
                 depth_surface_id,
                 raster_resources,
+                prepass_resources,
                 &shadow_bind_group,
                 &dynamic_offsets,
             );

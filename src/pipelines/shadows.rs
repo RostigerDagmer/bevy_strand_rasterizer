@@ -114,6 +114,18 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
+                // Fine tile run queue. Shadow rasterization consumes the same
+                // ordered runs as camera rasterization, filtered by frustum.
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::RASTER_TILE_RUN_QUEUE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::FINE_SEG_REFS,
                     visibility: ShaderStages::COMPUTE,
@@ -348,6 +360,7 @@ pub fn create_strand_shadow_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
+    let raster_tile_run_queue = prepass_resources.raster_tile_run_queue.as_ref().ok_or(())?;
     let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
     let coarse_tile_work_counts = prepass_resources
@@ -387,6 +400,10 @@ pub fn create_strand_shadow_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::RASTER_WORK_QUEUE,
                     resource: raster_work_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::RASTER_TILE_RUN_QUEUE,
+                    resource: raster_tile_run_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::rasterizer::FINE_SEG_REFS,
@@ -443,11 +460,12 @@ pub fn run_shadow_pass(
     depth_storage_bind_group: &BindGroup,
     opacity_table_bind_group: &BindGroup,
     depth_table_bind_group: &BindGroup,
-    froxel_config: &FroxelConfig,
+    _froxel_config: &FroxelConfig,
     frustum_id: u32,
     opacity_surface_id: u32,
     depth_surface_id: u32,
     resources: &StrandRasterizerResources,
+    prepass_resources: &StrandPrepassResources,
     bind_group: &BindGroup,
     offsets: &[u32],
 ) {
@@ -511,11 +529,8 @@ pub fn run_shadow_pass(
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-    let total_pixels = froxel_config
-        .screen_width
-        .saturating_mul(froxel_config.screen_height);
-    let workgroup_count = total_pixels.div_ceil(pipeline.workgroup_size.max(1)).max(1);
-    let workgroups_x = workgroup_count.min(65535);
-    let workgroups_y = workgroup_count.div_ceil(workgroups_x).max(1);
+    let run_capacity = prepass_resources.raster_tile_run_capacity.max(1);
+    let workgroups_x = run_capacity.min(65_535);
+    let workgroups_y = run_capacity.div_ceil(workgroups_x).max(1);
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
 }

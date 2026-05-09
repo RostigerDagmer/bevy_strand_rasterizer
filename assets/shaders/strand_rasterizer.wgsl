@@ -21,6 +21,7 @@
 }
 #import "shaders/task_contract.wgsl"::{
     RasterWorkItem,
+    RasterTileRun,
     FineSegRef,
 }
 #import bevy_vsms::virtual_surface_types::{
@@ -64,6 +65,12 @@ struct RasterWorkQueue {
     items: array<RasterWorkItem>,
 }
 
+struct RasterTileRunQueue {
+    head: atomic<u32>,
+    tail: atomic<u32>,
+    items: array<RasterTileRun>,
+}
+
 struct FineSegRefBuffer {
     tail: atomic<u32>,
     refs: array<FineSegRef>,
@@ -92,6 +99,7 @@ struct FineSegRefBuffer {
 @group(#{RASTER_GROUP}) @binding(#{FROXEL_BUCKET_HEADS}) var<storage, read> froxel_bucket_heads: array<atomic<u32>>;
 @group(#{RASTER_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read> chunk_pool_words: array<u32>;
 @group(#{RASTER_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read> raster_work_queue: RasterWorkQueue;
+@group(#{RASTER_GROUP}) @binding(#{RASTER_TILE_RUN_QUEUE}) var<storage, read> raster_tile_run_queue: RasterTileRunQueue;
 @group(#{RASTER_GROUP}) @binding(#{FINE_SEG_REFS}) var<storage, read> fine_seg_refs: FineSegRefBuffer;
 @group(#{RASTER_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 @group(#{RASTER_GROUP}) @binding(#{COARSE_TILE_WORK_COUNTS}) var<storage, read> coarse_tile_work_counts: array<u32>;
@@ -306,39 +314,35 @@ fn rasterize_strands(
     if opacity_meta.entry_count == 0u || depth_meta.entry_count == 0u {
         return;
     }
+    let run_idx = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
+    if run_idx >= atomicLoad(&raster_tile_run_queue.tail) || run_idx >= arrayLength(&raster_tile_run_queue.items) {
+        return;
+    }
+    let run = raster_tile_run_queue.items[run_idx];
+    if run.frustum_id != active_frustum_id || run.work_count == 0u {
+        return;
+    }
     let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
     let active_config = frustum_to_config(active_desc);
-    let total_pixels = active_config.screen_width * active_config.screen_height;
     let light_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
     let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
-    let linear_local = local_id.x;
-    let linear_wg = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
-    let thread_idx = linear_wg * WORKGROUP_SIZE + linear_local;
-    let thread_stride = num_wg.x * num_wg.y * num_wg.z * WORKGROUP_SIZE;
+    let tile_x = run.screen_tile_id % fine_tiles_x;
+    let tile_y = run.screen_tile_id / fine_tiles_x;
+    let tile_pixel_count = active_config.froxel_size_x * active_config.froxel_size_y;
+    let work_base = run.work_base;
+    let work_end = min(work_base + run.work_count, arrayLength(&raster_work_queue.items));
 
-    for (var pixel_idx = thread_idx; pixel_idx < total_pixels; pixel_idx = pixel_idx + thread_stride) {
+    // TODO: use workgroup local/subgroup cooperation across pixels in the tile.
+    // This first migration keeps one lane responsible for one or more pixels.
+    for (var tile_pixel_idx = local_id.x; tile_pixel_idx < tile_pixel_count; tile_pixel_idx = tile_pixel_idx + WORKGROUP_SIZE) {
         let px_u = vec2<u32>(
-            pixel_idx % active_config.screen_width,
-            pixel_idx / active_config.screen_width,
+            tile_x * active_config.froxel_size_x + (tile_pixel_idx % active_config.froxel_size_x),
+            tile_y * active_config.froxel_size_y + (tile_pixel_idx / active_config.froxel_size_x),
         );
-        let px_i = vec2<i32>(i32(px_u.x), i32(px_u.y));
+        if px_u.x >= active_config.screen_width || px_u.y >= active_config.screen_height {
+            continue;
+        }
         let px_f = vec2<f32>(px_u) + vec2(0.5, 0.5);
-        let tile_coord_x = px_u.x / active_config.froxel_size_x;
-        let tile_coord_y = px_u.y / active_config.froxel_size_y;
-        let screen_tile_id = tile_coord_y * fine_tiles_x + tile_coord_x;
-        let coarse_x = tile_coord_x / COARSE_FINE_TILE_EXTENT;
-        let coarse_y = tile_coord_y / COARSE_FINE_TILE_EXTENT;
-        if coarse_x >= active_desc.coarse_tiles_x || coarse_y >= active_desc.coarse_tiles_y {
-            continue;
-        }
-        let coarse_tile_idx = active_desc.coarse_depth_tile_base + coarse_y * active_desc.coarse_tiles_x + coarse_x;
-        if coarse_tile_idx >= arrayLength(&coarse_tile_work_counts) || coarse_tile_idx >= arrayLength(&coarse_tile_work_offsets) {
-            continue;
-        }
-        let work_base = coarse_tile_work_offsets[coarse_tile_idx];
-        let work_count = coarse_tile_work_counts[coarse_tile_idx];
-        let work_end = min(work_base + work_count, arrayLength(&raster_work_queue.items));
-
         let opacity_page_size = vec3<u32>(
             max(opacity_meta.page_size_x, 1u),
             max(opacity_meta.page_size_y, 1u),
@@ -377,7 +381,7 @@ fn rasterize_strands(
         var z0 = -1.0;
         for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
                 continue;
             }
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
@@ -433,7 +437,7 @@ fn rasterize_strands(
 
         for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
                 continue;
             }
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
@@ -628,11 +632,6 @@ fn rasterize_strands(
     @builtin(num_workgroups) num_wg: vec3u,
 ) {
     let active_frustum_id = pc.scan_load_base;
-    let linear_local = local_id.x;
-    let linear_wg = (workgroup_id.z * num_wg.y + workgroup_id.y) * num_wg.x + workgroup_id.x;
-    let thread_idx = linear_wg * WORKGROUP_SIZE + linear_local;
-    let thread_stride = num_wg.x * num_wg.y * num_wg.z * WORKGROUP_SIZE;
-
     if active_frustum_id >= arrayLength(&frustum_table) {
         return;
     }
@@ -640,40 +639,42 @@ fn rasterize_strands(
     if active_desc.kind != 0u {
         return;
     }
+    let run_idx = (workgroup_id.z * num_wg.y + workgroup_id.y) * num_wg.x + workgroup_id.x;
+    if run_idx >= atomicLoad(&raster_tile_run_queue.tail) || run_idx >= arrayLength(&raster_tile_run_queue.items) {
+        return;
+    }
+    let run = raster_tile_run_queue.items[run_idx];
+    if run.frustum_id != active_frustum_id || run.work_count == 0u {
+        return;
+    }
     let active_config = frustum_to_config(active_desc);
-    let total_pixels = active_config.screen_width * active_config.screen_height;
     let camera_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
     let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
+    let tile_x = run.screen_tile_id % fine_tiles_x;
+    let tile_y = run.screen_tile_id / fine_tiles_x;
+    let tile_pixel_count = active_config.froxel_size_x * active_config.froxel_size_y;
+    let work_base = run.work_base;
+    let work_end = min(work_base + run.work_count, arrayLength(&raster_work_queue.items));
 
-    for (var pixel_idx = thread_idx; pixel_idx < total_pixels; pixel_idx = pixel_idx + thread_stride) {
+    // TODO: use tile-local/shared reductions so a subgroup can cooperate on
+    // heavy pixels instead of assigning independent pixels to lanes only.
+    for (var tile_pixel_idx = local_id.x; tile_pixel_idx < tile_pixel_count; tile_pixel_idx = tile_pixel_idx + WORKGROUP_SIZE) {
         let pixel_u = vec2<u32>(
-            pixel_idx % active_config.screen_width,
-            pixel_idx / active_config.screen_width,
+            tile_x * active_config.froxel_size_x + (tile_pixel_idx % active_config.froxel_size_x),
+            tile_y * active_config.froxel_size_y + (tile_pixel_idx / active_config.froxel_size_x),
         );
+        if pixel_u.x >= active_config.screen_width || pixel_u.y >= active_config.screen_height {
+            continue;
+        }
         let pixel_coord_int = vec2<i32>(pixel_u);
         let pixel_center = vec2<f32>(pixel_u) + vec2<f32>(0.5, 0.5);
-        let tile_coord_x = pixel_u.x / active_config.froxel_size_x;
-        let tile_coord_y = pixel_u.y / active_config.froxel_size_y;
-        let screen_tile_id = tile_coord_y * fine_tiles_x + tile_coord_x;
-        let coarse_x = tile_coord_x / COARSE_FINE_TILE_EXTENT;
-        let coarse_y = tile_coord_y / COARSE_FINE_TILE_EXTENT;
-        if coarse_x >= active_desc.coarse_tiles_x || coarse_y >= active_desc.coarse_tiles_y {
-            continue;
-        }
-        let coarse_tile_idx = active_desc.coarse_depth_tile_base + coarse_y * active_desc.coarse_tiles_x + coarse_x;
-        if coarse_tile_idx >= arrayLength(&coarse_tile_work_counts) || coarse_tile_idx >= arrayLength(&coarse_tile_work_offsets) {
-            continue;
-        }
-        let work_base = coarse_tile_work_offsets[coarse_tile_idx];
-        let work_count = coarse_tile_work_counts[coarse_tile_idx];
-        let work_end = min(work_base + work_count, arrayLength(&raster_work_queue.items));
 
         var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
         var g_min_depth: f32 = 0.0;
 
         for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != screen_tile_id {
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
                 continue;
             }
 
