@@ -445,11 +445,8 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_count_pages.is_none()
         || prepass_resources.fine_page_meta.is_none()
         || prepass_resources.fine_cell_offsets.is_none()
-        || prepass_resources.fine_cell_work_offsets.is_none()
         || prepass_resources.fine_cell_write_cursors.is_none()
         || prepass_resources.fine_seg_refs.is_none()
-        || prepass_resources.coarse_tile_work_counts.is_none()
-        || prepass_resources.coarse_tile_work_offsets.is_none()
         || prepass_resources.shadow_dom_surface_ids.is_none()
         || prepass_resources.broad_instance_meta.is_none()
         || prepass_resources.strand_instances.is_none()
@@ -516,16 +513,10 @@ fn use_prepass_buffers(
             (coarse_count_page_capacity as u64) * std::mem::size_of::<FinePageMeta>() as u64;
         let fine_cell_offsets_bytes =
             (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
-        let fine_cell_work_offsets_bytes =
-            (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let fine_cell_write_cursors_bytes =
             (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let fine_seg_refs_bytes = std::mem::size_of::<u32>() as u64
             + (fine_seg_ref_capacity as u64) * std::mem::size_of::<FineSegRef>() as u64;
-        let coarse_tile_work_counts_bytes =
-            (coarse_depth_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
-        let coarse_tile_work_offsets_bytes =
-            (coarse_depth_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -671,12 +662,6 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        prepass_resources.fine_cell_work_offsets = Some(device.create_buffer(&BufferDescriptor {
-            label: Some("strand_fine_cell_work_offsets"),
-            size: fine_cell_work_offsets_bytes,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
         prepass_resources.fine_cell_write_cursors = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_fine_cell_write_cursors"),
             size: fine_cell_write_cursors_bytes,
@@ -689,19 +674,6 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        prepass_resources.coarse_tile_work_counts = Some(device.create_buffer(&BufferDescriptor {
-            label: Some("strand_coarse_tile_work_counts"),
-            size: coarse_tile_work_counts_bytes,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        prepass_resources.coarse_tile_work_offsets =
-            Some(device.create_buffer(&BufferDescriptor {
-                label: Some("strand_coarse_tile_work_offsets"),
-                size: coarse_tile_work_offsets_bytes,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;

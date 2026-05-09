@@ -51,11 +51,8 @@ pub struct StrandPrepassResources {
     pub coarse_count_pages: Option<Buffer>,
     pub fine_page_meta: Option<Buffer>,
     pub fine_cell_offsets: Option<Buffer>,
-    pub fine_cell_work_offsets: Option<Buffer>,
     pub fine_cell_write_cursors: Option<Buffer>,
     pub fine_seg_refs: Option<Buffer>,
-    pub coarse_tile_work_counts: Option<Buffer>,
-    pub coarse_tile_work_offsets: Option<Buffer>,
     pub shadow_dom_surface_ids: Option<Buffer>,
     pub broad_instance_meta: Option<Buffer>,
     // capacities
@@ -91,7 +88,6 @@ pub struct StrandPrepassPipeline {
     pub binning_pipeline: Option<CachedComputePipelineId>,
     pub prefix_fine_pages_pipeline: Option<CachedComputePipelineId>,
     pub fill_fine_seg_refs_pipeline: Option<CachedComputePipelineId>,
-    pub count_coarse_tile_work_pipeline: Option<CachedComputePipelineId>,
     pub emit_raster_work_pipeline: Option<CachedComputePipelineId>,
 }
 
@@ -153,11 +149,8 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::STRAND_INSTANCES, true),
                 Self::storage_entry(layouts::prepass::FINE_PAGE_META, false),
                 Self::storage_entry(layouts::prepass::FINE_CELL_OFFSETS, false),
-                Self::storage_entry(layouts::prepass::FINE_CELL_WORK_OFFSETS, false),
                 Self::storage_entry(layouts::prepass::FINE_CELL_WRITE_CURSORS, false),
                 Self::storage_entry(layouts::prepass::FINE_SEG_REFS, false),
-                Self::storage_entry(layouts::prepass::COARSE_TILE_WORK_COUNTS, false),
-                Self::storage_entry(layouts::prepass::COARSE_TILE_WORK_OFFSETS, false),
                 Self::storage_entry(layouts::prepass::VSMS_REQUEST_META, true),
                 Self::storage_entry(layouts::prepass::VSMS_REQUEST_BITS, false),
                 Self::storage_entry(layouts::prepass::SHADOW_DOM_SURFACE_IDS, true),
@@ -298,7 +291,6 @@ impl FromWorld for StrandPrepassPipeline {
             binning_pipeline: None,
             prefix_fine_pages_pipeline: None,
             fill_fine_seg_refs_pipeline: None,
-            count_coarse_tile_work_pipeline: None,
             emit_raster_work_pipeline: None,
         }
     }
@@ -340,11 +332,8 @@ pub fn create_prepass_bind_group(
     let strand_instances = resources.strand_instances.as_ref().ok_or(())?;
     let fine_page_meta = resources.fine_page_meta.as_ref().ok_or(())?;
     let fine_cell_offsets = resources.fine_cell_offsets.as_ref().ok_or(())?;
-    let fine_cell_work_offsets = resources.fine_cell_work_offsets.as_ref().ok_or(())?;
     let fine_cell_write_cursors = resources.fine_cell_write_cursors.as_ref().ok_or(())?;
     let fine_seg_refs = resources.fine_seg_refs.as_ref().ok_or(())?;
-    let coarse_tile_work_counts = resources.coarse_tile_work_counts.as_ref().ok_or(())?;
-    let coarse_tile_work_offsets = resources.coarse_tile_work_offsets.as_ref().ok_or(())?;
     let shadow_dom_surface_ids = resources.shadow_dom_surface_ids.as_ref().ok_or(())?;
     let broad_instance_meta = resources.broad_instance_meta.as_ref().ok_or(())?;
     let request_meta = request_runtime.metadata_buffer.as_ref().ok_or(())?;
@@ -464,24 +453,12 @@ pub fn create_prepass_bind_group(
                     resource: fine_cell_offsets.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::prepass::FINE_CELL_WORK_OFFSETS,
-                    resource: fine_cell_work_offsets.as_entire_binding(),
-                },
-                BindGroupEntry {
                     binding: layouts::prepass::FINE_CELL_WRITE_CURSORS,
                     resource: fine_cell_write_cursors.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::FINE_SEG_REFS,
                     resource: fine_seg_refs.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::COARSE_TILE_WORK_COUNTS,
-                    resource: coarse_tile_work_counts.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::COARSE_TILE_WORK_OFFSETS,
-                    resource: coarse_tile_work_offsets.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::VSMS_REQUEST_META,
@@ -521,8 +498,6 @@ pub fn run_prepass(
     coarse_count_pages: &Buffer,
     fine_cell_write_cursors: &Buffer,
     fine_seg_refs: &Buffer,
-    coarse_tile_work_counts: &Buffer,
-    coarse_tile_work_offsets: &Buffer,
     frustum_count: u32,
     instance_count: u32,
     max_strands_in_instance: u32,
@@ -544,8 +519,6 @@ pub fn run_prepass(
     encoder.clear_buffer(coarse_count_pages, 0, None);
     let _ = fine_cell_write_cursors;
     encoder.clear_buffer(fine_seg_refs, 0, Some(4));
-    encoder.clear_buffer(coarse_tile_work_counts, 0, None);
-    encoder.clear_buffer(coarse_tile_work_offsets, 0, None);
 
     let Some(broad_pipeline_id) = pipeline.broad_pipeline else {
         warn!("Broad prepass pipeline id not ready yet");
@@ -596,10 +569,6 @@ pub fn run_prepass(
     };
     let Some(fill_fine_seg_refs_pipeline_id) = pipeline.fill_fine_seg_refs_pipeline else {
         warn!("Fill fine seg refs pipeline id not ready yet");
-        return;
-    };
-    let Some(count_coarse_tile_work_pipeline_id) = pipeline.count_coarse_tile_work_pipeline else {
-        warn!("Count coarse tile work pipeline id not ready yet");
         return;
     };
     let Some(emit_raster_work_pipeline_id) = pipeline.emit_raster_work_pipeline else {
@@ -667,12 +636,6 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(fill_fine_seg_refs_pipeline_id)
     else {
         warn!("Fill fine seg refs pipeline not found");
-        return;
-    };
-    let Some(count_coarse_tile_work_pipeline) =
-        pipeline_cache.get_compute_pipeline(count_coarse_tile_work_pipeline_id)
-    else {
-        warn!("Count coarse tile work pipeline not found");
         return;
     };
     let Some(emit_raster_work_pipeline) =
@@ -773,20 +736,24 @@ pub fn run_prepass(
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
-    let coarse_tile_pushconstants = PushConstants {
-        num_elements: coarse_depth_tile_capacity,
+    let fine_tile_stack_pushconstants = PushConstants {
+        num_elements: coarse_depth_tile_capacity
+            .saturating_mul(crate::plugin::COARSE_FINE_TILE_EXTENT)
+            .saturating_mul(crate::plugin::COARSE_FINE_TILE_EXTENT),
         ..pushconstants
     };
-    pass.set_pipeline(count_coarse_tile_work_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
-    let coarse_tile_workgroups_x = coarse_depth_tile_capacity.min(65_535).max(1);
-    let coarse_tile_workgroups_y = coarse_depth_tile_capacity
-        .div_ceil(coarse_tile_workgroups_x)
+    let fine_tile_stack_count = fine_tile_stack_pushconstants.num_elements.max(1);
+    let fine_tile_stack_workgroups_x = fine_tile_stack_count.min(65_535).max(1);
+    let fine_tile_stack_workgroups_y = fine_tile_stack_count
+        .div_ceil(fine_tile_stack_workgroups_x)
         .max(1);
-    pass.dispatch_workgroups(coarse_tile_workgroups_x, coarse_tile_workgroups_y, 1);
     pass.set_pipeline(emit_raster_work_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
-    pass.dispatch_workgroups(coarse_tile_workgroups_x, coarse_tile_workgroups_y, 1);
+    pass.set_push_constants(0, bytemuck::bytes_of(&fine_tile_stack_pushconstants));
+    pass.dispatch_workgroups(
+        fine_tile_stack_workgroups_x,
+        fine_tile_stack_workgroups_y,
+        1,
+    );
 }
 
 pub fn update_strand_prepass_pipeline(
@@ -822,7 +789,6 @@ pub fn update_strand_prepass_pipeline(
     let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let prefix_fine_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let fill_fine_seg_refs_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let count_coarse_tile_work_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let emit_raster_work_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
@@ -947,16 +913,6 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
-    let Some(count_coarse_tile_work_pipeline_id) = queue_prepass_pipeline(
-        &pipeline_cache,
-        count_coarse_tile_work_shader,
-        pipeline_res.bind_group_layout.clone(),
-        &allocator,
-        &dims,
-        "count_coarse_tile_work",
-    ) else {
-        return;
-    };
     let Some(emit_raster_work_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         emit_raster_work_shader,
@@ -980,10 +936,9 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     pipeline_res.prefix_fine_pages_pipeline = Some(prefix_fine_pages_pipeline_id);
     pipeline_res.fill_fine_seg_refs_pipeline = Some(fill_fine_seg_refs_pipeline_id);
-    pipeline_res.count_coarse_tile_work_pipeline = Some(count_coarse_tile_work_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} count_work={:?} emit_work={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?}",
         broad_pipeline_id,
         broad_strand_pipeline_id,
         finalize_pipeline_id,
@@ -996,7 +951,6 @@ pub fn update_strand_prepass_pipeline(
         binning_pipeline_id,
         prefix_fine_pages_pipeline_id,
         fill_fine_seg_refs_pipeline_id,
-        count_coarse_tile_work_pipeline_id,
         emit_raster_work_pipeline_id
     );
 }

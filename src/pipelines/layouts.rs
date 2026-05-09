@@ -34,13 +34,10 @@ pub mod prepass {
     pub const FINE_CELL_OFFSETS: u32 = 36;
     pub const FINE_CELL_WRITE_CURSORS: u32 = 37;
     pub const FINE_SEG_REFS: u32 = 38;
-    pub const COARSE_TILE_WORK_COUNTS: u32 = 39;
-    pub const COARSE_TILE_WORK_OFFSETS: u32 = 40;
     pub const VSMS_REQUEST_META: u32 = 41;
     pub const VSMS_REQUEST_BITS: u32 = 42;
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 43;
     pub const BROAD_INSTANCE_META: u32 = 44;
-    pub const FINE_CELL_WORK_OFFSETS: u32 = 45;
     pub const RASTER_TILE_RUN_QUEUE: u32 = 46;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
@@ -80,13 +77,10 @@ pub mod prepass {
             ShaderDefVal::UInt("FINE_CELL_OFFSETS".into(), FINE_CELL_OFFSETS),
             ShaderDefVal::UInt("FINE_CELL_WRITE_CURSORS".into(), FINE_CELL_WRITE_CURSORS),
             ShaderDefVal::UInt("FINE_SEG_REFS".into(), FINE_SEG_REFS),
-            ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
-            ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
             ShaderDefVal::UInt("VSMS_REQUEST_META".into(), VSMS_REQUEST_META),
             ShaderDefVal::UInt("VSMS_REQUEST_BITS".into(), VSMS_REQUEST_BITS),
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("BROAD_INSTANCE_META".into(), BROAD_INSTANCE_META),
-            ShaderDefVal::UInt("FINE_CELL_WORK_OFFSETS".into(), FINE_CELL_WORK_OFFSETS),
             ShaderDefVal::UInt("RASTER_TILE_RUN_QUEUE".into(), RASTER_TILE_RUN_QUEUE),
         ]
     }
@@ -135,8 +129,6 @@ pub mod rasterizer {
     pub const RASTER_WORK_QUEUE: u32 = 28;
     pub const FINE_SEG_REFS: u32 = 29;
     pub const STRAND_INSTANCES: u32 = 30;
-    pub const COARSE_TILE_WORK_COUNTS: u32 = 31;
-    pub const COARSE_TILE_WORK_OFFSETS: u32 = 32;
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 33;
     pub const RASTER_TILE_RUN_QUEUE: u32 = 34;
 
@@ -214,8 +206,6 @@ pub mod rasterizer {
             ShaderDefVal::UInt("RASTER_WORK_QUEUE".into(), RASTER_WORK_QUEUE),
             ShaderDefVal::UInt("FINE_SEG_REFS".into(), FINE_SEG_REFS),
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
-            ShaderDefVal::UInt("COARSE_TILE_WORK_COUNTS".into(), COARSE_TILE_WORK_COUNTS),
-            ShaderDefVal::UInt("COARSE_TILE_WORK_OFFSETS".into(), COARSE_TILE_WORK_OFFSETS),
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("RASTER_TILE_RUN_QUEUE".into(), RASTER_TILE_RUN_QUEUE),
             ShaderDefVal::UInt(

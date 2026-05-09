@@ -120,14 +120,6 @@ impl Node for WorkPreparationNode {
         let Some(fine_seg_refs) = prepass_resources.fine_seg_refs.as_ref() else {
             return Ok(());
         };
-        let Some(coarse_tile_work_counts) = prepass_resources.coarse_tile_work_counts.as_ref()
-        else {
-            return Ok(());
-        };
-        let Some(coarse_tile_work_offsets) = prepass_resources.coarse_tile_work_offsets.as_ref()
-        else {
-            return Ok(());
-        };
         info!("Running prepass");
         run_prepass(
             render_context,
@@ -144,8 +136,6 @@ impl Node for WorkPreparationNode {
             coarse_count_pages,
             fine_cell_write_cursors,
             fine_seg_refs,
-            coarse_tile_work_counts,
-            coarse_tile_work_offsets,
             prepass_resources.frustum_count,
             prepass_resources.instance_count,
             prepass_resources.max_strands_in_instance,

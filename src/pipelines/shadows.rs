@@ -146,26 +146,6 @@ impl StrandShadowPipeline {
                     },
                     count: None,
                 },
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
             ],
         )
     }
@@ -363,14 +343,6 @@ pub fn create_strand_shadow_bind_group(
     let raster_tile_run_queue = prepass_resources.raster_tile_run_queue.as_ref().ok_or(())?;
     let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
-    let coarse_tile_work_counts = prepass_resources
-        .coarse_tile_work_counts
-        .as_ref()
-        .ok_or(())?;
-    let coarse_tile_work_offsets = prepass_resources
-        .coarse_tile_work_offsets
-        .as_ref()
-        .ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -412,14 +384,6 @@ pub fn create_strand_shadow_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::STRAND_INSTANCES,
                     resource: strand_instances.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::COARSE_TILE_WORK_COUNTS,
-                    resource: coarse_tile_work_counts.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::rasterizer::COARSE_TILE_WORK_OFFSETS,
-                    resource: coarse_tile_work_offsets.as_entire_binding(),
                 },
             ],
         ),
