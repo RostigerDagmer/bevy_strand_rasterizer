@@ -50,6 +50,7 @@ pub struct StrandPrepassResources {
     pub coarse_count_pages: Option<Buffer>,
     pub fine_page_meta: Option<Buffer>,
     pub fine_cell_offsets: Option<Buffer>,
+    pub fine_cell_work_offsets: Option<Buffer>,
     pub fine_cell_write_cursors: Option<Buffer>,
     pub fine_seg_refs: Option<Buffer>,
     pub coarse_tile_work_counts: Option<Buffer>,
@@ -149,6 +150,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::STRAND_INSTANCES, true),
                 Self::storage_entry(layouts::prepass::FINE_PAGE_META, false),
                 Self::storage_entry(layouts::prepass::FINE_CELL_OFFSETS, false),
+                Self::storage_entry(layouts::prepass::FINE_CELL_WORK_OFFSETS, false),
                 Self::storage_entry(layouts::prepass::FINE_CELL_WRITE_CURSORS, false),
                 Self::storage_entry(layouts::prepass::FINE_SEG_REFS, false),
                 Self::storage_entry(layouts::prepass::COARSE_TILE_WORK_COUNTS, false),
@@ -334,6 +336,7 @@ pub fn create_prepass_bind_group(
     let strand_instances = resources.strand_instances.as_ref().ok_or(())?;
     let fine_page_meta = resources.fine_page_meta.as_ref().ok_or(())?;
     let fine_cell_offsets = resources.fine_cell_offsets.as_ref().ok_or(())?;
+    let fine_cell_work_offsets = resources.fine_cell_work_offsets.as_ref().ok_or(())?;
     let fine_cell_write_cursors = resources.fine_cell_write_cursors.as_ref().ok_or(())?;
     let fine_seg_refs = resources.fine_seg_refs.as_ref().ok_or(())?;
     let coarse_tile_work_counts = resources.coarse_tile_work_counts.as_ref().ok_or(())?;
@@ -451,6 +454,10 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::FINE_CELL_OFFSETS,
                     resource: fine_cell_offsets.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::FINE_CELL_WORK_OFFSETS,
+                    resource: fine_cell_work_offsets.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::FINE_CELL_WRITE_CURSORS,
@@ -766,8 +773,12 @@ pub fn run_prepass(
     pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
     pass.dispatch_workgroups(coarse_depth_tile_capacity, 1, 1);
     pass.set_pipeline(emit_raster_work_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_tile_pushconstants));
-    pass.dispatch_workgroups(coarse_depth_tile_capacity, 1, 1);
+    pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    pass.dispatch_workgroups(
+        coarse_count_page_table_capacity.min(65_535),
+        coarse_count_page_table_capacity.div_ceil(65_535),
+        1,
+    );
 }
 
 pub fn update_strand_prepass_pipeline(

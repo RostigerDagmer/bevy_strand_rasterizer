@@ -48,6 +48,8 @@
 
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const FINE_WORKGROUP_SIZE: u32 = #FINE_WORKGROUP_SIZE;
+const SCAN_SUBGROUP_THREADS: u32 = #NUMBER_OF_THREADS_PER_SUBGROUP;
+const PAGE_SCAN_SUBGROUPS: u32 = COARSE_COUNT_PAGE_SIZE / SCAN_SUBGROUP_THREADS;
 const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
 const SIZEOF_GEO: u32 = #SIZEOF_GEO;
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
@@ -66,6 +68,7 @@ var<workgroup> page_scan_values: array<u32, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> page_scan_counts: array<u32, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> page_scan_total: u32;
 var<workgroup> page_scan_work_count: u32;
+var<workgroup> coarse_tile_work_base: u32;
 
 var<push_constant> pc: PushConstants;
 
@@ -192,6 +195,7 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 @group(#{PREPASS_GROUP}) @binding(#{FINE_PAGE_META}) var<storage, read_write> fine_page_meta: array<FinePageMeta>;
 @group(#{PREPASS_GROUP}) @binding(#{FINE_CELL_OFFSETS}) var<storage, read_write> fine_cell_offsets: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{FINE_CELL_WORK_OFFSETS}) var<storage, read_write> fine_cell_work_offsets: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{FINE_CELL_WRITE_CURSORS}) var<storage, read_write> fine_cell_write_cursors: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{FINE_SEG_REFS}) var<storage, read_write> fine_seg_refs: FineSegRefBuffer;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_TILE_WORK_COUNTS}) var<storage, read_write> coarse_tile_work_counts: array<u32>;
@@ -1229,15 +1233,89 @@ fn visit_segment_asset_coarse_tiles(p0: vec3<f32>, p1: vec3<f32>, frustum: Frust
     if max_cx < min_cx || max_cy < min_cy {
         return;
     }
-    for (var cy = min_cy; cy <= max_cy; cy = cy + 1u) {
-        for (var cx = min_cx; cx <= max_cx; cx = cx + 1u) {
-            let local_tile = cy * frustum.coarse_tiles_x + cx;
-            if local_tile >= frustum.coarse_depth_tile_count {
-                continue;
-            }
+
+    let coarse_box_min = vec3<f32>(
+        f32(min_cx * coarse_tile_px_x),
+        f32(min_cy * coarse_tile_px_y),
+        0.0,
+    );
+    let coarse_box_max = vec3<f32>(
+        min(f32((max_cx + 1u) * coarse_tile_px_x), f32(frustum.screen_width)) - 1e-3,
+        min(f32((max_cy + 1u) * coarse_tile_px_y), f32(frustum.screen_height)) - 1e-3,
+        1.0,
+    );
+    let clipped = clip_segment_to_box(p0, p1, coarse_box_min, coarse_box_max);
+    if clipped.ok == 0u {
+        return;
+    }
+
+    let p0_coarse = vec2<f32>(
+        clipped.p0.x / f32(coarse_tile_px_x),
+        clipped.p0.y / f32(coarse_tile_px_y),
+    );
+    let p1_coarse = vec2<f32>(
+        clipped.p1.x / f32(coarse_tile_px_x),
+        clipped.p1.y / f32(coarse_tile_px_y),
+    );
+    let f0 = vec2<i32>(
+        clamp(i32(floor(p0_coarse.x)), i32(min_cx), i32(max_cx)),
+        clamp(i32(floor(p0_coarse.y)), i32(min_cy), i32(max_cy)),
+    );
+    let f1 = vec2<i32>(
+        clamp(i32(floor(p1_coarse.x)), i32(min_cx), i32(max_cx)),
+        clamp(i32(floor(p1_coarse.y)), i32(min_cy), i32(max_cy)),
+    );
+
+    let dir = p1_coarse - p0_coarse;
+    let step = vec2<i32>(sgn_i32(dir.x), sgn_i32(dir.y));
+    let safe_dir = select(
+        dir,
+        vec2<f32>(1e-6, 1e-6),
+        abs(dir) < vec2<f32>(1e-6, 1e-6),
+    );
+    let delta_dist = abs(vec2<f32>(1.0, 1.0) / safe_dir);
+    var f = f0;
+    var t_max = select(
+        (floor(p0_coarse) - p0_coarse) / safe_dir,
+        ((floor(p0_coarse) + 1.0) - p0_coarse) / safe_dir,
+        step > vec2<i32>(0, 0),
+    );
+    t_max = select(
+        t_max,
+        vec2<f32>(1e38, 1e38),
+        abs(dir) < vec2<f32>(1e-6, 1e-6),
+    );
+
+    var safety = 0u;
+    let max_steps = (max_cx - min_cx + 1u) + (max_cy - min_cy + 1u) + 2u;
+    loop {
+        if safety > max_steps {
+            break;
+        }
+        if f.x < i32(min_cx) || f.x > i32(max_cx) || f.y < i32(min_cy) || f.y > i32(max_cy) {
+            break;
+        }
+
+        let cx = u32(f.x);
+        let cy = u32(f.y);
+        let local_tile = cy * frustum.coarse_tiles_x + cx;
+        if local_tile < frustum.coarse_depth_tile_count {
             let tile_idx = frustum.coarse_depth_tile_base + local_tile;
             trace_segment_into_coarse_count_page(p0, p1, frustum, tile_idx, local_tile, mark_only, fill_refs, task);
         }
+
+        if all(f == f1) {
+            break;
+        }
+        let step_x = t_max.x <= t_max.y;
+        if step_x {
+            f.x = f.x + step.x;
+            t_max.x = t_max.x + delta_dist.x;
+        } else {
+            f.y = f.y + step.y;
+            t_max.y = t_max.y + delta_dist.y;
+        }
+        safety = safety + 1u;
     }
 }
 
@@ -1261,14 +1339,13 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
 
     let instance = strand_instances[inst_id];
     let asset_id = instance.asset_id;
-    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_geos) {
+    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) {
         return;
     }
 
     let vertex_ptr = t_vertices[asset_id];
     let index_ptr = t_indices[asset_id];
-    let geo_ptr = t_geos[asset_id];
-    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(geo_ptr) {
+    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) {
         return;
     }
 
@@ -1341,8 +1418,11 @@ fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn prefix_fine_pages(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
 ) {
-    let page_table_idx = workgroup_id.y * 65535u + workgroup_id.x;
+    let page_table_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
     let cell_idx = local_id.x;
     if page_table_idx >= pc.num_elements || page_table_idx >= arrayLength(&coarse_count_page_table) {
         return;
@@ -1362,27 +1442,26 @@ fn prefix_fine_pages(
         count = atomicLoad(&coarse_count_pages.counts[count_idx]);
     }
     page_scan_counts[cell_idx] = count;
-    page_scan_values[cell_idx] = count;
+    page_scan_values[cell_idx] = 0u;
     workgroupBarrier();
 
-    var offset = 1u;
-    loop {
-        if offset >= COARSE_COUNT_PAGE_SIZE {
-            break;
-        }
-        var addend = 0u;
-        if cell_idx >= offset {
-            addend = page_scan_values[cell_idx - offset];
-        }
-        workgroupBarrier();
-        if cell_idx >= offset {
-            page_scan_values[cell_idx] = page_scan_values[cell_idx] + addend;
-        }
-        workgroupBarrier();
-        offset = offset << 1u;
+    let seg_ref_exclusive = subgroupExclusiveAdd(count);
+    let seg_ref_inclusive = subgroupInclusiveAdd(count);
+    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+        page_scan_values[subgroup_id] = seg_ref_inclusive;
     }
+    workgroupBarrier();
+    if cell_idx == 0u {
+        var accumulator = 0u;
+        for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i = i + 1u) {
+            let subtotal = page_scan_values[i];
+            page_scan_values[i] = accumulator;
+            accumulator = accumulator + subtotal;
+        }
+    }
+    workgroupBarrier();
 
-    let exclusive_offset = page_scan_values[cell_idx] - page_scan_counts[cell_idx];
+    let exclusive_offset = seg_ref_exclusive + page_scan_values[subgroup_id];
     let global_cell_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
     if global_cell_idx < arrayLength(&fine_cell_offsets) {
         fine_cell_offsets[global_cell_idx] = exclusive_offset;
@@ -1392,28 +1471,32 @@ fn prefix_fine_pages(
     }
 
     let has_work = select(0u, 1u, page_scan_counts[cell_idx] > 0u);
-    page_scan_values[cell_idx] = has_work;
+    page_scan_values[cell_idx] = 0u;
     workgroupBarrier();
-    offset = 1u;
-    loop {
-        if offset >= COARSE_COUNT_PAGE_SIZE {
-            break;
-        }
-        var addend = 0u;
-        if cell_idx >= offset {
-            addend = page_scan_values[cell_idx - offset];
-        }
-        workgroupBarrier();
-        if cell_idx >= offset {
-            page_scan_values[cell_idx] = page_scan_values[cell_idx] + addend;
-        }
-        workgroupBarrier();
-        offset = offset << 1u;
-    }
 
+    let work_exclusive = subgroupExclusiveAdd(has_work);
+    let work_inclusive = subgroupInclusiveAdd(has_work);
+    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+        page_scan_values[subgroup_id] = work_inclusive;
+    }
+    workgroupBarrier();
+    if cell_idx == 0u {
+        var accumulator = 0u;
+        for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i = i + 1u) {
+            let subtotal = page_scan_values[i];
+            page_scan_values[i] = accumulator;
+            accumulator = accumulator + subtotal;
+        }
+    }
+    workgroupBarrier();
+
+    let work_offset = work_exclusive + page_scan_values[subgroup_id];
+    if global_cell_idx < arrayLength(&fine_cell_work_offsets) {
+        fine_cell_work_offsets[global_cell_idx] = work_offset;
+    }
     if cell_idx == COARSE_COUNT_PAGE_SIZE - 1u {
         page_scan_total = exclusive_offset + page_scan_counts[cell_idx];
-        page_scan_work_count = page_scan_values[cell_idx];
+        page_scan_work_count = work_offset + has_work;
     }
     workgroupBarrier();
 
@@ -1456,26 +1539,7 @@ fn frustum_for_coarse_tile(tile_idx: u32) -> u32 {
     return INVALID_PTR;
 }
 
-fn count_work_items_for_coarse_tile(tile_idx: u32) -> u32 {
-    var work_count = 0u;
-    for (var coarse_z = 0u; coarse_z < COARSE_DEPTH_SLICES; coarse_z = coarse_z + 1u) {
-        let page_table_idx = coarse_count_page_table_idx(tile_idx, coarse_z);
-        if page_table_idx >= arrayLength(&coarse_count_page_table) {
-            continue;
-        }
-        let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
-        if page_handle == 0u || page_handle == MARKED_COUNT_PAGE {
-            continue;
-        }
-        let page_idx = page_handle - 1u;
-        if page_idx < arrayLength(&fine_page_meta) {
-            work_count = work_count + fine_page_meta[page_idx].work_count;
-        }
-    }
-    return work_count;
-}
-
-@compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
+@compute @workgroup_size(COARSE_DEPTH_SLICES, 1, 1)
 fn count_coarse_tile_work(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -1484,13 +1548,37 @@ fn count_coarse_tile_work(
     if tile_idx >= pc.num_elements || tile_idx >= arrayLength(&coarse_tile_work_counts) {
         return;
     }
-    if local_id.x != 0u {
-        return;
+    let coarse_z = local_id.x;
+    var lane_work_count = 0u;
+    if coarse_z < COARSE_DEPTH_SLICES {
+        let page_table_idx = coarse_count_page_table_idx(tile_idx, coarse_z);
+        if page_table_idx < arrayLength(&coarse_count_page_table) {
+            let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
+            if page_handle != 0u && page_handle != MARKED_COUNT_PAGE {
+                let page_idx = page_handle - 1u;
+                if page_idx < arrayLength(&fine_page_meta) {
+                    lane_work_count = fine_page_meta[page_idx].work_count;
+                }
+            }
+        }
     }
-    let work_count = count_work_items_for_coarse_tile(tile_idx);
-    coarse_tile_work_counts[tile_idx] = work_count;
-    let work_base = atomicAdd(&raster_work_queue.tail, work_count);
-    coarse_tile_work_offsets[tile_idx] = work_base;
+    let work_count = subgroupAdd(lane_work_count);
+    let work_offset = subgroupExclusiveAdd(lane_work_count);
+    var work_base = 0u;
+    if local_id.x == 0u {
+        coarse_tile_work_counts[tile_idx] = work_count;
+        work_base = atomicAdd(&raster_work_queue.tail, work_count);
+        coarse_tile_work_offsets[tile_idx] = work_base;
+        coarse_tile_work_base = work_base;
+    }
+    workgroupBarrier();
+    work_base = coarse_tile_work_base;
+    if lane_work_count > 0u {
+        let page_table_idx = coarse_count_page_table_idx(tile_idx, coarse_z);
+        let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
+        let page_idx = page_handle - 1u;
+        fine_page_meta[page_idx].work_base = work_base + work_offset;
+    }
 }
 
 fn raster_depth_key(page_table_idx: u32, fine_z: u32) -> u32 {
@@ -1545,14 +1633,15 @@ fn request_shadow_dom_pages(frustum_id: u32, frustum: FrustumDesc, fine_x: u32, 
 fn emit_raster_work(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
 ) {
-    let tile_idx = workgroup_id.x;
-    if tile_idx >= pc.num_elements || tile_idx >= arrayLength(&coarse_tile_work_counts) || tile_idx >= arrayLength(&coarse_tile_work_offsets) {
+    let page_table_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    let cell_idx = local_id.x;
+    if page_table_idx >= pc.num_elements || page_table_idx >= arrayLength(&coarse_count_page_table) {
         return;
     }
-    if local_id.x != 0u {
-        return;
-    }
+    let tile_idx = page_table_idx / COARSE_DEPTH_SLICES;
+    let coarse_z = page_table_idx % COARSE_DEPTH_SLICES;
 
     let frustum_id = frustum_for_coarse_tile(tile_idx);
     if frustum_id == INVALID_PTR {
@@ -1565,61 +1654,52 @@ fn emit_raster_work(
     let fine_tiles_x = ceil_div_u32(frustum.screen_width, frustum.froxel_size_x);
     let fine_tiles_y = ceil_div_u32(frustum.screen_height, frustum.froxel_size_y);
 
-    var write_idx = coarse_tile_work_offsets[tile_idx];
-    let write_end = write_idx + coarse_tile_work_counts[tile_idx];
-    for (var coarse_z = 0u; coarse_z < COARSE_DEPTH_SLICES; coarse_z = coarse_z + 1u) {
-        let page_table_idx = coarse_count_page_table_idx(tile_idx, coarse_z);
-        if page_table_idx >= arrayLength(&coarse_count_page_table) {
-            continue;
-        }
-        let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
-        if page_handle == 0u || page_handle == MARKED_COUNT_PAGE {
-            continue;
-        }
-        let page_idx = page_handle - 1u;
-        if page_idx >= arrayLength(&fine_page_meta) {
-            continue;
-        }
-        let page_meta = fine_page_meta[page_idx];
-        if page_meta.seg_ref_count == 0u || page_meta.flags != 0u {
-            continue;
-        }
-        for (var fine_z = 0u; fine_z < COARSE_DEPTH_SLICES; fine_z = fine_z + 1u) {
-            for (var local_y = 0u; local_y < COARSE_FINE_TILE_EXTENT; local_y = local_y + 1u) {
-                for (var local_x = 0u; local_x < COARSE_FINE_TILE_EXTENT; local_x = local_x + 1u) {
-                    let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + local_x;
-                    let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + local_y;
-                    if fine_x >= fine_tiles_x || fine_y >= fine_tiles_y {
-                        continue;
-                    }
-                    let cell_idx = fine_cell_idx(local_x, local_y, fine_z);
-                    let count_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
-                    let global_cell_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
-                    if count_idx >= arrayLength(&coarse_count_pages.counts) || global_cell_idx >= arrayLength(&fine_cell_offsets) {
-                        continue;
-                    }
-                    let seg_ref_count = atomicLoad(&coarse_count_pages.counts[count_idx]);
-                    if seg_ref_count == 0u {
-                        continue;
-                    }
-                    request_shadow_dom_pages(frustum_id, frustum, fine_x, fine_y);
-                    if write_idx >= write_end || write_idx >= arrayLength(&raster_work_queue.items) {
-                        return;
-                    }
-                    let screen_tile_id = fine_y * fine_tiles_x + fine_x;
-                    raster_work_queue.items[write_idx] = RasterWorkItem(
-                        page_meta.seg_ref_base + fine_cell_offsets[global_cell_idx],
-                        seg_ref_count,
-                        frustum_id,
-                        screen_tile_id,
-                        raster_depth_key(page_table_idx, fine_z),
-                        seg_ref_count,
-                        page_idx,
-                        cell_idx,
-                    );
-                    write_idx = write_idx + 1u;
-                }
-            }
-        }
+    let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
+    if page_handle == 0u || page_handle == MARKED_COUNT_PAGE {
+        return;
     }
+    let page_idx = page_handle - 1u;
+    if page_idx >= arrayLength(&fine_page_meta) {
+        return;
+    }
+    let page_meta = fine_page_meta[page_idx];
+    if page_meta.seg_ref_count == 0u || page_meta.flags != 0u {
+        return;
+    }
+
+    let fine_z = cell_idx / (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
+    let local_tile = cell_idx % (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
+    let local_y = local_tile / COARSE_FINE_TILE_EXTENT;
+    let local_x = local_tile % COARSE_FINE_TILE_EXTENT;
+    let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + local_x;
+    let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + local_y;
+    if fine_x >= fine_tiles_x || fine_y >= fine_tiles_y {
+        return;
+    }
+
+    let count_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
+    let global_cell_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
+    if count_idx >= arrayLength(&coarse_count_pages.counts) || global_cell_idx >= arrayLength(&fine_cell_offsets) || global_cell_idx >= arrayLength(&fine_cell_work_offsets) {
+        return;
+    }
+    let seg_ref_count = atomicLoad(&coarse_count_pages.counts[count_idx]);
+    if seg_ref_count == 0u {
+        return;
+    }
+    let write_idx = page_meta.work_base + fine_cell_work_offsets[global_cell_idx];
+    if write_idx >= arrayLength(&raster_work_queue.items) {
+        return;
+    }
+    request_shadow_dom_pages(frustum_id, frustum, fine_x, fine_y);
+    let screen_tile_id = fine_y * fine_tiles_x + fine_x;
+    raster_work_queue.items[write_idx] = RasterWorkItem(
+        page_meta.seg_ref_base + fine_cell_offsets[global_cell_idx],
+        seg_ref_count,
+        frustum_id,
+        screen_tile_id,
+        raster_depth_key(page_table_idx, fine_z),
+        seg_ref_count,
+        page_idx,
+        cell_idx,
+    );
 }

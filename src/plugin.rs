@@ -438,6 +438,7 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_count_pages.is_none()
         || prepass_resources.fine_page_meta.is_none()
         || prepass_resources.fine_cell_offsets.is_none()
+        || prepass_resources.fine_cell_work_offsets.is_none()
         || prepass_resources.fine_cell_write_cursors.is_none()
         || prepass_resources.fine_seg_refs.is_none()
         || prepass_resources.coarse_tile_work_counts.is_none()
@@ -504,6 +505,8 @@ fn use_prepass_buffers(
         let fine_page_meta_bytes =
             (coarse_count_page_capacity as u64) * std::mem::size_of::<FinePageMeta>() as u64;
         let fine_cell_offsets_bytes =
+            (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let fine_cell_work_offsets_bytes =
             (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let fine_cell_write_cursors_bytes =
             (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
@@ -649,6 +652,12 @@ fn use_prepass_buffers(
         prepass_resources.fine_cell_offsets = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_fine_cell_offsets"),
             size: fine_cell_offsets_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.fine_cell_work_offsets = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_fine_cell_work_offsets"),
+            size: fine_cell_work_offsets_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
