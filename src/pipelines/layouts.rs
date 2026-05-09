@@ -39,6 +39,7 @@ pub mod prepass {
     pub const VSMS_REQUEST_META: u32 = 41;
     pub const VSMS_REQUEST_BITS: u32 = 42;
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 43;
+    pub const BROAD_INSTANCE_META: u32 = 44;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -82,6 +83,7 @@ pub mod prepass {
             ShaderDefVal::UInt("VSMS_REQUEST_META".into(), VSMS_REQUEST_META),
             ShaderDefVal::UInt("VSMS_REQUEST_BITS".into(), VSMS_REQUEST_BITS),
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
+            ShaderDefVal::UInt("BROAD_INSTANCE_META".into(), BROAD_INSTANCE_META),
         ]
     }
 }

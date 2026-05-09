@@ -55,11 +55,13 @@ pub struct StrandPrepassResources {
     pub coarse_tile_work_counts: Option<Buffer>,
     pub coarse_tile_work_offsets: Option<Buffer>,
     pub shadow_dom_surface_ids: Option<Buffer>,
+    pub broad_instance_meta: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
     pub instance_capacity: u32,
     pub instance_count: u32,
+    pub max_strands_in_instance: u32,
     pub frustum_capacity: u32,
     pub frustum_count: u32,
     pub froxel_bucket_capacity: u32,
@@ -75,6 +77,7 @@ pub struct StrandPrepassResources {
 pub struct StrandPrepassPipeline {
     pub bind_group_layout: BindGroupLayout,
     pub broad_pipeline: Option<CachedComputePipelineId>,
+    pub broad_strand_pipeline: Option<CachedComputePipelineId>,
     pub finalize_pipeline: Option<CachedComputePipelineId>,
     pub fine_pipeline: Option<CachedComputePipelineId>,
     pub coarse_interval_pipeline: Option<CachedComputePipelineId>,
@@ -153,6 +156,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::VSMS_REQUEST_META, true),
                 Self::storage_entry(layouts::prepass::VSMS_REQUEST_BITS, false),
                 Self::storage_entry(layouts::prepass::SHADOW_DOM_SURFACE_IDS, true),
+                Self::storage_entry(layouts::prepass::BROAD_INSTANCE_META, false),
             ],
         )
     }
@@ -278,6 +282,7 @@ impl FromWorld for StrandPrepassPipeline {
         StrandPrepassPipeline {
             bind_group_layout,
             broad_pipeline: None,
+            broad_strand_pipeline: None,
             finalize_pipeline: None,
             fine_pipeline: None,
             coarse_interval_pipeline: None,
@@ -334,6 +339,7 @@ pub fn create_prepass_bind_group(
     let coarse_tile_work_counts = resources.coarse_tile_work_counts.as_ref().ok_or(())?;
     let coarse_tile_work_offsets = resources.coarse_tile_work_offsets.as_ref().ok_or(())?;
     let shadow_dom_surface_ids = resources.shadow_dom_surface_ids.as_ref().ok_or(())?;
+    let broad_instance_meta = resources.broad_instance_meta.as_ref().ok_or(())?;
     let request_meta = request_runtime.metadata_buffer.as_ref().ok_or(())?;
     let request_bits = request_runtime.bits_buffer.as_ref().ok_or(())?;
 
@@ -474,6 +480,10 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::SHADOW_DOM_SURFACE_IDS,
                     resource: shadow_dom_surface_ids.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::BROAD_INSTANCE_META,
+                    resource: broad_instance_meta.as_entire_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
@@ -500,6 +510,7 @@ pub fn run_prepass(
     coarse_tile_work_offsets: &Buffer,
     frustum_count: u32,
     instance_count: u32,
+    max_strands_in_instance: u32,
     coarse_depth_tile_capacity: u32,
     coarse_range_capacity: u32,
 ) {
@@ -523,6 +534,10 @@ pub fn run_prepass(
 
     let Some(broad_pipeline_id) = pipeline.broad_pipeline else {
         warn!("Broad prepass pipeline id not ready yet");
+        return;
+    };
+    let Some(broad_strand_pipeline_id) = pipeline.broad_strand_pipeline else {
+        warn!("Broad strand prepass pipeline id not ready yet");
         return;
     };
     let Some(finalize_pipeline_id) = pipeline.finalize_pipeline else {
@@ -578,6 +593,11 @@ pub fn run_prepass(
     };
     let Some(broad_pipeline) = pipeline_cache.get_compute_pipeline(broad_pipeline_id) else {
         warn!("Broad prepass pipeline not found");
+        return;
+    };
+    let Some(broad_strand_pipeline) = pipeline_cache.get_compute_pipeline(broad_strand_pipeline_id)
+    else {
+        warn!("Broad strand prepass pipeline not found");
         return;
     };
     let Some(finalize_pipeline) = pipeline_cache.get_compute_pipeline(finalize_pipeline_id) else {
@@ -669,9 +689,23 @@ pub fn run_prepass(
     );
     pass.set_bind_group(layouts::prepass::PREPASS_GROUP, bind_group, uniform_offsets);
     pass.dispatch_workgroups(
-        settings.dispatch_size.0,
-        settings.dispatch_size.1,
-        settings.dispatch_size.2,
+        instance_count.div_ceil(settings.threads_per_workgroup),
+        1,
+        1,
+    );
+    let broad_strand_pushconstants = PushConstants {
+        num_elements: max_strands_in_instance.max(1),
+        scan_load_base: instance_count,
+        ..pushconstants
+    };
+    pass.set_pipeline(broad_strand_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&broad_strand_pushconstants));
+    pass.dispatch_workgroups(
+        max_strands_in_instance
+            .max(1)
+            .div_ceil(settings.threads_per_workgroup),
+        instance_count.max(1),
+        1,
     );
     pass.set_pipeline(finalize_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
@@ -758,6 +792,7 @@ pub fn update_strand_prepass_pipeline(
     *last_state = Some(current_state);
 
     let broad_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let broad_strand_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let coarse_interval_shader = shader_loader.load("shaders/strand_prepass.wgsl");
@@ -780,6 +815,17 @@ pub fn update_strand_prepass_pipeline(
         "broad_prepass",
     ) else {
         warn!("Could not queue broad prepass pipeline");
+        return;
+    };
+    let Some(broad_strand_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        broad_strand_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "broad_strand_prepass",
+    ) else {
+        warn!("Could not queue broad strand prepass pipeline");
         return;
     };
     let Some(finalize_pipeline_id) = queue_prepass_pipeline(
@@ -903,6 +949,7 @@ pub fn update_strand_prepass_pipeline(
         return;
     };
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
+    pipeline_res.broad_strand_pipeline = Some(broad_strand_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
     pipeline_res.fine_pipeline = Some(fine_pipeline_id);
     pipeline_res.coarse_interval_pipeline = Some(coarse_interval_pipeline_id);
@@ -917,8 +964,9 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.count_coarse_tile_work_pipeline = Some(count_coarse_tile_work_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} count_work={:?} emit_work={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} count_work={:?} emit_work={:?}",
         broad_pipeline_id,
+        broad_strand_pipeline_id,
         finalize_pipeline_id,
         fine_pipeline_id,
         coarse_interval_pipeline_id,

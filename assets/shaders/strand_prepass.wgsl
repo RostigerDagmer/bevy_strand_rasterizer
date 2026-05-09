@@ -148,6 +148,13 @@ struct FineSegRefBuffer {
     refs: array<FineSegRef>,
 }
 
+struct BroadInstanceMeta {
+    strand_count: u32,
+    visible: u32,
+    cull_threshold: f32,
+    _pad0: u32,
+}
+
 // TODO: adjust allocator api so we can actually bind this as read only where no writes are required.
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
 @group(#{BIND_ARRAYS}) @binding(#{INDICES}) var<storage, read_write> indices: binding_array<Indices>;
@@ -192,16 +199,17 @@ struct FineSegRefBuffer {
 @group(#{PREPASS_GROUP}) @binding(#{VSMS_REQUEST_META}) var<storage, read> vsms_request_meta: array<VirtualSurfaceRequestMetaRow>;
 @group(#{PREPASS_GROUP}) @binding(#{VSMS_REQUEST_BITS}) var<storage, read_write> vsms_request_bits: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{BROAD_INSTANCE_META}) var<storage, read_write> broad_instance_meta: array<BroadInstanceMeta>;
 
-fn stochastic_cull_camera(cam: View, aabb: Aabb, world_from_local: mat4x4<f32>, sample_threshold: f32) -> bool {
+fn stochastic_cull_threshold_camera(cam: View, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
     if pc.stochastic_cull_enabled == 0u {
-        return false;
+        return 0.0;
     }
     let aabb_center = (world_from_local * vec4<f32>((aabb.max + aabb.min) * 0.5, 1.0)).xyz;
     let distance_to_cam = length(cam.world_position - aabb_center);
     let cull_max = max(pc.cull_max_dist, 1e-5);
     let norm_distance = max(distance_to_cam - pc.cull_min_dist, 0.0) / cull_max;
-    return sample_threshold <= pow(norm_distance, pc.cull_exponent);
+    return clamp(pow(norm_distance, pc.cull_exponent), 0.0, 1.0);
 }
 
 fn ceil_div_u32(x: u32, y: u32) -> u32 {
@@ -340,16 +348,16 @@ fn dequantize_depth01(z_q: u32) -> f32 {
     return f32(z_q) / f32(DEPTH_QUANT_MAX);
 }
 
-fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) {
+fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> bool {
     if frustum_id >= arrayLength(&frustum_table) {
-        return;
+        return false;
     }
     let frustum = frustum_table[frustum_id];
     if frustum.coarse_depth_tile_count == 0u {
-        return;
+        return false;
     }
     if frustum.kind == 1u && light_layer_from_frustum(frustum_id) == INVALID_PTR {
-        return;
+        return false;
     }
 
     let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
@@ -408,13 +416,13 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
     }
 
     if !any_corner {
-        return;
+        return false;
     }
     if screen_max.x < 0.0 || screen_max.y < 0.0 || screen_min.x >= viewport.z || screen_min.y >= viewport.w {
-        return;
+        return false;
     }
     if z_max < 0.0 || z_min > 1.0 {
-        return;
+        return false;
     }
 
     let coarse_tile_px_x = max(1u, frustum.froxel_size_x * COARSE_FINE_TILE_EXTENT);
@@ -430,7 +438,7 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
 
     let range_idx = atomicAdd(&coarse_range_queue.tail, 1u);
     if range_idx >= arrayLength(&coarse_range_queue.ranges) {
-        return;
+        return false;
     }
     let lookup_idx = inst_id * pc.frustum_count + frustum_id;
     if lookup_idx < arrayLength(&coarse_range_lookup) {
@@ -446,6 +454,7 @@ fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, w
         min_q,
         max_q,
     );
+    return true;
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
@@ -479,35 +488,51 @@ fn broad_prepass(
         let geo = geos[geo_ptr.slab].gs[geo_ptr.offset / SIZEOF_GEO];
         let strand_count_from_meta = meta_ptr.size / SIZEOF_METADATA;
         let strand_count = min(strand_count_from_meta, geo.strand_count);
-        let geo_visible = true; // TODO: frustrum test?
+
+        var geo_visible = false;
+        let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
+        for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
+            let frustum = frustum_table[fi];
+            if frustum.kind <= 1u {
+                geo_visible = emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local) || geo_visible;
+            }
+        }
 
         if inst_idx < arrayLength(&visible_flags) {
             visible_flags[inst_idx] = u32(geo_visible);
         }
 
-        if geo_visible {
-            let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
-            for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
-                let frustum = frustum_table[fi];
-                if frustum.kind <= 1u {
-                    emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local);
-                }
-            }
-
-            for (var strand_local = 0u; strand_local < strand_count; strand_local = strand_local + 1u) {
-                let strand_hash = wang_hash(inst_idx + strand_local);
-                let strand_visible = !stochastic_cull_camera(view, geo.aabb, instance.world_from_local, hash_to_unit_float(strand_hash));
-                if strand_visible {
-                    let task_index = atomicAdd(&fine_phase_queue.tail, 1u);
-                    if task_index >= arrayLength(&fine_phase_queue.tasks) {
-                        break;
-                    }
-                    fine_phase_queue.tasks[task_index] = FinePrepassTask(inst_idx, strand_local);
-                }
-            }
+        if inst_idx < arrayLength(&broad_instance_meta) {
+            broad_instance_meta[inst_idx] = BroadInstanceMeta(
+                strand_count,
+                u32(geo_visible),
+                stochastic_cull_threshold_camera(view, geo.aabb, instance.world_from_local),
+                0u,
+            );
         }
 
         inst_idx += total_invocations;
+    }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn broad_strand_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let strand_local = gid.x;
+    let inst_idx = gid.y;
+    if strand_local >= pc.num_elements || inst_idx >= pc.scan_load_base || inst_idx >= arrayLength(&broad_instance_meta) {
+        return;
+    }
+    let broad = broad_instance_meta[inst_idx];
+    if broad.visible == 0u || strand_local >= broad.strand_count {
+        return;
+    }
+    let strand_hash = wang_hash((inst_idx * 16777619u) ^ strand_local);
+    if hash_to_unit_float(strand_hash) <= broad.cull_threshold {
+        return;
+    }
+    let task_index = atomicAdd(&fine_phase_queue.tail, 1u);
+    if task_index < arrayLength(&fine_phase_queue.tasks) {
+        fine_phase_queue.tasks[task_index] = FinePrepassTask(inst_idx, strand_local);
     }
 }
 

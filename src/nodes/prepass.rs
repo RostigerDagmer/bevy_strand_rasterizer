@@ -148,6 +148,7 @@ impl Node for WorkPreparationNode {
             coarse_tile_work_offsets,
             prepass_resources.frustum_count,
             prepass_resources.instance_count,
+            prepass_resources.max_strands_in_instance,
             prepass_resources.coarse_depth_tile_capacity,
             prepass_resources.coarse_range_capacity,
         );

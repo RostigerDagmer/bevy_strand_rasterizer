@@ -443,6 +443,7 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_tile_work_counts.is_none()
         || prepass_resources.coarse_tile_work_offsets.is_none()
         || prepass_resources.shadow_dom_surface_ids.is_none()
+        || prepass_resources.broad_instance_meta.is_none()
         || prepass_resources.strand_instances.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
@@ -476,6 +477,8 @@ fn use_prepass_buffers(
             (frustum_capacity as u64) * (std::mem::size_of::<GpuFrustumDesc>() as u64);
         let shadow_dom_surface_ids_bytes =
             (frustum_capacity as u64) * (std::mem::size_of::<[u32; 2]>() as u64);
+        let broad_instance_meta_bytes =
+            (instance_capacity as u64) * (4 * std::mem::size_of::<u32>() as u64);
         let froxel_bucket_heads_bytes =
             (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -577,6 +580,12 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.broad_instance_meta = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_broad_instance_meta"),
+            size: broad_instance_meta_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
         prepass_resources.froxel_bucket_heads = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_froxel_bucket_heads"),
             size: froxel_bucket_heads_bytes,
@@ -673,6 +682,7 @@ fn use_prepass_buffers(
         prepass_resources.binning_task_capacity = binning_capacity;
         prepass_resources.instance_capacity = instance_capacity;
         prepass_resources.instance_count = instance_count;
+        prepass_resources.max_strands_in_instance = max_strands_in_instance;
         prepass_resources.frustum_capacity = frustum_capacity;
         prepass_resources.frustum_count = frustum_descs.len() as u32;
         prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
@@ -711,6 +721,7 @@ fn use_prepass_buffers(
         shading_resources.output_texture = Some(view);
     }
     prepass_resources.instance_count = instance_count;
+    prepass_resources.max_strands_in_instance = max_strands_in_instance;
     prepass_resources.frustum_count = frustum_descs.len() as u32;
 
     let zero_queue_hdr = [0u32, 0u32];
