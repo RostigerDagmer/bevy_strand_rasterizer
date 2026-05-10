@@ -678,21 +678,6 @@ fn sample_shadow_visibility(p_world: vec3<f32>) -> f32 {
 #endif
 
 #ifdef LINEAR
-const COLOR_PIXEL_SLOTS: u32 = 64u;
-const COLOR_SEGMENT_BATCH_SIZE: u32 = 8u;
-var<workgroup> color_batch_valid: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_inst_id: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_strand_idx: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_seg_local: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_p0_screen: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_p1_screen: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_v0_world: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_v1_world: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_clip_w: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_radius: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_min_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_max_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn rasterize_strands(
     @builtin(workgroup_id) workgroup_id: vec3u,
@@ -716,7 +701,6 @@ fn rasterize_strands(
         return;
     }
     let active_config = frustum_to_config(active_desc);
-    let camera_clip_from_world = view.unjittered_clip_from_world;
     let camera_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
     let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
     let tile_x = run.screen_tile_id % fine_tiles_x;
@@ -725,140 +709,103 @@ fn rasterize_strands(
     let work_base = run.work_base;
     let work_end = min(work_base + run.work_count, arrayLength(&raster_work_queue.items));
 
-    let tile_pixel_idx = local_id.x;
-    let pixel_u = vec2<u32>(
-        tile_x * active_config.froxel_size_x + (tile_pixel_idx % active_config.froxel_size_x),
-        tile_y * active_config.froxel_size_y + (tile_pixel_idx / active_config.froxel_size_x),
-    );
-    let pixel_active = tile_pixel_idx < min(tile_pixel_count, COLOR_PIXEL_SLOTS)
-        && pixel_u.x < active_config.screen_width
-        && pixel_u.y < active_config.screen_height;
-    let pixel_coord_int = vec2<i32>(pixel_u);
-    let pixel_center = vec2<f32>(pixel_u) + vec2<f32>(0.5, 0.5);
+    // TODO: use tile-local/shared reductions so a subgroup can cooperate on
+    // heavy pixels instead of assigning independent pixels to lanes only.
+    for (var tile_pixel_idx = local_id.x; tile_pixel_idx < tile_pixel_count; tile_pixel_idx = tile_pixel_idx + WORKGROUP_SIZE) {
+        let pixel_u = vec2<u32>(
+            tile_x * active_config.froxel_size_x + (tile_pixel_idx % active_config.froxel_size_x),
+            tile_y * active_config.froxel_size_y + (tile_pixel_idx / active_config.froxel_size_x),
+        );
+        if pixel_u.x >= active_config.screen_width || pixel_u.y >= active_config.screen_height {
+            continue;
+        }
+        let pixel_coord_int = vec2<i32>(pixel_u);
+        let pixel_center = vec2<f32>(pixel_u) + vec2<f32>(0.5, 0.5);
 
-    var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    var g_min_depth: f32 = 0.0;
-    var pixel_done = !pixel_active;
+        var final_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        var g_min_depth: f32 = 0.0;
 
-    for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
-        let work_item = raster_work_queue.items[work_idx];
-        var froxel_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-        let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+            let work_item = raster_work_queue.items[work_idx];
+            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
+                continue;
+            }
 
-        for (var batch_base = work_item.seg_ref_base; batch_base < ref_end; batch_base = batch_base + COLOR_SEGMENT_BATCH_SIZE) {
-            let batch_lane = local_id.x;
-            if batch_lane < COLOR_SEGMENT_BATCH_SIZE {
-                color_batch_valid[batch_lane] = 0u;
-                color_batch_inst_id[batch_lane] = 0u;
-                color_batch_strand_idx[batch_lane] = 0u;
-                color_batch_seg_local[batch_lane] = 0u;
-                color_batch_p0_screen[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
-                color_batch_p1_screen[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
-                color_batch_v0_world[batch_lane] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                color_batch_v1_world[batch_lane] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                color_batch_clip_w[batch_lane] = vec2<f32>(1.0, 1.0);
-                color_batch_radius[batch_lane] = vec2<f32>(0.4, 2.0);
-                color_batch_min_xy[batch_lane] = vec2<f32>(0.0, 0.0);
-                color_batch_max_xy[batch_lane] = vec2<f32>(0.0, 0.0);
-
-                let ref_idx = batch_base + batch_lane;
-                if ref_idx < ref_end {
+            var froxel_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+            let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
                     let seg_ref = fine_seg_refs.refs[ref_idx];
                     let inst_id = seg_ref.inst_id;
-                    if inst_id < arrayLength(&strand_instances) {
-                        let asset_id = strand_instances[inst_id].asset_id;
-                        let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                        let strand_meta = get_segment_meta(asset_id, segment_ref);
-                        if strand_meta.count >= 2u && segment_ref.segment_start_idx >= strand_meta.offset {
-                            let seg_local = segment_ref.segment_start_idx - strand_meta.offset;
-                            if seg_local < (strand_meta.count - 1u) {
-                                let V = get_segment_vertices(inst_id, asset_id, segment_ref);
-                                let v0_world = V[0];
-                                let v1_world = V[1];
-                                let p0_screen = world_to_screen_raw(v0_world, camera_clip_from_world, camera_viewport);
-                                let p1_screen = world_to_screen_raw(v1_world, camera_clip_from_world, camera_viewport);
-                                if !(p0_screen.x < 0.0 && p1_screen.x < 0.0) {
-                                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
-                                    let clip0 = camera_clip_from_world * v0_world;
-                                    let clip1 = camera_clip_from_world * v1_world;
-                                    let min_radius = max(mat.min_radius_pixels, 1e-4);
-                                    let max_radius = max(mat.max_radius_pixels, min_radius);
-                                    color_batch_valid[batch_lane] = 1u;
-                                    color_batch_inst_id[batch_lane] = inst_id;
-                                    color_batch_strand_idx[batch_lane] = segment_ref.strand_idx;
-                                    color_batch_seg_local[batch_lane] = seg_local;
-                                    color_batch_p0_screen[batch_lane] = p0_screen;
-                                    color_batch_p1_screen[batch_lane] = p1_screen;
-                                    color_batch_v0_world[batch_lane] = v0_world;
-                                    color_batch_v1_world[batch_lane] = v1_world;
-                                    color_batch_clip_w[batch_lane] = vec2<f32>(clip0.w, clip1.w);
-                                    color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
-                                    color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
-                                    color_batch_max_xy[batch_lane] = max(p0_screen.xy, p1_screen.xy) + vec2<f32>(max_radius);
-                                }
-                            }
-                        }
+                    if inst_id >= arrayLength(&strand_instances) {
+                        continue;
                     }
-                }
-            }
-            workgroupBarrier();
+                    let asset_id = strand_instances[inst_id].asset_id;
+                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
 
-            if !pixel_done {
-                for (var batch_i = 0u; batch_i < COLOR_SEGMENT_BATCH_SIZE; batch_i = batch_i + 1u) {
-                    if color_batch_valid[batch_i] == 0u {
-                        continue;
-                    }
-                    if any(pixel_center < color_batch_min_xy[batch_i]) || any(pixel_center > color_batch_max_xy[batch_i]) {
-                        continue;
-                    }
-                    let p0_screen = color_batch_p0_screen[batch_i];
-                    let p1_screen = color_batch_p1_screen[batch_i];
+                    let strand_meta = get_segment_meta(asset_id, segment_ref);
+                    if strand_meta.count < 2u { continue; }
+
+                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let v0_world = V[0];
+                    let v1_world = V[1];
+
+                    let p0_screen = world_to_screen_raw(v0_world, view.unjittered_clip_from_world, camera_viewport);
+                    let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, camera_viewport);
+
+                    if p0_screen.x < 0.0 && p1_screen.x < 0.0 { continue; }
+
                     let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
-                    if t < 0.0 || t > 1.0 {
-                        continue;
-                    }
+                    if t < 0.0 || t > 1.0 { continue; }
                     let p_frag = mix(p0_screen, p1_screen, t);
-                    let radius = color_batch_radius[batch_i];
-                    let min_radius = max(radius.x, 1e-4);
-                    let r = mix(min_radius, max(radius.y, min_radius), clamp(normalize_depth01(p_frag.z), 0.0, 1.0));
-                    let coverage = clamp(1.0 - distance(pixel_center, p_frag.xy) / r, 0.0, 1.0);
-                    if coverage <= 0.0 {
-                        continue;
-                    }
+                    let clip0 = view.unjittered_clip_from_world * v0_world;
+                    let clip1 = view.unjittered_clip_from_world * v1_world;
+                    let t_world = perspective_correct_line_t(t, clip0.w, clip1.w);
+                    let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
+                    let dist = distance(pixel_center, p_frag.xy);
 
-                    let layer = color_batch_inst_id[batch_i];
-                    let seg_local = color_batch_seg_local[batch_i];
-                    let strand_idx = color_batch_strand_idx[batch_i];
-                    let dims = textureDimensions(shading_buffer, 0);
-                    if layer >= textureNumLayers(shading_buffer) || seg_local >= dims.x || strand_idx >= dims.y {
-                        continue;
-                    }
+                    let z_cam = normalize_depth01(p_frag.z);
+                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let r = strand_radius_pixels(mat, z_cam);
+                    let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
 
-                    let clip_w = color_batch_clip_w[batch_i];
-                    let t_world = perspective_correct_line_t(t, clip_w.x, clip_w.y);
-                    let p_world = mix(color_batch_v0_world[batch_i].xyz, color_batch_v1_world[batch_i].xyz, t_world);
-                    let shaded = textureLoad(
-                        shading_buffer,
-                        vec2<i32>(i32(seg_local), i32(strand_idx)),
-                        i32(layer),
-                        0,
-                    );
-                    let shadow_visibility = sample_shadow_visibility(p_world);
-                    let hair_fragment = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
-                    froxel_color = blend_over(froxel_color, hair_fragment);
-                    g_min_depth = max(g_min_depth, p_frag.z);
-                }
+                    if coverage > 0.0 {
+                        if segment_ref.segment_start_idx < strand_meta.offset {
+                            continue;
+                        }
+                        let seg_local = segment_ref.segment_start_idx - strand_meta.offset;
+                        if seg_local >= (strand_meta.count - 1u) {
+                            continue;
+                        }
+                        let layer = inst_id;
+                        if layer >= textureNumLayers(shading_buffer) {
+                            continue;
+                        }
+                        let dims = textureDimensions(shading_buffer, 0);
+                        if seg_local >= dims.x || segment_ref.strand_idx >= dims.y {
+                            continue;
+                        }
+                        let shaded = textureLoad(
+                            shading_buffer,
+                            vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
+                            i32(layer),
+                            0,
+                        );
+                        let shadow_visibility = sample_shadow_visibility(p_world);
+                        let hair_fragment = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
+                        froxel_color = blend_over(froxel_color, hair_fragment);
+                        g_min_depth = max(g_min_depth, p_frag.z);
+                    }
+                    if froxel_color.a > 0.98 {
+                        break;
+                    }
             }
-            workgroupBarrier();
-        }
 
-        if pixel_active && !pixel_done {
             final_color = blend_over(final_color, froxel_color);
-            pixel_done = final_color.a > 0.98;
+            if final_color.a > 0.98 {
+                break;
+            }
         }
-    }
 
-    if pixel_active {
         textureStore(render_target, pixel_coord_int, final_color);
         textureStore(depth_target, pixel_coord_int, vec4<f32>(g_min_depth, 0.0, 0.0, 0.0));
     }
