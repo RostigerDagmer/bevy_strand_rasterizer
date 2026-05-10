@@ -259,6 +259,13 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
 
 #ifdef SHADOWS
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
+const SHADOW_PIXEL_SLOTS: u32 = 64u;
+const SHADOW_DEPTH_WORKERS: u32 = 4u;
+const SHADOW_ALPHA_PARTIAL_COUNT: u32 = SHADOW_PIXEL_SLOTS * SHADOW_DEPTH_WORKERS * DOM_SLICES;
+var<workgroup> shadow_z0: array<f32, SHADOW_PIXEL_SLOTS>;
+var<workgroup> shadow_pixel_ready: array<u32, SHADOW_PIXEL_SLOTS>;
+var<workgroup> shadow_alpha_partials: array<f32, SHADOW_ALPHA_PARTIAL_COUNT>;
+
 @group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps: binding_array<texture_storage_3d<r32float, write> >;
 @group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps_depth: binding_array<texture_storage_2d_array<r32float, write> >;
 @group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> opacity_virtual_meta: array<VirtualPageTableMetaRow>;
@@ -334,23 +341,46 @@ fn rasterize_strands(
     let work_base = run.work_base;
     let work_end = min(work_base + run.work_count, arrayLength(&raster_work_queue.items));
 
-    // TODO: use workgroup local/subgroup cooperation across pixels in the tile.
-    // This first migration keeps one lane responsible for one or more pixels.
-    for (var tile_pixel_idx = local_id.x; tile_pixel_idx < tile_pixel_count; tile_pixel_idx = tile_pixel_idx + WORKGROUP_SIZE) {
-        let px_u = vec2<u32>(
+    let pixel_slot = local_id.x / SHADOW_DEPTH_WORKERS;
+    let depth_worker = local_id.x % SHADOW_DEPTH_WORKERS;
+    let tile_pixel_idx = pixel_slot;
+    let active_pixel = pixel_slot < SHADOW_PIXEL_SLOTS && tile_pixel_idx < tile_pixel_count;
+
+    for (var clear_idx = local_id.x; clear_idx < SHADOW_ALPHA_PARTIAL_COUNT; clear_idx = clear_idx + WORKGROUP_SIZE) {
+        shadow_alpha_partials[clear_idx] = 0.0;
+    }
+    if local_id.x < SHADOW_PIXEL_SLOTS {
+        shadow_z0[local_id.x] = -1.0;
+        shadow_pixel_ready[local_id.x] = 0u;
+    }
+    workgroupBarrier();
+
+    var px_u = vec2<u32>(0u, 0u);
+    var px_f = vec2<f32>(0.0, 0.0);
+    var opacity_page_size = vec3<u32>(1u, 1u, 1u);
+    var depth_page_size = vec2<u32>(1u, 1u);
+    var opacity_px = vec2<i32>(0, 0);
+    var depth_px = vec2<i32>(0, 0);
+    var opacity_physical_index = 0u;
+    var depth_physical_index = 0u;
+    var page_valid = false;
+
+    if active_pixel {
+        px_u = vec2<u32>(
             tile_x * active_config.froxel_size_x + (tile_pixel_idx % active_config.froxel_size_x),
             tile_y * active_config.froxel_size_y + (tile_pixel_idx / active_config.froxel_size_x),
         );
-        if px_u.x >= active_config.screen_width || px_u.y >= active_config.screen_height {
-            continue;
-        }
-        let px_f = vec2<f32>(px_u) + vec2(0.5, 0.5);
-        let opacity_page_size = vec3<u32>(
+        page_valid = px_u.x < active_config.screen_width && px_u.y < active_config.screen_height;
+    }
+
+    if page_valid {
+        px_f = vec2<f32>(px_u) + vec2(0.5, 0.5);
+        opacity_page_size = vec3<u32>(
             max(opacity_meta.page_size_x, 1u),
             max(opacity_meta.page_size_y, 1u),
             max(opacity_meta.page_size_z, 1u),
         );
-        let depth_page_size = vec2<u32>(
+        depth_page_size = vec2<u32>(
             max(depth_meta.page_size_x, 1u),
             max(depth_meta.page_size_y, 1u),
         );
@@ -358,26 +388,28 @@ fn rasterize_strands(
         let depth_tile = vec3<u32>(px_u.x / depth_page_size.x, px_u.y / depth_page_size.y, 0u);
         let opacity_addr = vsms_virtual_page_table_address(opacity_meta, opacity_tile, 0u, 0u);
         let depth_addr = vsms_virtual_page_table_address(depth_meta, depth_tile, 0u, 0u);
-        if opacity_addr.valid == 0u || depth_addr.valid == 0u {
-            continue;
-        }
-        if opacity_addr.entry_index >= arrayLength(&opacity_virtual_pages) || depth_addr.entry_index >= arrayLength(&depth_virtual_pages) {
-            continue;
-        }
-        let opacity_entry = opacity_virtual_pages[opacity_addr.entry_index];
-        let depth_entry = depth_virtual_pages[depth_addr.entry_index];
-        if opacity_entry.valid == 0u || depth_entry.valid == 0u {
-            continue;
-        }
-        let opacity_px = vec2<i32>(
-            i32(px_u.x % opacity_page_size.x),
-            i32(px_u.y % opacity_page_size.y),
-        );
-        let depth_px = vec2<i32>(
-            i32(px_u.x % depth_page_size.x),
-            i32(px_u.y % depth_page_size.y),
-        );
+        page_valid = opacity_addr.valid != 0u && depth_addr.valid != 0u
+            && opacity_addr.entry_index < arrayLength(&opacity_virtual_pages)
+            && depth_addr.entry_index < arrayLength(&depth_virtual_pages);
 
+        if page_valid {
+            let opacity_entry = opacity_virtual_pages[opacity_addr.entry_index];
+            let depth_entry = depth_virtual_pages[depth_addr.entry_index];
+            page_valid = opacity_entry.valid != 0u && depth_entry.valid != 0u;
+            opacity_physical_index = opacity_entry.physical_index;
+            depth_physical_index = depth_entry.physical_index;
+            opacity_px = vec2<i32>(
+                i32(px_u.x % opacity_page_size.x),
+                i32(px_u.y % opacity_page_size.y),
+            );
+            depth_px = vec2<i32>(
+                i32(px_u.x % depth_page_size.x),
+                i32(px_u.y % depth_page_size.y),
+            );
+        }
+    }
+
+    if depth_worker == 0u && page_valid {
         // Pass 1: determine nearest depth at this pixel (z0). Bevy directional
         // light projections use reverse-Z, where larger values are closer.
         var z0 = -1.0;
@@ -428,20 +460,22 @@ fn rasterize_strands(
         }
 
         if !found_z0 {
-            textureStore(deep_opacity_maps_depth[i32(depth_entry.physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+            textureStore(deep_opacity_maps_depth[i32(depth_physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
             for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
                 if i < opacity_page_size.z {
-                    textureStore(deep_opacity_maps[i32(opacity_entry.physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+                    textureStore(deep_opacity_maps[i32(opacity_physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
                 }
             }
-            continue;
+        } else {
+            shadow_z0[pixel_slot] = z0;
+            shadow_pixel_ready[pixel_slot] = 1u;
         }
+    }
+    workgroupBarrier();
 
-        // Pass 2: accumulate opacity slices relative to z0.
-        var alpha: array<f32, DOM_SLICES>;
-        for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
-            alpha[i] = 0.0;
-        }
+    let partial_base = (pixel_slot * SHADOW_DEPTH_WORKERS + depth_worker) * DOM_SLICES;
+    if active_pixel && page_valid && shadow_pixel_ready[pixel_slot] != 0u {
+        let z0 = shadow_z0[pixel_slot];
         let span = max(1e-6, z0);
         let inv_span = 1.0 / span;
 
@@ -451,7 +485,7 @@ fn rasterize_strands(
                 continue;
             }
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
-            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
+            for (var ref_idx = work_item.seg_ref_base + depth_worker; ref_idx < ref_end; ref_idx = ref_idx + SHADOW_DEPTH_WORKERS) {
                     let seg_ref = fine_seg_refs.refs[ref_idx];
                     let inst_id = seg_ref.inst_id;
                     if inst_id >= arrayLength(&strand_instances) {
@@ -488,23 +522,32 @@ fn rasterize_strands(
                     let w = fract(tL);
                     let a = cov * mat.absorption_color.w * 0.5;
 
-                    let a0 = alpha[si];
-                    alpha[si] = clamp(a0 + (1.0 - a0) * (1.0 - w) * a, 0.0, 1.0);
+                    let a0_idx = partial_base + si;
+                    let a0 = shadow_alpha_partials[a0_idx];
+                    shadow_alpha_partials[a0_idx] = clamp(a0 + (1.0 - a0) * (1.0 - w) * a, 0.0, 1.0);
                     if si + 1u < DOM_SLICES {
-                        let a1 = alpha[si + 1u];
-                        alpha[si + 1u] = clamp(a1 + (1.0 - a1) * w * a, 0.0, 1.0);
+                        let a1_idx = partial_base + si + 1u;
+                        let a1 = shadow_alpha_partials[a1_idx];
+                        shadow_alpha_partials[a1_idx] = clamp(a1 + (1.0 - a1) * w * a, 0.0, 1.0);
                     }
             }
         }
+    }
+    workgroupBarrier();
 
-        textureStore(deep_opacity_maps_depth[i32(depth_entry.physical_index)], depth_px, 0, vec4<f32>(z0, 0.0, 0.0, 0.0));
+    if depth_worker == 0u && active_pixel && page_valid && shadow_pixel_ready[pixel_slot] != 0u {
+        textureStore(deep_opacity_maps_depth[i32(depth_physical_index)], depth_px, 0, vec4<f32>(shadow_z0[pixel_slot], 0.0, 0.0, 0.0));
 
         var acc = 0.0;
         for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
-            let a = alpha[i];
+            var a = 0.0;
+            for (var worker = 0u; worker < SHADOW_DEPTH_WORKERS; worker = worker + 1u) {
+                let partial = shadow_alpha_partials[(pixel_slot * SHADOW_DEPTH_WORKERS + worker) * DOM_SLICES + i];
+                a = a + (1.0 - a) * partial;
+            }
             acc = acc + (1.0 - acc) * a;
             if i < opacity_page_size.z {
-                textureStore(deep_opacity_maps[i32(opacity_entry.physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(acc, 0.0, 0.0, 0.0));
+                textureStore(deep_opacity_maps[i32(opacity_physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(acc, 0.0, 0.0, 0.0));
             }
         }
     }
