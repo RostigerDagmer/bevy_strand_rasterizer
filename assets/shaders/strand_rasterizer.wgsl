@@ -36,8 +36,6 @@ const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
 const SIZEOF_GEO: u32 = #SIZEOF_GEO;
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const LIGHT_INDEX: u32 = 0u; // Example constant for light index TODO: compute prepass -> indirect dispatch -> light index from uniforms
-const MIN_HAIR_RADIUS_PIXELS : f32 = 0.4; // Example: Thickness in pixels
-const MAX_HAIR_RADIUS_PIXELS : f32 = 2.0; // Example: Thickness in pixels
 const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
@@ -164,28 +162,34 @@ fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
 
 fn get_segment_material(asset_id: u32, material_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
     if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || asset_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
-        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
     }
     let meta_ptr = t_strand_metadata[asset_id];
     let material_ptr = t_materials[material_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
-        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
     }
 
     let strand_local = segment_ref.strand_idx;
     let meta_base = meta_ptr.offset / SIZEOF_METADATA;
     let meta_count = meta_ptr.size / SIZEOF_METADATA;
     if strand_local >= meta_count {
-        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
     }
 
     let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + strand_local];
     let material_base = material_ptr.offset / SIZEOF_MATERIAL;
     let material_count = material_ptr.size / SIZEOF_MATERIAL;
     if strand_meta.material_idx >= material_count {
-        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0u, 0u);
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
     }
     return materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
+}
+
+fn strand_radius_pixels(material: StrandMaterial, depth_key: f32) -> f32 {
+    let min_radius = max(material.min_radius_pixels, 1e-4);
+    let max_radius = max(material.max_radius_pixels, min_radius);
+    return mix(min_radius, max_radius, clamp(depth_key, 0.0, 1.0));
 }
 
 #ifndef SHADOWS
@@ -408,7 +412,8 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, clamp(p.z, 0.0, 1.0));
+                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
                         continue;
@@ -469,13 +474,13 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, clamp(p.z, 0.0, 1.0));
+                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
                         continue;
                     }
 
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
                     let dzp = max(0.0, z0 - p.z) * inv_span;
                     let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(DOM_SLICES);
@@ -716,7 +721,8 @@ fn rasterize_strands(
                     let dist = distance(pixel_center, p_frag.xy);
 
                     let z_cam = normalize_depth01(p_frag.z);
-                    let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, z_cam);
+                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let r = strand_radius_pixels(mat, z_cam);
                     let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
 
                     if coverage > 0.0 {

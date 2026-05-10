@@ -43,7 +43,7 @@ fn setup(
             // absorption_color: Vec4::new(0.52, 0.13, 0.1, 0.3),
             // absorption_color: Vec4::new(0.432, 0.224, 0.133, 0.3),
             // absorption_color: Vec4::new(1.0, 209.0 / 255.0, 184.0 / 255.0, 0.8),
-            absorption_color: Vec4::new(0.75, 0.42, 0.18, 0.55),
+            absorption_color: Vec4::new(0.55, 0.33, 0.198, 0.55),
             // specular_color: Vec4::new(0.93, 0.48, 0.375, 2.0),
             // absorption_color: Vec4::new(0.55, 0.38, 0.07, 0.4),
             // specular_color: Vec4::new(0.87, 0.7, 0.38, 0.6),
@@ -59,8 +59,8 @@ fn setup(
             beta: 0.85,
             alpha: 0.35,
             shift: 0.1, // specular shift
-            pad1: 0,
-            pad2: 0,
+            min_radius_pixels: 1.0,
+            max_radius_pixels: 1.5,
         },
         // StrandMaterial::default(),
         Transform::from_translation(Vec3::new(-0.5, 0.0, 0.0)),
@@ -93,8 +93,8 @@ fn setup(
             beta: 0.85,
             alpha: 0.35,
             shift: 0.1, // specular shift
-            pad1: 0,
-            pad2: 0,
+            min_radius_pixels: 0.7,
+            max_radius_pixels: 2.0,
         },
         Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
         GlobalTransform::default(), // StrandMaterial::default(),
@@ -214,7 +214,7 @@ fn strand_material_ui_system(
                     mat.absorption_color.w,
                 ];
                 if ui
-                    .color_edit_button_rgba_premultiplied(&mut ab)
+                    .color_edit_button_rgba_unmultiplied(&mut ab)
                     .on_hover_text("Absorption Color (RGBA)")
                     .changed()
                 {
@@ -229,7 +229,7 @@ fn strand_material_ui_system(
                     mat.specular_color.w,
                 ];
                 if ui
-                    .color_edit_button_rgba_premultiplied(&mut sp)
+                    .color_edit_button_rgba_unmultiplied(&mut sp)
                     .on_hover_text("Specular Color (RGBA)")
                     .changed()
                 {
@@ -249,6 +249,14 @@ fn strand_material_ui_system(
                 ui.add(egui::Slider::new(&mut mat.beta, 0.0..=1.0).text("Beta (Roughness)"));
                 ui.add(egui::Slider::new(&mut mat.alpha, 0.0..=1.0).text("Alpha (Roughness)"));
                 ui.add(egui::Slider::new(&mut mat.shift, 0.0..=1.0).text("Specular Shift"));
+                ui.add(
+                    egui::Slider::new(&mut mat.min_radius_pixels, 0.0..=8.0)
+                        .text("Min Strand Radius"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut mat.max_radius_pixels, 0.0..=8.0)
+                        .text("Max Strand Radius"),
+                );
             }
         });
 }

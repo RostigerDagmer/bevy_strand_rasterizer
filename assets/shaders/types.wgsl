@@ -80,8 +80,8 @@ struct StrandMaterial {
     beta: f32,
     alpha: f32,
     shift: f32,
-    pad_a: u32,
-    pad_b: u32,
+    min_radius_pixels: f32,
+    max_radius_pixels: f32,
 }
 
 struct PushConstants {

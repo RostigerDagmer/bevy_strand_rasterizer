@@ -66,8 +66,8 @@ pub struct StrandMaterial {
     pub beta: f32,
     pub alpha: f32,
     pub shift: f32,
-    pub pad1: u32,
-    pub pad2: u32,
+    pub min_radius_pixels: f32,
+    pub max_radius_pixels: f32,
 }
 
 impl Default for StrandMaterial {
@@ -81,8 +81,8 @@ impl Default for StrandMaterial {
             beta: 0.5,
             alpha: 0.3,
             shift: 0.01,
-            pad1: 0,
-            pad2: 0,
+            min_radius_pixels: 0.4,
+            max_radius_pixels: 2.0,
         }
     }
 }
