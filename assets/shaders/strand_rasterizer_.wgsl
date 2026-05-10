@@ -186,6 +186,30 @@ fn get_segment_material(asset_id: u32, material_id: u32, segment_ref: SegmentRef
     return materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 }
 
+fn fine_seg_ref_seg_local(seg_ref: FineSegRef) -> u32 {
+    return seg_ref.packed_segment & 0xFFFFu;
+}
+
+fn fine_seg_ref_material_idx(seg_ref: FineSegRef) -> u32 {
+    return seg_ref.packed_segment >> 16u;
+}
+
+fn get_material_by_index(material_id: u32, material_idx: u32) -> StrandMaterial {
+    if arrayLength(&t_materials) == 0u || material_id >= arrayLength(&t_materials) {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    let material_ptr = t_materials[material_id];
+    if !is_valid_ptr(material_ptr) {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    let material_base = material_ptr.offset / SIZEOF_MATERIAL;
+    let material_count = material_ptr.size / SIZEOF_MATERIAL;
+    if material_idx >= material_count {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    return materials[material_ptr.slab].mats[material_base + material_idx];
+}
+
 fn strand_radius_pixels(material: StrandMaterial, depth_key: f32) -> f32 {
     let min_radius = max(material.min_radius_pixels, 1e-4);
     let max_radius = max(material.max_radius_pixels, min_radius);
@@ -248,6 +272,36 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
     let world_from_local = strand_instances[inst_id].world_from_local;
+
+    return mat2x4<f32>(
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v1_strand_idx], 1.0),
+    );
+}
+
+fn get_segment_vertices_from_index(world_from_local: mat4x4<f32>, asset_id: u32, segment_start_idx: u32) -> mat2x4<f32> {
+    if arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_vertices) {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+    let index_ptr = t_indices[asset_id];
+    let vertex_ptr = t_vertices[asset_id];
+    if !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+
+    let index_base = index_ptr.offset / 4u;
+    let vertex_base = vertex_ptr.offset / 16u;
+    let index_count = index_ptr.size / 4u;
+    if segment_start_idx + 1u >= index_count {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+
+    let v0_strand_idx = indices[index_ptr.slab].is[index_base + segment_start_idx];
+    let v1_strand_idx = indices[index_ptr.slab].is[index_base + segment_start_idx + 1u];
+    let vertex_count = vertex_ptr.size / 16u;
+    if v0_strand_idx >= vertex_count || v1_strand_idx >= vertex_count {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
 
     return mat2x4<f32>(
         world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
@@ -427,9 +481,10 @@ fn rasterize_strands(
                     if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let asset_id = strand_instances[inst_id].asset_id;
+                    let instance = strand_instances[inst_id];
+                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -444,7 +499,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
@@ -491,9 +546,10 @@ fn rasterize_strands(
                     if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let asset_id = strand_instances[inst_id].asset_id;
+                    let instance = strand_instances[inst_id];
+                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -508,7 +564,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
@@ -701,6 +757,7 @@ fn rasterize_strands(
         return;
     }
     let active_config = frustum_to_config(active_desc);
+    let camera_clip_from_world = view.unjittered_clip_from_world;
     let camera_viewport = vec4<f32>(0.0, 0.0, f32(active_config.screen_width), f32(active_config.screen_height));
     let fine_tiles_x = (active_config.screen_width + active_config.froxel_size_x - 1u) / active_config.froxel_size_x;
     let tile_x = run.screen_tile_id % fine_tiles_x;
@@ -708,6 +765,8 @@ fn rasterize_strands(
     let tile_pixel_count = active_config.froxel_size_x * active_config.froxel_size_y;
     let work_base = run.work_base;
     let work_end = min(work_base + run.work_count, arrayLength(&raster_work_queue.items));
+    let shading_dims = textureDimensions(shading_buffer, 0);
+    let shading_layers = textureNumLayers(shading_buffer);
 
     // TODO: use tile-local/shared reductions so a subgroup can cooperate on
     // heavy pixels instead of assigning independent pixels to lanes only.
@@ -727,10 +786,6 @@ fn rasterize_strands(
 
         for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
-                continue;
-            }
-
             var froxel_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
             for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
@@ -739,61 +794,58 @@ fn rasterize_strands(
                     if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let asset_id = strand_instances[inst_id].asset_id;
+                    let instance = strand_instances[inst_id];
+                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
+                    let seg_local = fine_seg_ref_seg_local(seg_ref);
+                    if inst_id >= shading_layers || seg_local >= shading_dims.x || segment_ref.strand_idx >= shading_dims.y {
+                        continue;
+                    }
 
-                    let strand_meta = get_segment_meta(asset_id, segment_ref);
-                    if strand_meta.count < 2u { continue; }
-
-                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
                     let v0_world = V[0];
                     let v1_world = V[1];
 
-                    let p0_screen = world_to_screen_raw(v0_world, view.unjittered_clip_from_world, camera_viewport);
-                    let p1_screen = world_to_screen_raw(v1_world, view.unjittered_clip_from_world, camera_viewport);
+                    let p0_screen = world_to_screen_raw(v0_world, camera_clip_from_world, camera_viewport);
+                    let p1_screen = world_to_screen_raw(v1_world, camera_clip_from_world, camera_viewport);
 
                     if p0_screen.x < 0.0 && p1_screen.x < 0.0 { continue; }
 
-                    let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
+                    let p0_xy = p0_screen.xy;
+                    let p1_xy = p1_screen.xy;
+                    let t = fragment_position_line_relative(pixel_center, p0_xy, p1_xy);
                     if t < 0.0 || t > 1.0 { continue; }
-                    let p_frag = mix(p0_screen, p1_screen, t);
-                    let clip0 = view.unjittered_clip_from_world * v0_world;
-                    let clip1 = view.unjittered_clip_from_world * v1_world;
-                    let t_world = perspective_correct_line_t(t, clip0.w, clip1.w);
-                    let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
-                    let dist = distance(pixel_center, p_frag.xy);
+                    let p_frag_xy = mix(p0_xy, p1_xy, t);
+                    let p_frag_z = mix(p0_screen.z, p1_screen.z, t);
+                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
+                    let r = strand_radius_pixels(mat, normalize_depth01(p_frag_z));
+                    let delta = pixel_center - p_frag_xy;
+                    let d2 = dot(delta, delta);
 
-                    let z_cam = normalize_depth01(p_frag.z);
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
-                    let r = strand_radius_pixels(mat, z_cam);
-                    let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
-
-                    if coverage > 0.0 {
-                        if segment_ref.segment_start_idx < strand_meta.offset {
-                            continue;
-                        }
-                        let seg_local = segment_ref.segment_start_idx - strand_meta.offset;
-                        if seg_local >= (strand_meta.count - 1u) {
-                            continue;
-                        }
-                        let layer = inst_id;
-                        if layer >= textureNumLayers(shading_buffer) {
-                            continue;
-                        }
-                        let dims = textureDimensions(shading_buffer, 0);
-                        if seg_local >= dims.x || segment_ref.strand_idx >= dims.y {
-                            continue;
-                        }
-                        let shaded = textureLoad(
+                    if d2 < r * r {
+                        let coverage = clamp(1.0 - sqrt(d2) / r, 0.0, 1.0);
+                        let clip0 = camera_clip_from_world * v0_world;
+                        let clip1 = camera_clip_from_world * v1_world;
+                        let t_world = perspective_correct_line_t(t, clip0.w, clip1.w);
+                        let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
+                        let seg_next = min(seg_local + 1u, shading_dims.x - 1u);
+                        let shaded0 = textureLoad(
                             shading_buffer,
                             vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
-                            i32(layer),
+                            i32(inst_id),
                             0,
                         );
+                        let shaded1 = textureLoad(
+                            shading_buffer,
+                            vec2<i32>(i32(seg_next), i32(segment_ref.strand_idx)),
+                            i32(inst_id),
+                            0,
+                        );
+                        let shaded = mix(shaded0, shaded1, t_world);
                         let shadow_visibility = sample_shadow_visibility(p_world);
                         let hair_fragment = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
                         froxel_color = blend_over(froxel_color, hair_fragment);
-                        g_min_depth = max(g_min_depth, p_frag.z);
+                        g_min_depth = max(g_min_depth, p_frag_z);
                     }
                     if froxel_color.a > 0.98 {
                         break;

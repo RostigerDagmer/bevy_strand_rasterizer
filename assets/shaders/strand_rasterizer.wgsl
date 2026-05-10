@@ -186,6 +186,30 @@ fn get_segment_material(asset_id: u32, material_id: u32, segment_ref: SegmentRef
     return materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 }
 
+fn fine_seg_ref_seg_local(seg_ref: FineSegRef) -> u32 {
+    return seg_ref.packed_segment & 0xFFFFu;
+}
+
+fn fine_seg_ref_material_idx(seg_ref: FineSegRef) -> u32 {
+    return seg_ref.packed_segment >> 16u;
+}
+
+fn get_material_by_index(material_id: u32, material_idx: u32) -> StrandMaterial {
+    if arrayLength(&t_materials) == 0u || material_id >= arrayLength(&t_materials) {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    let material_ptr = t_materials[material_id];
+    if !is_valid_ptr(material_ptr) {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    let material_base = material_ptr.offset / SIZEOF_MATERIAL;
+    let material_count = material_ptr.size / SIZEOF_MATERIAL;
+    if material_idx >= material_count {
+        return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
+    }
+    return materials[material_ptr.slab].mats[material_base + material_idx];
+}
+
 fn strand_radius_pixels(material: StrandMaterial, depth_key: f32) -> f32 {
     let min_radius = max(material.min_radius_pixels, 1e-4);
     let max_radius = max(material.max_radius_pixels, min_radius);
@@ -248,6 +272,36 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
     let world_from_local = strand_instances[inst_id].world_from_local;
+
+    return mat2x4<f32>(
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
+        world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v1_strand_idx], 1.0),
+    );
+}
+
+fn get_segment_vertices_from_index(world_from_local: mat4x4<f32>, asset_id: u32, segment_start_idx: u32) -> mat2x4<f32> {
+    if arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_vertices) {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+    let index_ptr = t_indices[asset_id];
+    let vertex_ptr = t_vertices[asset_id];
+    if !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+
+    let index_base = index_ptr.offset / 4u;
+    let vertex_base = vertex_ptr.offset / 16u;
+    let index_count = index_ptr.size / 4u;
+    if segment_start_idx + 1u >= index_count {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+
+    let v0_strand_idx = indices[index_ptr.slab].is[index_base + segment_start_idx];
+    let v1_strand_idx = indices[index_ptr.slab].is[index_base + segment_start_idx + 1u];
+    let vertex_count = vertex_ptr.size / 16u;
+    if v0_strand_idx >= vertex_count || v1_strand_idx >= vertex_count {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
 
     return mat2x4<f32>(
         world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
@@ -427,9 +481,10 @@ fn rasterize_strands(
                     if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let asset_id = strand_instances[inst_id].asset_id;
+                    let instance = strand_instances[inst_id];
+                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -444,7 +499,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
@@ -491,9 +546,10 @@ fn rasterize_strands(
                     if inst_id >= arrayLength(&strand_instances) {
                         continue;
                     }
-                    let asset_id = strand_instances[inst_id].asset_id;
+                    let instance = strand_instances[inst_id];
+                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices(inst_id, asset_id, segment_ref);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -508,7 +564,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
-                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
+                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
@@ -782,51 +838,47 @@ fn rasterize_strands(
                     let seg_ref = fine_seg_refs.refs[ref_idx];
                     let inst_id = seg_ref.inst_id;
                     if inst_id < arrayLength(&strand_instances) {
-                        let asset_id = strand_instances[inst_id].asset_id;
+                        let instance = strand_instances[inst_id];
+                        let asset_id = instance.asset_id;
                         let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                        let strand_meta = get_segment_meta(asset_id, segment_ref);
-                        if strand_meta.count >= 2u && segment_ref.segment_start_idx >= strand_meta.offset {
-                            let seg_local = segment_ref.segment_start_idx - strand_meta.offset;
-                            if seg_local < (strand_meta.count - 1u) {
-                                let V = get_segment_vertices(inst_id, asset_id, segment_ref);
-                                let v0_world = V[0];
-                                let v1_world = V[1];
-                                let p0_screen = world_to_screen_raw(v0_world, camera_clip_from_world, camera_viewport);
-                                let p1_screen = world_to_screen_raw(v1_world, camera_clip_from_world, camera_viewport);
-                                if !(p0_screen.x < 0.0 && p1_screen.x < 0.0) {
-                                    let mat = get_segment_material(asset_id, strand_instances[inst_id].material_id, segment_ref);
-                                    let clip0 = camera_clip_from_world * v0_world;
-                                    let clip1 = camera_clip_from_world * v1_world;
-                                    let min_radius = max(mat.min_radius_pixels, 1e-4);
-                                    let max_radius = max(mat.max_radius_pixels, min_radius);
-                                    let layer = inst_id;
-                                    let strand_idx = segment_ref.strand_idx;
-                                    if layer < shading_layers && seg_local < shading_dims.x && strand_idx < shading_dims.y {
-                                        let seg_next = min(seg_local + 1u, shading_dims.x - 1u);
-                                        color_batch_valid[batch_lane] = 1u;
-                                        color_batch_p0_xy[batch_lane] = p0_screen.xy;
-                                        color_batch_p1_xy[batch_lane] = p1_screen.xy;
-                                        color_batch_depth[batch_lane] = vec2<f32>(p0_screen.z, p1_screen.z);
-                                        color_batch_v0_world[batch_lane] = v0_world.xyz;
-                                        color_batch_v1_world[batch_lane] = v1_world.xyz;
-                                        color_batch_clip_w[batch_lane] = vec2<f32>(clip0.w, clip1.w);
-                                        color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
-                                        color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
-                                        color_batch_max_xy[batch_lane] = max(p0_screen.xy, p1_screen.xy) + vec2<f32>(max_radius);
-                                        color_batch_shaded0[batch_lane] = textureLoad(
-                                            shading_buffer,
-                                            vec2<i32>(i32(seg_local), i32(strand_idx)),
-                                            i32(layer),
-                                            0,
-                                        );
-                                        color_batch_shaded1[batch_lane] = textureLoad(
-                                            shading_buffer,
-                                            vec2<i32>(i32(seg_next), i32(strand_idx)),
-                                            i32(layer),
-                                            0,
-                                        );
-                                    }
-                                }
+                        let seg_local = fine_seg_ref_seg_local(seg_ref);
+                        let layer = inst_id;
+                        let strand_idx = segment_ref.strand_idx;
+                        if layer < shading_layers && seg_local < shading_dims.x && segment_ref.strand_idx < shading_dims.y {
+                            let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
+                            let v0_world = V[0];
+                            let v1_world = V[1];
+                            let p0_screen = world_to_screen_raw(v0_world, camera_clip_from_world, camera_viewport);
+                            let p1_screen = world_to_screen_raw(v1_world, camera_clip_from_world, camera_viewport);
+                            if !(p0_screen.x < 0.0 && p1_screen.x < 0.0) {
+                                let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
+                                let clip0 = camera_clip_from_world * v0_world;
+                                let clip1 = camera_clip_from_world * v1_world;
+                                let min_radius = max(mat.min_radius_pixels, 1e-4);
+                                let max_radius = max(mat.max_radius_pixels, min_radius);
+                                let seg_next = min(seg_local + 1u, shading_dims.x - 1u);
+                                color_batch_valid[batch_lane] = 1u;
+                                color_batch_p0_xy[batch_lane] = p0_screen.xy;
+                                color_batch_p1_xy[batch_lane] = p1_screen.xy;
+                                color_batch_depth[batch_lane] = vec2<f32>(p0_screen.z, p1_screen.z);
+                                color_batch_v0_world[batch_lane] = v0_world.xyz;
+                                color_batch_v1_world[batch_lane] = v1_world.xyz;
+                                color_batch_clip_w[batch_lane] = vec2<f32>(clip0.w, clip1.w);
+                                color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
+                                color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
+                                color_batch_max_xy[batch_lane] = max(p0_screen.xy, p1_screen.xy) + vec2<f32>(max_radius);
+                                color_batch_shaded0[batch_lane] = textureLoad(
+                                    shading_buffer,
+                                    vec2<i32>(i32(seg_local), i32(strand_idx)),
+                                    i32(layer),
+                                    0,
+                                );
+                                color_batch_shaded1[batch_lane] = textureLoad(
+                                    shading_buffer,
+                                    vec2<i32>(i32(seg_next), i32(strand_idx)),
+                                    i32(layer),
+                                    0,
+                                );
                             }
                         }
                     }

@@ -1005,7 +1005,27 @@ fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, t
     if dst >= arrayLength(&fine_seg_refs.refs) {
         return;
     }
-    fine_seg_refs.refs[dst] = FineSegRef(task.id_info, task.chunk_id, task.seg_idx, task.packed_field);
+    var packed_segment = 0u;
+    let inst_id = task.id_info;
+    if inst_id < arrayLength(&strand_instances) {
+        let asset_id = strand_instances[inst_id].asset_id;
+        if asset_id < arrayLength(&t_strand_metadata) {
+            let meta_ptr = t_strand_metadata[asset_id];
+            if is_valid_ptr(meta_ptr) {
+                let meta_base = meta_ptr.offset / SIZEOF_METADATA;
+                let meta_count = meta_ptr.size / SIZEOF_METADATA;
+                if task.chunk_id < meta_count {
+                    let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + task.chunk_id];
+                    if task.seg_idx >= strand_meta.offset {
+                        let seg_local = min(task.seg_idx - strand_meta.offset, 0xFFFFu);
+                        let material_idx = min(strand_meta.material_idx, 0xFFFFu);
+                        packed_segment = seg_local | (material_idx << 16u);
+                    }
+                }
+            }
+        }
+    }
+    fine_seg_refs.refs[dst] = FineSegRef(task.id_info, task.chunk_id, task.seg_idx, packed_segment);
 }
 
 fn clip_axis_to_range(p: f32, d: f32, min_v: f32, max_v: f32, t_min: f32, t_max: f32) -> ClipRange {
