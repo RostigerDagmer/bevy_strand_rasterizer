@@ -1,4 +1,5 @@
 /target
+/strand_software_rasterizer
 crates
 *.dsf
 *.dsa
