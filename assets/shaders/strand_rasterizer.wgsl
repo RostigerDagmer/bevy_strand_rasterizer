@@ -2,7 +2,7 @@
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
 // #import "shaders/spline.wgsl"::{ intersect_catmull_rom_spline_3d, closest_point };
-#import "shaders/common.wgsl"::{ DOM_GAMMA, is_valid_ptr, find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index, normalize_depth01, to_log_depth, to_reverse_log_depth, }
+#import "shaders/common.wgsl"::{ DOM_GAMMA, is_valid_ptr, find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, world_to_screen_raw, screen_to_world_raw, screen_to_world, calculate_froxel_index, normalize_depth01, }
 #import "shaders/types.wgsl"::{
     Aabb,
     DevicePtr,
@@ -313,7 +313,7 @@ fn rasterize_strands(
         return;
     }
     let run_idx = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
-    if run_idx >= atomicLoad(&raster_tile_run_queue.tail) || run_idx >= arrayLength(&raster_tile_run_queue.items) {
+    if run_idx >= arrayLength(&raster_tile_run_queue.items) {
         return;
     }
     let run = raster_tile_run_queue.items[run_idx];
@@ -377,11 +377,13 @@ fn rasterize_strands(
         // Pass 1: determine nearest depth at this pixel (z0). Bevy directional
         // light projections use reverse-Z, where larger values are closer.
         var z0 = -1.0;
+        var found_z0 = false;
         for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
             if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
                 continue;
             }
+            var work_item_hit = false;
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
             for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
                     let seg_ref = fine_seg_refs.refs[ref_idx];
@@ -412,10 +414,15 @@ fn rasterize_strands(
                         continue;
                     }
                     z0 = max(z0, p.z);
+                    work_item_hit = true;
+            }
+            if work_item_hit {
+                found_z0 = true;
+                break;
             }
         }
 
-        if z0 < 0.0 {
+        if !found_z0 {
             textureStore(deep_opacity_maps_depth[i32(depth_entry.physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
             for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
                 if i < opacity_page_size.z {
@@ -638,7 +645,7 @@ fn rasterize_strands(
         return;
     }
     let run_idx = (workgroup_id.z * num_wg.y + workgroup_id.y) * num_wg.x + workgroup_id.x;
-    if run_idx >= atomicLoad(&raster_tile_run_queue.tail) || run_idx >= arrayLength(&raster_tile_run_queue.items) {
+    if run_idx >= arrayLength(&raster_tile_run_queue.items) {
         return;
     }
     let run = raster_tile_run_queue.items[run_idx];
@@ -708,7 +715,7 @@ fn rasterize_strands(
                     let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
                     let dist = distance(pixel_center, p_frag.xy);
 
-                    let z_cam = to_log_depth(p_frag.z);
+                    let z_cam = normalize_depth01(p_frag.z);
                     let r = mix(MIN_HAIR_RADIUS_PIXELS, MAX_HAIR_RADIUS_PIXELS, z_cam);
                     let coverage = clamp(1.0 - dist / r, 0.0, 1.0);
 
@@ -739,13 +746,13 @@ fn rasterize_strands(
                         froxel_color = blend_over(froxel_color, hair_fragment);
                         g_min_depth = max(g_min_depth, p_frag.z);
                     }
-                    if froxel_color.a > 0.9995 {
+                    if froxel_color.a > 0.98 {
                         break;
                     }
             }
 
             final_color = blend_over(final_color, froxel_color);
-            if final_color.a > 0.999 {
+            if final_color.a > 0.98 {
                 break;
             }
         }

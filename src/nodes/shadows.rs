@@ -115,6 +115,11 @@ impl Node for StrandShadowRasterizerNode {
         ) else {
             return Ok(());
         };
+        let Some(raster_tile_run_dispatch_args) =
+            prepass_resources.raster_tile_run_dispatch_args.as_ref()
+        else {
+            return Ok(());
+        };
 
         let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
         frusta.sort_by_key(|(entity, _)| entity.index());
@@ -155,7 +160,7 @@ impl Node for StrandShadowRasterizerNode {
                 opacity_surface_id,
                 depth_surface_id,
                 raster_resources,
-                prepass_resources,
+                raster_tile_run_dispatch_args,
                 &shadow_bind_group,
                 &dynamic_offsets,
             );

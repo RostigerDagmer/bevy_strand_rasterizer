@@ -39,6 +39,7 @@ pub mod prepass {
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 43;
     pub const BROAD_INSTANCE_META: u32 = 44;
     pub const RASTER_TILE_RUN_QUEUE: u32 = 46;
+    pub const RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 47;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -82,6 +83,10 @@ pub mod prepass {
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("BROAD_INSTANCE_META".into(), BROAD_INSTANCE_META),
             ShaderDefVal::UInt("RASTER_TILE_RUN_QUEUE".into(), RASTER_TILE_RUN_QUEUE),
+            ShaderDefVal::UInt(
+                "RASTER_TILE_RUN_DISPATCH_ARGS".into(),
+                RASTER_TILE_RUN_DISPATCH_ARGS,
+            ),
         ]
     }
 }

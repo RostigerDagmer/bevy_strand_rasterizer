@@ -429,7 +429,7 @@ pub fn run_shadow_pass(
     opacity_surface_id: u32,
     depth_surface_id: u32,
     resources: &StrandRasterizerResources,
-    prepass_resources: &StrandPrepassResources,
+    raster_tile_run_dispatch_args: &bevy::render::render_resource::Buffer,
     bind_group: &BindGroup,
     offsets: &[u32],
 ) {
@@ -493,8 +493,5 @@ pub fn run_shadow_pass(
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
 
-    let run_capacity = prepass_resources.raster_tile_run_capacity.max(1);
-    let workgroups_x = run_capacity.min(65_535);
-    let workgroups_y = run_capacity.div_ceil(workgroups_x).max(1);
-    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
 }

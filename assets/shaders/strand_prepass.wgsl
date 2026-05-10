@@ -9,8 +9,6 @@
     hash_to_unit_float,
     l_and,
     normalize_depth01,
-    to_log_depth,
-    to_reverse_log_depth,
 }
 
 #import "shaders/types.wgsl"::{
@@ -195,6 +193,7 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_TILE_RUN_QUEUE}) var<storage, read_write> raster_tile_run_queue: RasterTileRunQueue;
+@group(#{PREPASS_GROUP}) @binding(#{RASTER_TILE_RUN_DISPATCH_ARGS}) var<storage, read_write> raster_tile_run_dispatch_args: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_DEPTH_LUT}) var<storage, read_write> coarse_depth_lut: array<CoarseDepthLutEntry>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_RANGE_QUEUE}) var<storage, read_write> coarse_range_queue: CoarseAssetRangeQueue;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_INTERVAL_HEADS}) var<storage, read_write> coarse_interval_heads: array<atomic<u32>>;
@@ -267,10 +266,9 @@ fn clip_from_world_for_frustum(frustum_id: u32) -> mat4x4<f32> {
 }
 
 fn depth_key_for_frustum(raw_z: f32, frustum: FrustumDesc) -> f32 {
-    if frustum.kind == 1u {
-        return to_reverse_log_depth(raw_z);
-    }
-    return to_log_depth(raw_z);
+    // Internal binning/raster-order convention: linear reverse-Z.
+    // Higher values are nearer for the Bevy/wgpu projections we target.
+    return normalize_depth01(raw_z);
 }
 
 fn chunk_capacity() -> u32 {
@@ -1609,8 +1607,13 @@ fn emit_raster_work(
     let screen_tile_id = fine_y * fine_tiles_x + fine_x;
 
     let cell_lane = local_id.x;
-    let coarse_z = cell_lane / COARSE_DEPTH_SLICES;
-    let fine_z = cell_lane % COARSE_DEPTH_SLICES;
+    // Raster consumers iterate tile runs forward and expect front-to-back order.
+    // Depth keys use linear reverse-Z, so larger keys are nearer. LUT slices are
+    // stored in ascending key order; reverse the depth lane mapping during
+    // compaction so each tile run is emitted near-to-far.
+    let depth_lane = (COARSE_COUNT_PAGE_SIZE - 1u) - cell_lane;
+    let coarse_z = depth_lane / COARSE_DEPTH_SLICES;
+    let fine_z = depth_lane % COARSE_DEPTH_SLICES;
     var page_table_idx = 0u;
     var page_idx = INVALID_PTR;
     var cell_idx = 0u;
@@ -1705,4 +1708,22 @@ fn emit_raster_work(
             0u,
         );
     }
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn finalize_raster_dispatch() {
+    let run_count = min(atomicLoad(&raster_tile_run_queue.tail), arrayLength(&raster_tile_run_queue.items));
+    if arrayLength(&raster_tile_run_dispatch_args) < 3u {
+        return;
+    }
+    if run_count == 0u {
+        raster_tile_run_dispatch_args[0] = 0u;
+        raster_tile_run_dispatch_args[1] = 0u;
+        raster_tile_run_dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(run_count, 65535u);
+    raster_tile_run_dispatch_args[0] = x;
+    raster_tile_run_dispatch_args[1] = ceil_div_u32(run_count, x);
+    raster_tile_run_dispatch_args[2] = 1u;
 }

@@ -498,7 +498,7 @@ pub fn run_raster_pass(
     _froxel_config: &FroxelConfig,
     frustum_id: u32,
     resources: &StrandRasterizerResources,
-    prepass_resources: &StrandPrepassResources,
+    raster_tile_run_dispatch_args: &Buffer,
     bind_group: &BindGroup,
     opacity_pool_bind_group: &BindGroup,
     depth_pool_bind_group: &BindGroup,
@@ -586,10 +586,7 @@ pub fn run_raster_pass(
 
         pass.set_pipeline(raster_pipeline);
         pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
-        let run_capacity = prepass_resources.raster_tile_run_capacity.max(1);
-        let workgroups_x = run_capacity.min(65_535);
-        let workgroups_y = run_capacity.div_ceil(workgroups_x).max(1);
-        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
     }
 
     // --- Rasterization complete ---

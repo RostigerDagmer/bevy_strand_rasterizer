@@ -436,6 +436,7 @@ fn use_prepass_buffers(
         || prepass_resources.froxel_bucket_heads.is_none()
         || prepass_resources.raster_work_queue.is_none()
         || prepass_resources.raster_tile_run_queue.is_none()
+        || prepass_resources.raster_tile_run_dispatch_args.is_none()
         || prepass_resources.coarse_depth_lut.is_none()
         || prepass_resources.coarse_range_queue.is_none()
         || prepass_resources.coarse_interval_heads.is_none()
@@ -491,6 +492,7 @@ fn use_prepass_buffers(
             + (raster_work_capacity as u64) * (std::mem::size_of::<RasterWorkItem>() as u64);
         let raster_tile_run_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (raster_tile_run_capacity as u64) * (std::mem::size_of::<RasterTileRun>() as u64);
+        let raster_tile_run_dispatch_args_bytes = (3 * std::mem::size_of::<u32>()) as u64;
         let coarse_depth_lut_bytes = (coarse_depth_tile_capacity as u64)
             * (COARSE_DEPTH_SLICES as u64)
             * (std::mem::size_of::<GpuCoarseDepthLutEntry>() as u64);
@@ -608,6 +610,13 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.raster_tile_run_dispatch_args =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_raster_tile_run_dispatch_args"),
+                size: raster_tile_run_dispatch_args_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
         prepass_resources.coarse_depth_lut = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_coarse_depth_lut"),
             size: coarse_depth_lut_bytes,

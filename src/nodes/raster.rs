@@ -154,6 +154,11 @@ impl Node for StrandRasterizerNode {
         ) else {
             return Ok(());
         };
+        let Some(raster_tile_run_dispatch_args) =
+            prepass_resources.raster_tile_run_dispatch_args.as_ref()
+        else {
+            return Ok(());
+        };
         info!("Running raster pass");
         run_raster_pass(
             render_context,
@@ -163,7 +168,7 @@ impl Node for StrandRasterizerNode {
             &frustrum,
             frustum_id,
             raster_resources,
-            prepass_resources,
+            raster_tile_run_dispatch_args,
             &raster_bind_group,
             opacity_pool_bind_group,
             depth_pool_bind_group,

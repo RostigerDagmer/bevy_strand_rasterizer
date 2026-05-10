@@ -42,6 +42,7 @@ pub struct StrandPrepassResources {
     pub froxel_bucket_heads: Option<Buffer>,
     pub raster_work_queue: Option<Buffer>,
     pub raster_tile_run_queue: Option<Buffer>,
+    pub raster_tile_run_dispatch_args: Option<Buffer>,
     pub coarse_depth_lut: Option<Buffer>,
     pub coarse_range_queue: Option<Buffer>,
     pub coarse_interval_heads: Option<Buffer>,
@@ -89,6 +90,7 @@ pub struct StrandPrepassPipeline {
     pub prefix_fine_pages_pipeline: Option<CachedComputePipelineId>,
     pub fill_fine_seg_refs_pipeline: Option<CachedComputePipelineId>,
     pub emit_raster_work_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_raster_dispatch_pipeline: Option<CachedComputePipelineId>,
 }
 
 impl StrandPrepassPipeline {
@@ -139,6 +141,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::FREE_HEADS, false),
                 Self::storage_entry(layouts::prepass::RASTER_WORK_QUEUE, false),
                 Self::storage_entry(layouts::prepass::RASTER_TILE_RUN_QUEUE, false),
+                Self::storage_entry(layouts::prepass::RASTER_TILE_RUN_DISPATCH_ARGS, false),
                 Self::storage_entry(layouts::prepass::COARSE_DEPTH_LUT, false),
                 Self::storage_entry(layouts::prepass::COARSE_RANGE_QUEUE, false),
                 Self::storage_entry(layouts::prepass::COARSE_INTERVAL_HEADS, false),
@@ -292,6 +295,7 @@ impl FromWorld for StrandPrepassPipeline {
             prefix_fine_pages_pipeline: None,
             fill_fine_seg_refs_pipeline: None,
             emit_raster_work_pipeline: None,
+            finalize_raster_dispatch_pipeline: None,
         }
     }
 }
@@ -322,6 +326,8 @@ pub fn create_prepass_bind_group(
     let free_heads = resources.free_heads.as_ref().ok_or(())?;
     let raster_work_queue = resources.raster_work_queue.as_ref().ok_or(())?;
     let raster_tile_run_queue = resources.raster_tile_run_queue.as_ref().ok_or(())?;
+    let raster_tile_run_dispatch_args =
+        resources.raster_tile_run_dispatch_args.as_ref().ok_or(())?;
     let coarse_depth_lut = resources.coarse_depth_lut.as_ref().ok_or(())?;
     let coarse_range_queue = resources.coarse_range_queue.as_ref().ok_or(())?;
     let coarse_interval_heads = resources.coarse_interval_heads.as_ref().ok_or(())?;
@@ -411,6 +417,10 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::RASTER_TILE_RUN_QUEUE,
                     resource: raster_tile_run_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::RASTER_TILE_RUN_DISPATCH_ARGS,
+                    resource: raster_tile_run_dispatch_args.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::COARSE_DEPTH_LUT,
@@ -575,6 +585,11 @@ pub fn run_prepass(
         warn!("Emit raster work pipeline id not ready yet");
         return;
     };
+    let Some(finalize_raster_dispatch_pipeline_id) = pipeline.finalize_raster_dispatch_pipeline
+    else {
+        warn!("Finalize raster dispatch pipeline id not ready yet");
+        return;
+    };
     let Some(broad_pipeline) = pipeline_cache.get_compute_pipeline(broad_pipeline_id) else {
         warn!("Broad prepass pipeline not found");
         return;
@@ -642,6 +657,12 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(emit_raster_work_pipeline_id)
     else {
         warn!("Emit raster work pipeline not found");
+        return;
+    };
+    let Some(finalize_raster_dispatch_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_raster_dispatch_pipeline_id)
+    else {
+        warn!("Finalize raster dispatch pipeline not found");
         return;
     };
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -754,6 +775,8 @@ pub fn run_prepass(
         fine_tile_stack_workgroups_y,
         1,
     );
+    pass.set_pipeline(finalize_raster_dispatch_pipeline);
+    pass.dispatch_workgroups(1, 1, 1);
 }
 
 pub fn update_strand_prepass_pipeline(
@@ -790,6 +813,7 @@ pub fn update_strand_prepass_pipeline(
     let prefix_fine_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let fill_fine_seg_refs_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let emit_raster_work_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let finalize_raster_dispatch_shader = shader_loader.load("shaders/strand_prepass.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
@@ -923,6 +947,16 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(finalize_raster_dispatch_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_raster_dispatch_shader,
+        pipeline_res.bind_group_layout.clone(),
+        &allocator,
+        &dims,
+        "finalize_raster_dispatch",
+    ) else {
+        return;
+    };
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
     pipeline_res.broad_strand_pipeline = Some(broad_strand_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
@@ -937,8 +971,9 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.prefix_fine_pages_pipeline = Some(prefix_fine_pages_pipeline_id);
     pipeline_res.fill_fine_seg_refs_pipeline = Some(fill_fine_seg_refs_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
+    pipeline_res.finalize_raster_dispatch_pipeline = Some(finalize_raster_dispatch_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?} finalize_raster_dispatch={:?}",
         broad_pipeline_id,
         broad_strand_pipeline_id,
         finalize_pipeline_id,
@@ -951,6 +986,7 @@ pub fn update_strand_prepass_pipeline(
         binning_pipeline_id,
         prefix_fine_pages_pipeline_id,
         fill_fine_seg_refs_pipeline_id,
-        emit_raster_work_pipeline_id
+        emit_raster_work_pipeline_id,
+        finalize_raster_dispatch_pipeline_id
     );
 }
