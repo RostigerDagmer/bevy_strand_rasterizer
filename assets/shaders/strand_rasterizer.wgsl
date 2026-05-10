@@ -683,10 +683,11 @@ const COLOR_SEGMENT_WORKERS: u32 = 4u;
 const COLOR_PARTIAL_COUNT: u32 = COLOR_PIXEL_SLOTS * COLOR_SEGMENT_WORKERS;
 const COLOR_SEGMENT_BATCH_SIZE: u32 = 8u;
 var<workgroup> color_batch_valid: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_p0_screen: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_p1_screen: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_v0_world: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_v1_world: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_p0_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_p1_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_depth: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_v0_world: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_v1_world: array<vec3<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_clip_w: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_radius: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_min_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
@@ -764,10 +765,11 @@ fn rasterize_strands(
             let batch_lane = local_id.x;
             if batch_lane < COLOR_SEGMENT_BATCH_SIZE {
                 color_batch_valid[batch_lane] = 0u;
-                color_batch_p0_screen[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
-                color_batch_p1_screen[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
-                color_batch_v0_world[batch_lane] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                color_batch_v1_world[batch_lane] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                color_batch_p0_xy[batch_lane] = vec2<f32>(0.0, 0.0);
+                color_batch_p1_xy[batch_lane] = vec2<f32>(0.0, 0.0);
+                color_batch_depth[batch_lane] = vec2<f32>(0.0, 0.0);
+                color_batch_v0_world[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
+                color_batch_v1_world[batch_lane] = vec3<f32>(0.0, 0.0, 0.0);
                 color_batch_clip_w[batch_lane] = vec2<f32>(1.0, 1.0);
                 color_batch_radius[batch_lane] = vec2<f32>(0.4, 2.0);
                 color_batch_min_xy[batch_lane] = vec2<f32>(0.0, 0.0);
@@ -802,10 +804,11 @@ fn rasterize_strands(
                                     if layer < shading_layers && seg_local < shading_dims.x && strand_idx < shading_dims.y {
                                         let seg_next = min(seg_local + 1u, shading_dims.x - 1u);
                                         color_batch_valid[batch_lane] = 1u;
-                                        color_batch_p0_screen[batch_lane] = p0_screen;
-                                        color_batch_p1_screen[batch_lane] = p1_screen;
-                                        color_batch_v0_world[batch_lane] = v0_world;
-                                        color_batch_v1_world[batch_lane] = v1_world;
+                                        color_batch_p0_xy[batch_lane] = p0_screen.xy;
+                                        color_batch_p1_xy[batch_lane] = p1_screen.xy;
+                                        color_batch_depth[batch_lane] = vec2<f32>(p0_screen.z, p1_screen.z);
+                                        color_batch_v0_world[batch_lane] = v0_world.xyz;
+                                        color_batch_v1_world[batch_lane] = v1_world.xyz;
                                         color_batch_clip_w[batch_lane] = vec2<f32>(clip0.w, clip1.w);
                                         color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
                                         color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
@@ -844,23 +847,26 @@ fn rasterize_strands(
                         && !any(pixel_center < color_batch_min_xy[batch_i])
                         && !any(pixel_center > color_batch_max_xy[batch_i]);
                     if candidate_valid {
-                        let p0_screen = color_batch_p0_screen[batch_i];
-                        let p1_screen = color_batch_p1_screen[batch_i];
-                        let t = fragment_position_line_relative(pixel_center, p0_screen.xy, p1_screen.xy);
+                        let p0_xy = color_batch_p0_xy[batch_i];
+                        let p1_xy = color_batch_p1_xy[batch_i];
+                        let t = fragment_position_line_relative(pixel_center, p0_xy, p1_xy);
                         if t >= 0.0 && t <= 1.0 {
-                            let p_frag = mix(p0_screen, p1_screen, t);
+                            let p_frag_xy = mix(p0_xy, p1_xy, t);
+                            let p_frag_z = mix(color_batch_depth[batch_i].x, color_batch_depth[batch_i].y, t);
                             let radius = color_batch_radius[batch_i];
                             let min_radius = max(radius.x, 1e-4);
-                            let r = mix(min_radius, max(radius.y, min_radius), clamp(normalize_depth01(p_frag.z), 0.0, 1.0));
-                            let coverage = clamp(1.0 - distance(pixel_center, p_frag.xy) / r, 0.0, 1.0);
-                            if coverage > 0.0 {
+                            let r = mix(min_radius, max(radius.y, min_radius), clamp(normalize_depth01(p_frag_z), 0.0, 1.0));
+                            let delta = pixel_center - p_frag_xy;
+                            let d2 = dot(delta, delta);
+                            if d2 < r * r {
+                                let coverage = clamp(1.0 - sqrt(d2) / r, 0.0, 1.0);
                                 let clip_w = color_batch_clip_w[batch_i];
                                 let t_world = perspective_correct_line_t(t, clip_w.x, clip_w.y);
-                                let p_world = mix(color_batch_v0_world[batch_i].xyz, color_batch_v1_world[batch_i].xyz, t_world);
+                                let p_world = mix(color_batch_v0_world[batch_i], color_batch_v1_world[batch_i], t_world);
                                 let shaded = mix(color_batch_shaded0[batch_i], color_batch_shaded1[batch_i], t_world);
                                 let shadow_visibility = sample_shadow_visibility(p_world);
                                 color_partial[partial_idx] = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
-                                color_partial_depth[partial_idx] = p_frag.z;
+                                color_partial_depth[partial_idx] = p_frag_z;
                             }
                         }
                     }
