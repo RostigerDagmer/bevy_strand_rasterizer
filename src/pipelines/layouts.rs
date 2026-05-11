@@ -292,22 +292,60 @@ pub mod shading {
     use bevy::shader::ShaderDefVal;
 
     pub const SHADING_GROUP: u32 = 2;
+    pub const VSMS_OPACITY_WRITE_GROUP: u32 = 3;
+    pub const VSMS_DEPTH_WRITE_GROUP: u32 = 4;
+    pub const VSMS_OPACITY_TABLE_GROUP: u32 = 5;
+    pub const VSMS_DEPTH_TABLE_GROUP: u32 = 6;
+    pub const VSMS_VIRTUAL_META_BINDING: u32 = 0;
+    pub const VSMS_VIRTUAL_PAGE_TABLE_BINDING: u32 = 1;
+    pub const VSMS_POOL_PAGE_TABLE_BINDING: u32 = 0;
+    pub const VSMS_POOL_TEXTURE_BINDING: u32 = 1;
+    pub const VSMS_POOL_SAMPLER_BINDING: u32 = 2;
+    pub const VSMS_OPACITY_POOL_TEXTURE_COUNT_DEF: &str = "VSMS_OPACITY_POOL_TEXTURE_COUNT";
+    pub const VSMS_DEPTH_POOL_TEXTURE_COUNT_DEF: &str = "VSMS_DEPTH_POOL_TEXTURE_COUNT";
+
     pub const VIEW_UNIFORM: u32 = 0;
     pub const LIGHT_UNIFORM: u32 = 1;
     pub const BINNING_QUEUE: u32 = 2;
     pub const FRUSTUM_TABLE: u32 = 3;
     pub const OUTPUT_TEXTURE: u32 = 4;
     pub const STRAND_INSTANCES: u32 = 5;
+    pub const SHADOW_DOM_SURFACE_IDS: u32 = 6;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
             ShaderDefVal::UInt("SHADING_GROUP".into(), SHADING_GROUP),
+            ShaderDefVal::UInt("VSMS_OPACITY_WRITE_GROUP".into(), VSMS_OPACITY_WRITE_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_WRITE_GROUP".into(), VSMS_DEPTH_WRITE_GROUP),
+            ShaderDefVal::UInt("VSMS_OPACITY_TABLE_GROUP".into(), VSMS_OPACITY_TABLE_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_TABLE_GROUP".into(), VSMS_DEPTH_TABLE_GROUP),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_META_BINDING".into(),
+                VSMS_VIRTUAL_META_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_PAGE_TABLE_BINDING".into(),
+                VSMS_VIRTUAL_PAGE_TABLE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_PAGE_TABLE_BINDING".into(),
+                VSMS_POOL_PAGE_TABLE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_TEXTURE_BINDING".into(),
+                VSMS_POOL_TEXTURE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_SAMPLER_BINDING".into(),
+                VSMS_POOL_SAMPLER_BINDING,
+            ),
             ShaderDefVal::UInt("VIEW_UNIFORM".into(), VIEW_UNIFORM),
             ShaderDefVal::UInt("LIGHT_UNIFORM".into(), LIGHT_UNIFORM),
             ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
+            ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
         ]
     }
 }

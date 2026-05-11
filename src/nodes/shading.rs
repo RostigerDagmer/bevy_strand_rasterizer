@@ -10,6 +10,7 @@ use bevy::{
     },
 };
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use crate::pipelines::{
     prepass::StrandPrepassResources,
@@ -18,6 +19,7 @@ use crate::pipelines::{
         StrandShadingPipeline, StrandShadingResources, create_strand_shading_bind_group,
         run_shading_pass,
     },
+    shadows::{StrandShadowPipeline, create_vsms_table_bind_group},
 };
 
 #[derive(Debug, Clone, Default)]
@@ -45,6 +47,8 @@ impl Node for StrandShadingNode {
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shading_resources = world.resource::<StrandShadingResources>();
         let allocator = world.resource::<GpuPagingAllocator>();
+        let vsms_runtime = world.resource::<VirtualSurfaceRuntime>();
+        let shadow_pipeline = world.resource::<StrandShadowPipeline>();
         let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
         let light_meta = world.resource::<LightMeta>(); // Get light meta
 
@@ -95,6 +99,42 @@ impl Node for StrandShadingNode {
             warn!("Failed to create strand shading bind group.");
             return Ok(());
         };
+        let Some(opacity_pool_bind_group) = vsms_runtime
+            .pool_bindings
+            .get(&VirtualSurfaceKind::Opacity3D)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
+        let Some(depth_pool_bind_group) = vsms_runtime
+            .pool_bindings
+            .get(&VirtualSurfaceKind::Depth2DArray)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
+        let Some(opacity_pool) = vsms_runtime.pools.get(&VirtualSurfaceKind::Opacity3D) else {
+            return Ok(());
+        };
+        let Some(depth_pool) = vsms_runtime.pools.get(&VirtualSurfaceKind::Depth2DArray) else {
+            return Ok(());
+        };
+        let Some(opacity_table_bind_group) = create_vsms_table_bind_group(
+            render_device,
+            &shadow_pipeline.vsms_table_bind_group_layout,
+            opacity_pool,
+            "strand_shading_opacity_vsms_table_bind_group",
+        ) else {
+            return Ok(());
+        };
+        let Some(depth_table_bind_group) = create_vsms_table_bind_group(
+            render_device,
+            &shadow_pipeline.vsms_table_bind_group_layout,
+            depth_pool,
+            "strand_shading_depth_vsms_table_bind_group",
+        ) else {
+            return Ok(());
+        };
 
         run_shading_pass(
             render_context,
@@ -104,6 +144,10 @@ impl Node for StrandShadingNode {
             shading_resources,
             allocator,
             &shading_bind_group,
+            opacity_pool_bind_group,
+            depth_pool_bind_group,
+            &opacity_table_bind_group,
+            &depth_table_bind_group,
             &shading_group_offsets,
         );
 

@@ -16,9 +16,14 @@ use bevy::{
     shader::ShaderDefVal,
 };
 use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use crate::{
-    pipelines::{layouts, prepass::StrandPrepassResources},
+    pipelines::{
+        layouts,
+        prepass::StrandPrepassResources,
+        shadows::{NUM_DOM_SLICES, StrandShadowPipeline},
+    },
     plugin::MAX_TEXTURE_EXTENT,
     shader_types::PushConstants,
 };
@@ -41,6 +46,8 @@ pub struct StrandShadingPipeline {
     pub bind_group_layout: BindGroupLayout,
     pub shading_pipeline: Option<CachedComputePipelineId>,
     pub allocator_epoch: u64,
+    pub opacity_sample_count: u32,
+    pub depth_sample_count: u32,
 }
 
 impl StrandShadingPipeline {
@@ -108,6 +115,16 @@ impl StrandShadingPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::SHADOW_DOM_SURFACE_IDS,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         )
     }
@@ -127,6 +144,8 @@ impl FromWorld for StrandShadingPipeline {
             bind_group_layout,
             shading_pipeline: None,
             allocator_epoch: u64::MAX,
+            opacity_sample_count: 0,
+            depth_sample_count: 0,
         }
     }
 }
@@ -134,11 +153,30 @@ impl FromWorld for StrandShadingPipeline {
 pub fn update_strand_shading_pipeline(
     mut pipeline: ResMut<StrandShadingPipeline>,
     allocator: Res<GpuPagingAllocator>,
+    vsms_runtime: Res<VirtualSurfaceRuntime>,
     shader_loader: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
     let current_state = allocator.bindgroups_epoch;
-    if pipeline.shading_pipeline.is_some() && pipeline.allocator_epoch == current_state {
+    let Some(opacity_pool_binding) = vsms_runtime
+        .pool_bindings
+        .get(&VirtualSurfaceKind::Opacity3D)
+    else {
+        return;
+    };
+    let Some(depth_pool_binding) = vsms_runtime
+        .pool_bindings
+        .get(&VirtualSurfaceKind::Depth2DArray)
+    else {
+        return;
+    };
+    let opacity_sample_count = opacity_pool_binding.texture_count;
+    let depth_sample_count = depth_pool_binding.texture_count;
+    if pipeline.shading_pipeline.is_some()
+        && pipeline.allocator_epoch == current_state
+        && pipeline.opacity_sample_count == opacity_sample_count
+        && pipeline.depth_sample_count == depth_sample_count
+    {
         return;
     }
 
@@ -156,6 +194,8 @@ pub fn update_strand_shading_pipeline(
         "gpu_paging_allocator_table_layout",
         &allocator_layout_entries.page_tables,
     );
+    let opacity_pool_layout = opacity_pool_binding.layout_descriptor.clone();
+    let depth_pool_layout = depth_pool_binding.layout_descriptor.clone();
 
     let cdefs = [
         vec![
@@ -173,6 +213,15 @@ pub fn update_strand_shading_pipeline(
                 "SIZEOF_VERTEX".into(),
                 std::mem::size_of::<bevy::math::Vec4>() as u32,
             ),
+            ShaderDefVal::UInt("NUM_DOM_SLICES".into(), NUM_DOM_SLICES),
+            ShaderDefVal::UInt(
+                layouts::shading::VSMS_OPACITY_POOL_TEXTURE_COUNT_DEF.into(),
+                opacity_sample_count,
+            ),
+            ShaderDefVal::UInt(
+                layouts::shading::VSMS_DEPTH_POOL_TEXTURE_COUNT_DEF.into(),
+                depth_sample_count,
+            ),
         ],
         layouts::shading::shader_defs(),
         allocator.shader_defs(),
@@ -182,12 +231,21 @@ pub fn update_strand_shading_pipeline(
     let max_group = allocator
         .buffer_group_idx
         .max(allocator.table_group_idx)
-        .max(layouts::shading::SHADING_GROUP);
+        .max(layouts::shading::SHADING_GROUP)
+        .max(layouts::shading::VSMS_OPACITY_WRITE_GROUP)
+        .max(layouts::shading::VSMS_DEPTH_WRITE_GROUP)
+        .max(layouts::shading::VSMS_OPACITY_TABLE_GROUP)
+        .max(layouts::shading::VSMS_DEPTH_TABLE_GROUP);
     let shading_layout = StrandShadingPipeline::bind_group_layout_descriptor();
+    let vsms_table_layout = StrandShadowPipeline::vsms_table_bind_group_layout_descriptor();
     let mut layout = vec![shading_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::shading::SHADING_GROUP as usize] = shading_layout;
+    layout[layouts::shading::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_pool_layout;
+    layout[layouts::shading::VSMS_DEPTH_WRITE_GROUP as usize] = depth_pool_layout;
+    layout[layouts::shading::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
+    layout[layouts::shading::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
 
     let shader = shader_loader.load("shaders/strand_shading.wgsl");
     pipeline.shading_pipeline = Some(pipeline_cache.queue_compute_pipeline(
@@ -205,6 +263,8 @@ pub fn update_strand_shading_pipeline(
         },
     ));
     pipeline.allocator_epoch = current_state;
+    pipeline.opacity_sample_count = opacity_sample_count;
+    pipeline.depth_sample_count = depth_sample_count;
 }
 
 pub fn create_strand_shading_bind_group(
@@ -222,6 +282,10 @@ pub fn create_strand_shading_bind_group(
     let binning_queue = prepass_resources.binning_queue.as_ref().ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
+    let shadow_dom_surface_ids = prepass_resources
+        .shadow_dom_surface_ids
+        .as_ref()
+        .ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -251,6 +315,10 @@ pub fn create_strand_shading_bind_group(
                 BindGroupEntry {
                     binding: layouts::shading::STRAND_INSTANCES,
                     resource: strand_instances.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::SHADOW_DOM_SURFACE_IDS,
+                    resource: shadow_dom_surface_ids.as_entire_binding(),
                 },
             ],
         ),
@@ -293,6 +361,10 @@ pub fn run_shading_pass(
     resources: &StrandShadingResources,
     allocator: &GpuPagingAllocator,
     bind_group: &BindGroup,
+    opacity_pool_bind_group: &BindGroup,
+    depth_pool_bind_group: &BindGroup,
+    opacity_table_bind_group: &BindGroup,
+    depth_table_bind_group: &BindGroup,
     offsets: &[u32],
 ) {
     let Some(shading_pipeline_id) = pipeline.shading_pipeline else {
@@ -344,6 +416,26 @@ pub fn run_shading_pass(
         &[],
     );
     pass.set_bind_group(layouts::shading::SHADING_GROUP, bind_group, offsets);
+    pass.set_bind_group(
+        layouts::shading::VSMS_OPACITY_WRITE_GROUP,
+        opacity_pool_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::shading::VSMS_DEPTH_WRITE_GROUP,
+        depth_pool_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::shading::VSMS_OPACITY_TABLE_GROUP,
+        opacity_table_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::shading::VSMS_DEPTH_TABLE_GROUP,
+        depth_table_bind_group,
+        &[],
+    );
 
     let pushconstants = PushConstants {
         num_elements: task_capacity,

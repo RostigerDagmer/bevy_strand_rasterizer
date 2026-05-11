@@ -24,6 +24,11 @@
     PushConstants,
     StrandInstance,
 }
+#import bevy_vsms::virtual_surface_types::{
+    VirtualPageTableEntry,
+    VirtualPageTableMetaRow,
+    vsms_virtual_page_table_address,
+}
 
 #import "shaders/task_contract.wgsl"::{
     BinningTask,
@@ -35,11 +40,14 @@
 }
 
 #import "shaders/common.wgsl"::{
+    DOM_GAMMA,
     // PI,
     // PI_HALF,
     // SQRT_2_PI,
     is_valid_ptr,
-    find_clip_bounds
+    find_clip_bounds,
+    normalize_depth01,
+    world_to_screen_raw,
 }
 
 const PI = 3.14159265359;
@@ -51,6 +59,10 @@ const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const SIZEOF_METADATA: u32 = #SIZEOF_METADATA;
 const SIZEOF_MATERIAL: u32 = #SIZEOF_MATERIAL;
 const SIZEOF_VERTEX: u32 = #SIZEOF_VERTEX;
+const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
+const INVALID_PTR: u32 = 0xFFFFFFFFu;
+const VSMS_OPACITY_POOL_TEXTURE_COUNT: u32 = #{VSMS_OPACITY_POOL_TEXTURE_COUNT};
+const VSMS_DEPTH_POOL_TEXTURE_COUNT: u32 = #{VSMS_DEPTH_POOL_TEXTURE_COUNT};
 
 var<push_constant> pc: PushConstants;
 struct FrustumDesc {
@@ -84,6 +96,17 @@ struct FrustumDesc {
 @group(#{SHADING_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
 @group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d_array<rgba8unorm, write>;
 @group(#{SHADING_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
+@group(#{SHADING_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_TEXTURE_BINDING}) var shadow_opacity_maps: binding_array<texture_3d<f32> >;
+@group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_SAMPLER_BINDING}) var shadow_opacity_sampler: sampler;
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_POOL_TEXTURE_BINDING}) var shadow_depth_maps: binding_array<texture_2d_array<f32> >;
+@group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_POOL_SAMPLER_BINDING}) var shadow_depth_sampler: sampler;
+
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> opacity_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_OPACITY_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> opacity_virtual_pages: array<VirtualPageTableEntry>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> depth_virtual_meta: array<VirtualPageTableMetaRow>;
+@group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> depth_virtual_pages: array<VirtualPageTableEntry>;
 
 // For reference because VsCode wgsl analyzer is broken.
 
@@ -136,6 +159,100 @@ struct FrustumDesc {
 // };
 
 // --- Helpers ---
+
+fn light_frustum_from_layer(light_layer: u32) -> u32 {
+    var layer = 0u;
+    for (var frustum_id = 0u; frustum_id < arrayLength(&frustum_table); frustum_id = frustum_id + 1u) {
+        if frustum_table[frustum_id].kind != 1u {
+            continue;
+        }
+        if layer == light_layer {
+            return frustum_id;
+        }
+        layer = layer + 1u;
+    }
+    return INVALID_PTR;
+}
+
+fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
+    let frustum_id = light_frustum_from_layer(light_layer);
+    if frustum_id == INVALID_PTR || frustum_id >= arrayLength(&frustum_table) || frustum_id >= arrayLength(&shadow_dom_surface_ids) {
+        return 1.0;
+    }
+    let surface_ids = shadow_dom_surface_ids[frustum_id];
+    let opacity_surface_id = surface_ids.x;
+    let depth_surface_id = surface_ids.y;
+    if opacity_surface_id == INVALID_PTR || depth_surface_id == INVALID_PTR {
+        return 1.0;
+    }
+    if opacity_surface_id >= arrayLength(&opacity_virtual_meta) || depth_surface_id >= arrayLength(&depth_virtual_meta) {
+        return 1.0;
+    }
+    let opacity_row = opacity_virtual_meta[opacity_surface_id];
+    let depth_row = depth_virtual_meta[depth_surface_id];
+    if opacity_row.entry_count == 0u || depth_row.entry_count == 0u {
+        return 1.0;
+    }
+
+    let desc = frustum_table[frustum_id];
+    let viewport = vec4<f32>(0.0, 0.0, f32(desc.screen_width), f32(desc.screen_height));
+    let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
+    let raw = world_to_screen_raw(vec4<f32>(p_world, 1.0), light_clip_from_world, viewport);
+    if raw.x < 0.0 || raw.y < 0.0 || raw.x >= viewport.z || raw.y >= viewport.w || raw.z < 0.0 || raw.z > 1.0 {
+        return 1.0;
+    }
+
+    let px = vec2<u32>(u32(raw.x), u32(raw.y));
+    let opacity_page_size = vec3<u32>(
+        max(opacity_row.page_size_x, 1u),
+        max(opacity_row.page_size_y, 1u),
+        max(opacity_row.page_size_z, 1u),
+    );
+    let depth_page_size = vec2<u32>(
+        max(depth_row.page_size_x, 1u),
+        max(depth_row.page_size_y, 1u),
+    );
+    let opacity_tile = vec3<u32>(px.x / opacity_page_size.x, px.y / opacity_page_size.y, 0u);
+    let depth_tile = vec3<u32>(px.x / depth_page_size.x, px.y / depth_page_size.y, 0u);
+    let opacity_addr = vsms_virtual_page_table_address(opacity_row, opacity_tile, 0u, 0u);
+    let depth_addr = vsms_virtual_page_table_address(depth_row, depth_tile, 0u, 0u);
+    if opacity_addr.valid == 0u || depth_addr.valid == 0u {
+        return 1.0;
+    }
+    if opacity_addr.entry_index >= arrayLength(&opacity_virtual_pages) || depth_addr.entry_index >= arrayLength(&depth_virtual_pages) {
+        return 1.0;
+    }
+
+    let opacity_entry = opacity_virtual_pages[opacity_addr.entry_index];
+    let depth_entry = depth_virtual_pages[depth_addr.entry_index];
+    if opacity_entry.valid == 0u || depth_entry.valid == 0u {
+        return 1.0;
+    }
+    if opacity_entry.physical_index >= VSMS_OPACITY_POOL_TEXTURE_COUNT || depth_entry.physical_index >= VSMS_DEPTH_POOL_TEXTURE_COUNT {
+        return 1.0;
+    }
+
+    let opacity_px = vec2<i32>(i32(px.x % opacity_page_size.x), i32(px.y % opacity_page_size.y));
+    let depth_px = vec2<i32>(i32(px.x % depth_page_size.x), i32(px.y % depth_page_size.y));
+    let z0 = textureLoad(shadow_depth_maps[i32(depth_entry.physical_index)], depth_px, 0, 0).x;
+    if z0 <= 0.0 {
+        return 1.0;
+    }
+
+    let z = normalize_depth01(raw.z);
+    if z > z0 - 1e-3 {
+        return 1.0;
+    }
+    let u = pow(clamp(max(0.0, z0 - z) / max(z0, 1e-6), 0.0, 1.0), DOM_GAMMA);
+    let slice_f = u * f32(DOM_SLICES);
+    let slice = min(u32(floor(slice_f)), min(DOM_SLICES, opacity_page_size.z) - 1u);
+    let opacity = textureLoad(
+        shadow_opacity_maps[i32(opacity_entry.physical_index)],
+        vec3<i32>(opacity_px, i32(slice)),
+        0,
+    ).x;
+    return clamp(1.0 - opacity, 0.08, 1.0);
+}
 
 fn csch(x: f32) -> f32 {
     return 1.0 / sinh(x);
@@ -414,11 +531,13 @@ fn Np(p: u32, phi: f32, theta_i: f32, theta_r: f32, eta_val: f32, mu_a_rgb_val: 
 fn weta_strand_bsdf(theta_i: f32, phi_i: f32, theta_r: f32, phi_r: f32, eta_val: f32, mu_a_rgb_val: vec3<f32>, v_long_val: f32, v_azim_val: f32, alpha_p_val: f32, specular_a_rgb_val: vec4<f32>, occlusion: f32) -> vec3<f32> {
     // for more information on this see: model_building.ipynb
     let beta_azim_val = sqrt(v_azim_val);
-    var total_reflectance = Mp(v_long_val, theta_i, theta_r, alpha_p_val) * specular_a_rgb_val.xyz * specular_a_rgb_val.w;
+    let scattering_visibility = clamp(1.0 - occlusion, 0.0, 1.0);
+    let direct_lobe_visibility = mix(0.18, 1.0, scattering_visibility);
+    var total_reflectance = Mp(v_long_val, theta_i, theta_r, alpha_p_val) * specular_a_rgb_val.xyz * specular_a_rgb_val.w * direct_lobe_visibility;
     // var total_reflectance = vec3<f32>(0.0, 0.0, 0.0);
     for (var p = 0u; p < PATH_COUNT; p = p + 1) {
         let Np_val = Np(p, phi_i, theta_i, theta_r, eta_val, mu_a_rgb_val, v_azim_val, beta_azim_val);
-        total_reflectance = total_reflectance + Np_val * ((f32(p + 1u) * (1.0 - occlusion)) / f32(PATH_COUNT));
+        total_reflectance = total_reflectance + Np_val * ((f32(p + 1u) * scattering_visibility) / f32(PATH_COUNT));
     }
     return total_reflectance;
 }
@@ -550,7 +669,10 @@ fn shade_strands(
     for (var j = 0u; j < light_count; j = j + 1u) {
         let light: types::DirectionalLight = lights.directional_lights[j];
         let L = normalize(light.direction_to_light);
-        let bcsdf = marschner(v0, L, V, U, material, 0.0);
+        let strand_midpoint = mix(v0.xyz, v1.xyz, 0.5);
+        let scattering_visibility = sample_shadow_dom_visibility(strand_midpoint, j);
+        let scattering_occlusion = 1.0 - scattering_visibility;
+        let bcsdf = marschner(v0, L, V, U, material, scattering_occlusion);
         var c = bcsdf * (light.color.xyz / 255.0);
         c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor);
         accum_color += vec4<f32>(c.xyz, 0.0);
