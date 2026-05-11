@@ -110,6 +110,10 @@ struct FrustumDesc {
 @group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_META_BINDING}) var<storage, read> depth_virtual_meta: array<VirtualPageTableMetaRow>;
 @group(#{VSMS_DEPTH_TABLE_GROUP}) @binding(#{VSMS_VIRTUAL_PAGE_TABLE_BINDING}) var<storage, read> depth_virtual_pages: array<VirtualPageTableEntry>;
 
+fn shading_atlas_coord(linear_idx: u32, dims: vec2<u32>) -> vec2<i32> {
+    return vec2<i32>(i32(linear_idx % dims.x), i32(linear_idx / dims.x));
+}
+
 // For reference because VsCode wgsl analyzer is broken.
 
 // struct DirectionalCascade {
@@ -611,15 +615,17 @@ fn shade_strands(
         return;
     }
     let instance = strand_instances[inst_id];
-    let asset_id = instance.asset_id;
+    let vertex_id = instance.vertex_id;
+    let index_id = instance.index_id;
+    let meta_id = instance.meta_id;
     let material_id = instance.material_id;
-    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
+    if vertex_id >= arrayLength(&t_vertices) || index_id >= arrayLength(&t_indices) || meta_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
         return;
     }
 
-    let vertex_ptr = t_vertices[asset_id];
-    let index_ptr = t_indices[asset_id];
-    let meta_ptr = t_strand_metadata[asset_id];
+    let vertex_ptr = t_vertices[vertex_id];
+    let index_ptr = t_indices[index_id];
+    let meta_ptr = t_strand_metadata[meta_id];
     let material_ptr = t_materials[material_id];
     if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return;
@@ -678,10 +684,14 @@ fn shade_strands(
     let material = materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 
     var accum_color = vec4<f32>(0.0, 0.0, 0.0, material.absorption_color.w);
-    let x_coord = seg_local;
-    let y_coord = strand_local;
     let layer = inst_id;
-    let history_coord = vec2<i32>(i32(x_coord), i32(y_coord));
+    let atlas_dims = textureDimensions(shadow_history_prev, 0);
+    let atlas_capacity = atlas_dims.x * atlas_dims.y;
+    let atlas_idx = strand_meta.offset + seg_local;
+    if atlas_idx >= atlas_capacity {
+        return;
+    }
+    let history_coord = shading_atlas_coord(atlas_idx, atlas_dims);
     let strand_midpoint = mix(v0.xyz, v1.xyz, 0.5);
     let current_scattering_visibility = sample_average_shadow_visibility(strand_midpoint);
     let previous_scattering_visibility = textureLoad(shadow_history_prev, history_coord, i32(layer), 0).x;
@@ -709,5 +719,9 @@ fn shade_strands(
         accum_color += vec4<f32>(c.xyz, 0.0);
     }
 
-    textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), i32(layer), accum_color);
+    textureStore(output_texture, history_coord, i32(layer), accum_color);
+    let next_atlas_idx = atlas_idx + 1u;
+    if next_atlas_idx < atlas_capacity && seg_local + 1u < strand_meta.count {
+        textureStore(output_texture, shading_atlas_coord(next_atlas_idx, atlas_dims), i32(layer), accum_color);
+    }
 }

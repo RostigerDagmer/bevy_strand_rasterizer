@@ -48,6 +48,7 @@ use crate::{
     },
     resources::*,
     shader_types::*,
+    strand_cache::{StrandCacheAsset, StrandCacheStrand},
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
@@ -62,6 +63,29 @@ const DOM_RESIDENT_PAGE_BUDGET_DIVISOR: u32 = 8;
 const DOM_MIN_RESIDENT_PAGES: u32 = 4;
 const DOM_MAX_RESIDENT_PAGES: u32 = 256;
 pub const DOM_PAGE_XY: u32 = 256;
+pub(crate) const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
+
+fn cap_storage_capacity(
+    requested: u32,
+    header_bytes: u64,
+    item_bytes: u64,
+    max_binding_bytes: u64,
+) -> u32 {
+    if item_bytes == 0 {
+        return requested;
+    }
+    let max_items = max_binding_bytes.saturating_sub(header_bytes) / item_bytes;
+    let max_items = max_items.min(u32::MAX as u64) as u32;
+    requested.min(max_items)
+}
+
+fn log_storage_capacity_cap(label: &str, requested: u32, capped: u32, max_binding_bytes: u64) {
+    if capped < requested {
+        warn!(
+            "Capping {label} capacity from {requested} to {capped} to fit max storage buffer binding size {max_binding_bytes} bytes"
+        );
+    }
+}
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 enum DomVsmsProxyKind {
@@ -123,7 +147,8 @@ impl Plugin for StrandRasterizerPlugin {
         app.add_systems(
             Update,
             (
-                set_strand_geometry,
+                set_dson_strand_geometry,
+                set_cached_strand_geometry,
                 flag_realloc_on_view_change,
                 flag_realloc_on_config_change,
                 flag_realloc_on_tie_change,
@@ -265,12 +290,12 @@ fn use_prepass_buffers(
     let mut total_segment_budget = 0u32;
     let mut max_strands_in_instance = 0u32;
     let mut max_segments_in_strand = 0u32;
+    let mut max_shading_texels_in_instance = 0u32;
     let mut instances = Vec::new();
     let mut sorted_geometry: Vec<_> = geometry_query.iter().collect();
     sorted_geometry.sort_by_key(|(entity, _, _)| entity.index());
-    for (entity, geom, transform) in sorted_geometry {
-        let Some((asset_id, material_id)) = strand_asset_table_ids(entity, geom, &storage_buffers)
-        else {
+    for (_entity, geom, transform) in sorted_geometry {
+        let Some(table_ids) = strand_asset_table_ids(geom, &storage_buffers) else {
             continue;
         };
         total_strands = total_strands.saturating_add(geom.strand_count);
@@ -280,12 +305,17 @@ fn use_prepass_buffers(
         );
         max_strands_in_instance = max_strands_in_instance.max(geom.strand_count);
         max_segments_in_strand = max_segments_in_strand.max(geom.max_segments_in_strand);
+        max_shading_texels_in_instance = max_shading_texels_in_instance.max(geom.index_count);
         let transform = transform.copied().unwrap_or_default();
         instances.push(StrandInstance {
-            asset_id,
-            material_id,
+            vertex_id: table_ids.vertex_id,
+            index_id: table_ids.index_id,
+            meta_id: table_ids.meta_id,
+            geo_id: table_ids.geo_id,
+            material_id: table_ids.material_id,
             pad0: 0,
             pad1: 0,
+            pad2: 0,
             world_from_local: transform.world_from_local,
             local_from_world: transform.local_from_world,
         });
@@ -297,18 +327,25 @@ fn use_prepass_buffers(
 
     raster_resources.strand_count = Some(total_strands);
 
-    let prepass_capacity = total_strands.next_power_of_two().max(2048);
+    let max_storage_binding_bytes = device.limits().max_storage_buffer_binding_size as u64;
+    let queue_header_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64;
+
+    let requested_prepass_capacity = total_strands.next_power_of_two().max(2048);
+    let prepass_capacity = cap_storage_capacity(
+        requested_prepass_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<FinePrepassTask>() as u64,
+        max_storage_binding_bytes,
+    );
     let base_binning_capacity = total_segment_budget
         .next_power_of_two()
         .max(prepass_capacity);
     let instance_count = instances.len() as u32;
     let needs_shading_realloc = shading_resources.output_texture.is_none()
-        || shading_resources.max_segments_in_strand != Some(max_segments_in_strand)
-        || shading_resources.max_strands_in_instance != Some(max_strands_in_instance)
+        || shading_resources.max_shading_texels_in_instance != Some(max_shading_texels_in_instance)
         || shading_resources.layer_count != Some(instance_count);
     shading_resources.strand_count = Some(total_strands);
-    shading_resources.max_segments_in_strand = Some(max_segments_in_strand);
-    shading_resources.max_strands_in_instance = Some(max_strands_in_instance);
+    shading_resources.max_shading_texels_in_instance = Some(max_shading_texels_in_instance);
     shading_resources.layer_count = Some(instance_count);
     let instance_capacity = instance_count.next_power_of_two().max(2048);
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
@@ -387,42 +424,90 @@ fn use_prepass_buffers(
         coarse_depth_tile_base = 1;
     }
     let frustum_task_multiplier = (frustum_descs.len() as u32).max(1);
-    let binning_capacity = base_binning_capacity
+    let requested_binning_capacity = base_binning_capacity
         .saturating_mul(frustum_task_multiplier)
         .next_power_of_two()
         .max(base_binning_capacity);
+    let binning_capacity = cap_storage_capacity(
+        requested_binning_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<BinningTask>() as u64,
+        max_storage_binding_bytes,
+    );
     let frustum_capacity = (frustum_descs.len() as u32).next_power_of_two().max(1);
     let froxel_bucket_capacity = bucket_base.next_power_of_two().max(1024);
-    let coarse_depth_tile_capacity = coarse_depth_tile_base.next_power_of_two().max(1);
+    let requested_coarse_depth_tile_capacity = coarse_depth_tile_base.next_power_of_two().max(1);
+    let coarse_depth_tile_capacity = cap_storage_capacity(
+        requested_coarse_depth_tile_capacity,
+        0,
+        (COARSE_DEPTH_SLICES as u64) * (std::mem::size_of::<GpuCoarseDepthLutEntry>() as u64),
+        max_storage_binding_bytes,
+    );
     let coarse_count_page_table_capacity = coarse_depth_tile_capacity
         .saturating_mul(COARSE_DEPTH_SLICES)
         .next_power_of_two()
         .max(1);
-    let coarse_range_capacity = instance_capacity
+    let requested_coarse_range_capacity = instance_capacity
         .saturating_mul(frustum_capacity)
         .next_power_of_two()
         .max(1);
-    let coarse_interval_ref_capacity = coarse_depth_tile_capacity
+    let coarse_range_capacity = cap_storage_capacity(
+        requested_coarse_range_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<GpuCoarseAssetRange>() as u64,
+        max_storage_binding_bytes,
+    );
+    let requested_coarse_interval_ref_capacity = coarse_depth_tile_capacity
         .saturating_mul(COARSE_INTERVAL_REFS_PER_TILE)
         .next_power_of_two()
         .max(coarse_range_capacity);
-    let coarse_count_page_capacity = coarse_count_page_table_capacity
+    let coarse_interval_ref_capacity = cap_storage_capacity(
+        requested_coarse_interval_ref_capacity,
+        std::mem::size_of::<u32>() as u64,
+        std::mem::size_of::<GpuCoarseIntervalRef>() as u64,
+        max_storage_binding_bytes,
+    );
+    let requested_coarse_count_page_capacity = coarse_count_page_table_capacity
         .div_ceil(COARSE_COUNT_PAGE_CAPACITY_DIVISOR)
         .max(1);
+    let coarse_count_page_capacity = cap_storage_capacity(
+        requested_coarse_count_page_capacity,
+        std::mem::size_of::<u32>() as u64,
+        (COARSE_COUNT_PAGE_SIZE as u64) * std::mem::size_of::<u32>() as u64,
+        max_storage_binding_bytes,
+    );
     let fine_cell_capacity = coarse_count_page_capacity.saturating_mul(COARSE_COUNT_PAGE_SIZE);
-    let fine_seg_ref_capacity = binning_capacity
+    let requested_fine_seg_ref_capacity = binning_capacity
         .saturating_mul(4)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
-    let raster_work_capacity = binning_capacity
+    let fine_seg_ref_capacity = cap_storage_capacity(
+        requested_fine_seg_ref_capacity,
+        std::mem::size_of::<u32>() as u64,
+        std::mem::size_of::<FineSegRef>() as u64,
+        max_storage_binding_bytes,
+    );
+    let requested_raster_work_capacity = binning_capacity
         .saturating_mul(2)
         .next_power_of_two()
         .max(binning_capacity.max(1024));
-    let raster_tile_run_capacity = coarse_depth_tile_capacity
+    let raster_work_capacity = cap_storage_capacity(
+        requested_raster_work_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<RasterWorkItem>() as u64,
+        max_storage_binding_bytes,
+    );
+    let requested_raster_tile_run_capacity = coarse_depth_tile_capacity
         .saturating_mul(COARSE_FINE_TILE_EXTENT)
         .saturating_mul(COARSE_FINE_TILE_EXTENT)
         .next_power_of_two()
         .max(1024);
+    let raster_tile_run_capacity = cap_storage_capacity(
+        requested_raster_tile_run_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<RasterTileRun>() as u64,
+        max_storage_binding_bytes,
+    );
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -465,6 +550,61 @@ fn use_prepass_buffers(
         || prepass_resources.fine_seg_ref_capacity < fine_seg_ref_capacity;
 
     if needs_realloc {
+        log_storage_capacity_cap(
+            "prepass queue",
+            requested_prepass_capacity,
+            prepass_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "binning queue",
+            requested_binning_capacity,
+            binning_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "coarse depth LUT",
+            requested_coarse_depth_tile_capacity,
+            coarse_depth_tile_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "coarse range queue",
+            requested_coarse_range_capacity,
+            coarse_range_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "coarse interval refs",
+            requested_coarse_interval_ref_capacity,
+            coarse_interval_ref_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "coarse count pages",
+            requested_coarse_count_page_capacity,
+            coarse_count_page_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "fine seg refs",
+            requested_fine_seg_ref_capacity,
+            fine_seg_ref_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "raster work queue",
+            requested_raster_work_capacity,
+            raster_work_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "raster tile run queue",
+            requested_raster_tile_run_capacity,
+            raster_tile_run_capacity,
+            max_storage_binding_bytes,
+        );
+
         let prepass_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (prepass_capacity as u64) * (std::mem::size_of::<FinePrepassTask>() as u64);
         let binning_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
@@ -719,20 +859,15 @@ fn use_prepass_buffers(
         );
     }
     if needs_shading_realloc {
-        let (texture, view) = create_shading_target_texture(
-            &device,
-            instance_count,
-            max_strands_in_instance,
-            max_segments_in_strand,
-        );
+        let (texture, view) =
+            create_shading_target_texture(&device, instance_count, max_shading_texels_in_instance);
         shading_resources.output_texture_resource = Some(texture);
         shading_resources.output_texture = Some(view);
         for i in 0..2 {
             let (history_texture, history_view) = create_shadow_history_texture(
                 &device,
                 instance_count,
-                max_strands_in_instance,
-                max_segments_in_strand,
+                max_shading_texels_in_instance,
             );
             shading_resources.shadow_history_texture_resources[i] = Some(history_texture);
             shading_resources.shadow_history_textures[i] = Some(history_view);
@@ -802,40 +937,33 @@ fn use_prepass_buffers(
     }
 }
 
+struct StrandTableIds {
+    vertex_id: u32,
+    index_id: u32,
+    meta_id: u32,
+    geo_id: u32,
+    material_id: u32,
+}
+
+fn buffer_table_id(
+    handle: &Handle<VirtualShaderStorageBuffer>,
+    storage_buffers: &RenderAssets<GpuVirtualShaderStorageBuffer>,
+) -> Option<u32> {
+    storage_buffers
+        .get(handle)?
+        .allocation
+        .as_ref()
+        .map(|(allocation, _)| allocation.id.0)
+}
+
 fn strand_asset_table_ids(
-    entity: Entity,
     geometry: &StrandGeometry,
     storage_buffers: &RenderAssets<GpuVirtualShaderStorageBuffer>,
-) -> Option<(u32, u32)> {
-    let ids = [
-        ("vertices", &geometry.vertices),
-        ("indices", &geometry.indices),
-        ("metadata", &geometry.meta),
-        ("geos", &geometry.geos),
-    ]
-    .map(|(label, handle)| {
-        let gpu_buffer = storage_buffers.get(handle)?;
-        let (allocation, _) = gpu_buffer.allocation.as_ref()?;
-        Some((label, allocation.id.0))
-    });
-
-    let [
-        Some((_, vertex_id)),
-        Some((_, index_id)),
-        Some((_, meta_id)),
-        Some((_, geo_id)),
-    ] = ids
-    else {
-        return None;
-    };
-
-    if vertex_id != geo_id || index_id != geo_id || meta_id != geo_id {
-        warn!(
-            "Skipping strand entity {:?}: allocator table ids differ (vertices={}, indices={}, metadata={}, geos={})",
-            entity, vertex_id, index_id, meta_id, geo_id
-        );
-        return None;
-    }
+) -> Option<StrandTableIds> {
+    let vertex_id = buffer_table_id(&geometry.vertices, storage_buffers)?;
+    let index_id = buffer_table_id(&geometry.indices, storage_buffers)?;
+    let meta_id = buffer_table_id(&geometry.meta, storage_buffers)?;
+    let geo_id = buffer_table_id(&geometry.geos, storage_buffers)?;
 
     let material_id = storage_buffers
         .get(&geometry.materials)?
@@ -845,12 +973,21 @@ fn strand_asset_table_ids(
         .id
         .0;
 
-    Some((geo_id, material_id))
+    Some(StrandTableIds {
+        vertex_id,
+        index_id,
+        meta_id,
+        geo_id,
+        material_id,
+    })
 }
 
 fn sync_strand_instance_transforms(
     mut commands: Commands,
-    query: Query<(Entity, &GlobalTransform, Option<&StrandInstanceTransform>), With<StrandAsset>>,
+    query: Query<
+        (Entity, &GlobalTransform, Option<&StrandInstanceTransform>),
+        With<StrandGeometry>,
+    >,
 ) {
     for (entity, global_transform, current) in &query {
         let next = StrandInstanceTransform::from(global_transform);
@@ -865,9 +1002,145 @@ fn sync_strand_instance_transforms(
     }
 }
 
+struct PackedStrandBuffers {
+    vertices: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+    meta: Vec<StrandMeta>,
+    aabb: Aabb3d,
+    strand_count: u32,
+    index_count: u32,
+    max_segments_in_strand: u32,
+}
+
+fn pack_strands(
+    vertices: impl IntoIterator<Item = Vec3>,
+    strands: impl IntoIterator<Item = Vec<u32>>,
+) -> Option<PackedStrandBuffers> {
+    let vertices: Vec<[f32; 4]> = vertices.into_iter().map(|v| [v.x, v.y, v.z, 1.0]).collect();
+    if vertices.is_empty() {
+        return None;
+    }
+
+    let mut indices = Vec::new();
+    let mut meta = Vec::new();
+    let mut max_segments_in_strand = 0u32;
+
+    for strand in strands {
+        if strand.len() < 2 {
+            continue;
+        }
+        let count = strand.len() as u32;
+        let offset = indices.len() as u32;
+        max_segments_in_strand = max_segments_in_strand.max(count);
+        indices.extend(strand);
+        meta.push(StrandMeta::from((count, offset)));
+    }
+
+    if meta.is_empty() {
+        return None;
+    }
+
+    let points = vertices.iter().map(|v| Vec3::new(v[0], v[1], v[2]));
+    let strand_count = meta.len() as u32;
+    let index_count = indices.len() as u32;
+    Some(PackedStrandBuffers {
+        aabb: Aabb3d::from_point_cloud(Isometry3d::IDENTITY, points),
+        vertices,
+        indices,
+        meta,
+        strand_count,
+        index_count,
+        max_segments_in_strand,
+    })
+}
+
+fn pack_indexed_strands(
+    vertices: impl IntoIterator<Item = Vec3>,
+    strands: &[StrandCacheStrand],
+    indices: &[u32],
+) -> Option<PackedStrandBuffers> {
+    let vertices: Vec<[f32; 4]> = vertices.into_iter().map(|v| [v.x, v.y, v.z, 1.0]).collect();
+    if vertices.is_empty() || strands.is_empty() {
+        return None;
+    }
+
+    let mut meta = Vec::with_capacity(strands.len());
+    let mut max_segments_in_strand = 0u32;
+    for strand in strands {
+        if strand.count < 2 {
+            continue;
+        }
+        max_segments_in_strand = max_segments_in_strand.max(strand.count);
+        meta.push(StrandMeta::from((strand.count, strand.offset)));
+    }
+
+    if meta.is_empty() {
+        return None;
+    }
+
+    let points = vertices.iter().map(|v| Vec3::new(v[0], v[1], v[2]));
+    let strand_count = meta.len() as u32;
+    let index_count = indices.len() as u32;
+    Some(PackedStrandBuffers {
+        aabb: Aabb3d::from_point_cloud(Isometry3d::IDENTITY, points),
+        vertices,
+        indices: indices.to_vec(),
+        meta,
+        strand_count,
+        index_count,
+        max_segments_in_strand,
+    })
+}
+
+fn insert_packed_strand_geometry(
+    entity: Entity,
+    material: &StrandMaterial,
+    packed: PackedStrandBuffers,
+    storage_buffers: &mut Assets<VirtualShaderStorageBuffer>,
+    commands: &mut Commands,
+) {
+    let geos_data = vec![StrandGeo::new(
+        packed.strand_count,
+        packed.max_segments_in_strand,
+        packed.aabb,
+    )];
+
+    let vertex_buffer = VirtualShaderStorageBuffer::from((SlabKind::Vert, packed.vertices));
+    let index_buffer = VirtualShaderStorageBuffer::from((SlabKind::Index, packed.indices));
+    let meta_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandMeta, packed.meta));
+    let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandGeo, geos_data));
+    let material_buffer =
+        VirtualShaderStorageBuffer::from((SlabKind::StrandMaterial, vec![material]));
+
+    let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
+    let index_buffer_handle = storage_buffers.add(index_buffer);
+    let meta_buffer_handle = storage_buffers.add(meta_buffer);
+    let geo_buffer_handle = storage_buffers.add(geo_buffer);
+    let material_buffer_handle = storage_buffers.add(material_buffer);
+
+    info!(
+        "set strand geometry: {:?}, strands={}, max_vertices_per_strand={}",
+        vertex_buffer_handle, packed.strand_count, packed.max_segments_in_strand
+    );
+
+    commands.entity(entity).insert(StrandGeometry {
+        vertices: vertex_buffer_handle,
+        indices: index_buffer_handle,
+        meta: meta_buffer_handle,
+        geos: geo_buffer_handle,
+        materials: material_buffer_handle,
+        strand_count: packed.strand_count,
+        index_count: packed.index_count,
+        max_segments_in_strand: packed.max_segments_in_strand,
+        aabb: packed.aabb,
+    });
+    commands
+        .entity(entity)
+        .insert(StrandInstanceTransform::default());
+}
+
 // main world buffer initialization
-// packs StrandGeometry
-fn set_strand_geometry(
+fn set_dson_strand_geometry(
     query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
     assets: Res<Assets<DsonAsset>>,
     mut storage_buffers: ResMut<Assets<VirtualShaderStorageBuffer>>,
@@ -889,102 +1162,69 @@ fn set_strand_geometry(
         }
 
         let geometry = &geometry_library[0];
-        // Extract vertices
-        // TODO: time this. Could also be done in a compute shader
-        let mut aabb = Aabb3d::from_point_cloud(
-            Isometry3d::IDENTITY,
-            geometry.vertices.values.iter().cloned(),
-        ); // todo: pass transform
-        aabb.min *= 0.0254; // TODO: pass transform to shaders
-        aabb.max *= 0.0254; // TODO: pass transform to shaders
-        let vertices: Vec<[f32; 4]> = geometry
-            .vertices
-            .values
-            .clone()
-            .iter()
-            .map(|v| {
-                [
-                    v[0] * 0.0254, // TODO: pass transform to shaders
-                    v[1] * 0.0254, // TODO: pass transform to shaders
-                    v[2] * 0.0254, // TODO: pass transform to shaders
-                    1.0,
-                ]
-            })
-            .collect();
-
-        // Extract indices from polyline_list
         let Some(polyline_list) = &geometry.polyline_list else {
             warn!("Polyline list not found for entity: {:?}", entity);
             continue;
         };
 
-        // Flatten the polyline indices
-        // For each strand in values, skip first two elements (group_idx, mat_group_idx)
-        // and collect the vertex indices
-        let packed_strand_info =
-            polyline_list
-                .values
-                .iter()
-                .fold((Vec::new(), Vec::new(), 0), |mut acc, strand| {
-                    let strand_indices = &strand[2..];
-                    acc.0.extend_from_slice(strand_indices);
-                    if strand_indices.len() > acc.2 {
-                        acc.2 = strand_indices.len();
-                    }
-                    match acc.1.last().copied() {
-                        Some((last_strand_count, last_strand_offset)) => {
-                            acc.1.push((
-                                strand_indices.len() as u32,
-                                last_strand_offset + last_strand_count,
-                            ));
-                        }
-                        None => acc.1.push((strand_indices.len() as u32, 0)),
-                    }
-                    acc
-                });
+        let vertices = geometry
+            .vertices
+            .values
+            .iter()
+            .map(|v| Vec3::new(v[0], v[1], v[2]) * 0.0254);
+        let strands = polyline_list
+            .values
+            .iter()
+            .filter(|strand| strand.len() >= 4)
+            .map(|strand| strand[2..].to_vec());
 
-        let indices = packed_strand_info.0;
-        let meta: Vec<StrandMeta> = packed_strand_info
-            .1
-            .into_iter()
-            .map(StrandMeta::from)
-            .collect();
-        let max_segments_in_strand = packed_strand_info.2 as u32;
+        let Some(packed) = pack_strands(vertices, strands) else {
+            warn!("No valid strands found for entity: {:?}", entity);
+            continue;
+        };
 
-        let geos_data = vec![StrandGeo::new(
-            polyline_list.values.len() as u32,
-            max_segments_in_strand,
-            aabb,
-        )];
+        insert_packed_strand_geometry(
+            entity,
+            material,
+            packed,
+            &mut storage_buffers,
+            &mut commands,
+        );
+    }
+}
 
-        let vertex_buffer = VirtualShaderStorageBuffer::from((SlabKind::Vert, vertices));
-        let index_buffer = VirtualShaderStorageBuffer::from((SlabKind::Index, indices));
-        let meta_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandMeta, meta));
-        let geo_buffer = VirtualShaderStorageBuffer::from((SlabKind::StrandGeo, geos_data));
-        let material_buffer =
-            VirtualShaderStorageBuffer::from((SlabKind::StrandMaterial, vec![material]));
+fn set_cached_strand_geometry(
+    query: Query<(Entity, &StrandCache, &StrandMaterial), Without<StrandGeometry>>,
+    assets: Res<Assets<StrandCacheAsset>>,
+    mut storage_buffers: ResMut<Assets<VirtualShaderStorageBuffer>>,
+    mut commands: Commands,
+) {
+    for (entity, strand_cache, material) in query.iter() {
+        let Some(asset) = assets.get(&strand_cache.handle) else {
+            continue;
+        };
 
-        let vertex_buffer_handle = storage_buffers.add(vertex_buffer);
-        let index_buffer_handle = storage_buffers.add(index_buffer);
-        let meta_buffer_handle = storage_buffers.add(meta_buffer);
-        let geo_buffer_handle = storage_buffers.add(geo_buffer);
-        let material_buffer_handle = storage_buffers.add(material_buffer);
+        let scale = asset.cache.scale;
+        let vertices = asset
+            .cache
+            .vertices
+            .iter()
+            .map(|v| Vec3::new(v[0], v[1], v[2]) * scale);
 
-        info!("set strand geometry: {:?}", vertex_buffer_handle);
+        let Some(packed) =
+            pack_indexed_strands(vertices, &asset.cache.strands, &asset.cache.indices)
+        else {
+            warn!("No valid cached strands found for entity: {:?}", entity);
+            continue;
+        };
 
-        commands.entity(entity).insert(StrandGeometry {
-            vertices: vertex_buffer_handle,
-            indices: index_buffer_handle,
-            meta: meta_buffer_handle,
-            geos: geo_buffer_handle,
-            materials: material_buffer_handle,
-            strand_count: polyline_list.values.len() as u32,
-            max_segments_in_strand,
-            aabb,
-        });
-        commands
-            .entity(entity)
-            .insert(StrandInstanceTransform::default());
+        insert_packed_strand_geometry(
+            entity,
+            material,
+            packed,
+            &mut storage_buffers,
+            &mut commands,
+        );
     }
 }
 

@@ -29,7 +29,6 @@ use crate::{
     shader_types::PushConstants,
 };
 
-const MAX_SHADING_SUBSAMPLING_FACTOR: u32 = 4;
 const SHADING_WORKGROUP_SIZE: u32 = 128;
 
 #[derive(Resource, Default)]
@@ -41,8 +40,7 @@ pub struct StrandShadingResources {
     pub shadow_history_index: AtomicU32,
     pub shadow_history_needs_clear: AtomicBool,
     pub strand_count: Option<u32>,
-    pub max_segments_in_strand: Option<u32>,
-    pub max_strands_in_instance: Option<u32>,
+    pub max_shading_texels_in_instance: Option<u32>,
     pub layer_count: Option<u32>,
 }
 
@@ -374,14 +372,17 @@ pub fn create_strand_shading_bind_group(
 pub fn create_shading_target_texture(
     device: &RenderDevice,
     layer_count: u32,
-    max_strands_in_instance: u32,
-    max_strand_segment_count: u32,
+    max_shading_texels_in_instance: u32,
 ) -> (Texture, TextureView) {
+    let width = max_shading_texels_in_instance.clamp(1, MAX_TEXTURE_EXTENT);
+    let height = max_shading_texels_in_instance
+        .div_ceil(width)
+        .clamp(1, MAX_TEXTURE_EXTENT);
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("strand_shading_output"),
         size: Extent3d {
-            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR,
-            height: max_strands_in_instance.clamp(1, MAX_TEXTURE_EXTENT),
+            width,
+            height,
             depth_or_array_layers: layer_count.max(1),
         },
         mip_level_count: 1,
@@ -401,14 +402,17 @@ pub fn create_shading_target_texture(
 pub fn create_shadow_history_texture(
     device: &RenderDevice,
     layer_count: u32,
-    max_strands_in_instance: u32,
-    max_strand_segment_count: u32,
+    max_shading_texels_in_instance: u32,
 ) -> (Texture, TextureView) {
+    let width = max_shading_texels_in_instance.clamp(1, MAX_TEXTURE_EXTENT);
+    let height = max_shading_texels_in_instance
+        .div_ceil(width)
+        .clamp(1, MAX_TEXTURE_EXTENT);
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("strand_shadow_history"),
         size: Extent3d {
-            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR,
-            height: max_strands_in_instance.clamp(1, MAX_TEXTURE_EXTENT),
+            width,
+            height,
             depth_or_array_layers: layer_count.max(1),
         },
         mip_level_count: 1,

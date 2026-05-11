@@ -4,3 +4,5 @@ crates
 *.dsf
 *.dsa
 *.dsx
+.venv
+assets/squirrel

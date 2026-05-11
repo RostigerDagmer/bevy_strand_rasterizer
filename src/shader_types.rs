@@ -14,9 +14,9 @@ pub struct PushConstants {
     pub scan_load_base: u32,
     pub scan_save_base: u32,
     pub stochastic_cull_enabled: u32,
-    pub cull_min_dist: f32,
-    pub cull_max_dist: f32,
-    pub cull_exponent: f32,
+    pub target_strands_per_pixel: f32,
+    pub min_keep_probability: f32,
+    pub shadow_keep_probability: f32,
 }
 
 #[derive(Debug, Clone, ShaderType)]
@@ -73,10 +73,14 @@ pub struct StrandGeo {
 #[derive(Debug, Clone, Copy, ShaderType, Pod, Zeroable)]
 #[repr(C)]
 pub struct StrandInstance {
-    pub asset_id: u32,
+    pub vertex_id: u32,
+    pub index_id: u32,
+    pub meta_id: u32,
+    pub geo_id: u32,
     pub material_id: u32,
     pub pad0: u32,
     pub pad1: u32,
+    pub pad2: u32,
     pub world_from_local: Mat4,
     pub local_from_world: Mat4,
 }
@@ -84,10 +88,14 @@ pub struct StrandInstance {
 impl Default for StrandInstance {
     fn default() -> Self {
         Self {
-            asset_id: u32::MAX,
+            vertex_id: u32::MAX,
+            index_id: u32::MAX,
+            meta_id: u32::MAX,
+            geo_id: u32::MAX,
             material_id: 0,
             pad0: 0,
             pad1: 0,
+            pad2: 0,
             world_from_local: Mat4::IDENTITY,
             local_from_world: Mat4::IDENTITY,
         }

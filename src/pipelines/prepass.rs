@@ -673,9 +673,9 @@ pub fn run_prepass(
         num_elements: instance_count,
         frustum_count,
         stochastic_cull_enabled: u32::from(cull_settings.enabled),
-        cull_min_dist: cull_settings.min_dist,
-        cull_max_dist: cull_settings.max_dist,
-        cull_exponent: cull_settings.exponent,
+        target_strands_per_pixel: cull_settings.target_strands_per_pixel,
+        min_keep_probability: cull_settings.min_keep_probability,
+        shadow_keep_probability: cull_settings.shadow_keep_probability,
         ..Default::default()
     };
     pass.set_pipeline(broad_pipeline);
@@ -706,9 +706,15 @@ pub fn run_prepass(
         instance_count.max(1),
         1,
     );
+    let fine_indirect_pushconstants = PushConstants {
+        workgroup_offset: crate::plugin::MAX_COMPUTE_WORKGROUPS_PER_DIMENSION
+            .saturating_mul(settings.threads_per_workgroup),
+        ..pushconstants
+    };
     pass.set_pipeline(finalize_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(fine_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let coarse_interval_pushconstants = PushConstants {
         num_elements: coarse_range_capacity,
@@ -731,6 +737,7 @@ pub fn run_prepass(
     pass.set_pipeline(finalize_binning_pipeline);
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(mark_coarse_count_pages_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let coarse_count_page_table_capacity =
         coarse_depth_tile_capacity.saturating_mul(crate::plugin::COARSE_DEPTH_SLICES);
@@ -746,6 +753,7 @@ pub fn run_prepass(
         1,
     );
     pass.set_pipeline(binning_pipeline);
+    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     pass.set_pipeline(prefix_fine_pages_pipeline);
     pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
@@ -755,7 +763,7 @@ pub fn run_prepass(
         1,
     );
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let fine_tile_stack_pushconstants = PushConstants {
         num_elements: coarse_depth_tile_capacity

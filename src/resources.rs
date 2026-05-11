@@ -69,18 +69,18 @@ impl Default for TileDebugSettings {
 #[derive(Clone, Copy, Debug, Resource, Reflect, ExtractResource)]
 pub struct StochasticCullSettings {
     pub enabled: bool,
-    pub min_dist: f32,
-    pub max_dist: f32,
-    pub exponent: f32,
+    pub target_strands_per_pixel: f32,
+    pub min_keep_probability: f32,
+    pub shadow_keep_probability: f32,
 }
 
 impl Default for StochasticCullSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_dist: 2.0,
-            max_dist: 100.0,
-            exponent: 0.10,
+            target_strands_per_pixel: 2.0,
+            min_keep_probability: 0.02,
+            shadow_keep_probability: 1.0,
         }
     }
 }

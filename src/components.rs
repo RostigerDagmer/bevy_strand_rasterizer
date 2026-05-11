@@ -1,21 +1,22 @@
 use bevy::{
     math::{Mat4, Vec4, bounding::Aabb3d},
     prelude::*,
-    render::{
-        extract_component::ExtractComponent, mesh::allocator::SlabId, render_resource::ShaderType,
-        storage::ShaderStorageBuffer,
-    },
+    render::{extract_component::ExtractComponent, render_resource::ShaderType},
 };
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    allocator::{AllocKey, SlabKind, VirtualShaderStorageBuffer},
-    dson::DsonAsset,
+    allocator::VirtualShaderStorageBuffer, dson::DsonAsset, strand_cache::StrandCacheAsset,
 };
 
 #[derive(Component, Reflect)]
 pub struct StrandAsset {
     pub handle: Handle<DsonAsset>,
+}
+
+#[derive(Component, Reflect)]
+pub struct StrandCache {
+    pub handle: Handle<StrandCacheAsset>,
 }
 
 #[derive(Component, ExtractComponent, Debug, Clone)]
@@ -26,6 +27,7 @@ pub struct StrandGeometry {
     pub geos: Handle<VirtualShaderStorageBuffer>,
     pub materials: Handle<VirtualShaderStorageBuffer>,
     pub strand_count: u32,
+    pub index_count: u32,
     pub max_segments_in_strand: u32,
     pub aabb: Aabb3d,
 }

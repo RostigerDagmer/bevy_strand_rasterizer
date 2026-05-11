@@ -56,10 +56,14 @@ struct StrandGeo {
 } // align(16)
 
 struct StrandInstance {
-    asset_id: u32,
+    vertex_id: u32,
+    index_id: u32,
+    meta_id: u32,
+    geo_id: u32,
     material_id: u32,
     pad_a: u32,
     pad_b: u32,
+    pad_c: u32,
     world_from_local: mat4x4<f32>,
     local_from_world: mat4x4<f32>,
 }
@@ -91,7 +95,7 @@ struct PushConstants {
     scan_load_base: u32,
     scan_save_base: u32,
     stochastic_cull_enabled: u32,
-    cull_min_dist: f32,
-    cull_max_dist: f32,
-    cull_exponent: f32,
+    target_strands_per_pixel: f32,
+    min_keep_probability: f32,
+    shadow_keep_probability: f32,
 }

@@ -59,6 +59,7 @@ const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = #COARSE_MAX_SLICES_PER_ASSET_I
 const COARSE_COUNT_PAGE_SIZE: u32 = #COARSE_COUNT_PAGE_SIZE;
 const DOM_PAGE_XY: u32 = #DOM_PAGE_XY;
 const DEPTH_QUANT_MAX: u32 = 16777215u;
+const MAX_DISPATCH_WORKGROUPS_PER_DIMENSION: u32 = 65535u;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const INVALID_PTR: u32 = 0xFFFFFFFFu;
 const MARKED_COUNT_PAGE: u32 = 0xFFFFFFFEu;
@@ -161,8 +162,8 @@ struct FineSegRefBuffer {
 struct BroadInstanceMeta {
     strand_count: u32,
     visible: u32,
-    cull_threshold: f32,
-    _pad0: u32,
+    camera_keep_probability: f32,
+    shadow_keep_probability: f32,
 }
 
 // TODO: adjust allocator api so we can actually bind this as read only where no writes are required.
@@ -211,15 +212,92 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{BROAD_INSTANCE_META}) var<storage, read_write> broad_instance_meta: array<BroadInstanceMeta>;
 
-fn stochastic_cull_threshold_camera(cam: View, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
+fn aabb_projected_screen_area(frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
+    if frustum_id >= arrayLength(&frustum_table) {
+        return -1.0;
+    }
+    let frustum = frustum_table[frustum_id];
+    let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
+    let clip_from_world = clip_from_world_for_frustum(frustum_id);
+    let corners = array<vec4<f32>, 8>(
+        world_from_local * vec4<f32>(aabb.min, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.max.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.min.x, aabb.max.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.min.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.min.y, aabb.max.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max.x, aabb.max.y, aabb.min.z, 1.0),
+        world_from_local * vec4<f32>(aabb.max, 1.0),
+    );
+
+    var screen_min = vec2<f32>(1e30, 1e30);
+    var screen_max = vec2<f32>(-1e30, -1e30);
+    var z_min = 1.0;
+    var z_max = 0.0;
+    var any_corner = false;
+    var clipped_by_near = false;
+
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let clip = clip_from_world * corners[i];
+        if clip.w <= 1e-6 {
+            clipped_by_near = true;
+            continue;
+        }
+
+        let ndc = clip.xyz / clip.w;
+        if ndc.z < 0.0 {
+            clipped_by_near = true;
+        }
+
+        let raw = vec3<f32>(
+            viewport.x + (ndc.x * 0.5 + 0.5) * viewport.z,
+            viewport.y + (ndc.y * -0.5 + 0.5) * viewport.w,
+            ndc.z,
+        );
+        any_corner = true;
+        screen_min = min(screen_min, raw.xy);
+        screen_max = max(screen_max, raw.xy);
+        let z = depth_key_for_frustum(raw.z, frustum);
+        z_min = min(z_min, z);
+        z_max = max(z_max, z);
+    }
+
+    if clipped_by_near {
+        return viewport.z * viewport.w;
+    }
+    if !any_corner {
+        return -1.0;
+    }
+    if screen_max.x < 0.0 || screen_max.y < 0.0 || screen_min.x >= viewport.z || screen_min.y >= viewport.w {
+        return -1.0;
+    }
+    if z_max < 0.0 || z_min > 1.0 {
+        return -1.0;
+    }
+
+    let clamped_min = clamp(screen_min, vec2<f32>(0.0, 0.0), vec2<f32>(viewport.z - 1.0, viewport.w - 1.0));
+    let clamped_max = clamp(screen_max, vec2<f32>(0.0, 0.0), vec2<f32>(viewport.z - 1.0, viewport.w - 1.0));
+    let extent = max(clamped_max - clamped_min, vec2<f32>(1.0, 1.0));
+    return extent.x * extent.y;
+}
+
+fn stochastic_camera_keep_probability(strand_count: u32, screen_area_px: f32) -> f32 {
     if pc.stochastic_cull_enabled == 0u {
+        return 1.0;
+    }
+    if screen_area_px < 0.0 {
         return 0.0;
     }
-    let aabb_center = (world_from_local * vec4<f32>((aabb.max + aabb.min) * 0.5, 1.0)).xyz;
-    let distance_to_cam = length(cam.world_position - aabb_center);
-    let cull_max = max(pc.cull_max_dist, 1e-5);
-    let norm_distance = max(distance_to_cam - pc.cull_min_dist, 0.0) / cull_max;
-    return clamp(pow(norm_distance, pc.cull_exponent), 0.0, 1.0);
+    let target_density = max(pc.target_strands_per_pixel, 1e-5);
+    let min_keep = clamp(pc.min_keep_probability, 0.0, 1.0);
+    return clamp(screen_area_px * target_density / max(f32(strand_count), 1.0), min_keep, 1.0);
+}
+
+fn stochastic_shadow_keep_probability() -> f32 {
+    if pc.stochastic_cull_enabled == 0u {
+        return 1.0;
+    }
+    return clamp(pc.shadow_keep_probability, 0.0, 1.0);
 }
 
 fn ceil_div_u32(x: u32, y: u32) -> u32 {
@@ -480,14 +558,13 @@ fn broad_prepass(
 
     while inst_idx < instance_count {
         let instance = strand_instances[inst_idx];
-        let asset_id = instance.asset_id;
-        if asset_id >= arrayLength(&t_geos) || asset_id >= arrayLength(&t_strand_metadata) {
+        if instance.geo_id >= arrayLength(&t_geos) || instance.meta_id >= arrayLength(&t_strand_metadata) {
             inst_idx += total_invocations;
             continue;
         }
 
-        let geo_ptr = t_geos[asset_id];
-        let meta_ptr = t_strand_metadata[asset_id];
+        let geo_ptr = t_geos[instance.geo_id];
+        let meta_ptr = t_strand_metadata[instance.meta_id];
 
         if !is_valid_ptr(geo_ptr) || !is_valid_ptr(meta_ptr) {
             inst_idx += total_invocations;
@@ -499,11 +576,20 @@ fn broad_prepass(
         let strand_count = min(strand_count_from_meta, geo.strand_count);
 
         var geo_visible = false;
+        var camera_keep_probability = 0.0;
+        var shadow_keep_probability = 0.0;
         let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
         for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
             let frustum = frustum_table[fi];
             if frustum.kind <= 1u {
-                geo_visible = emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local) || geo_visible;
+                let visible_in_frustum = emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local);
+                geo_visible = visible_in_frustum || geo_visible;
+                if visible_in_frustum && frustum.kind == 0u {
+                    let area = aabb_projected_screen_area(fi, geo.aabb, instance.world_from_local);
+                    camera_keep_probability = max(camera_keep_probability, stochastic_camera_keep_probability(strand_count, area));
+                } else if visible_in_frustum && frustum.kind == 1u {
+                    shadow_keep_probability = max(shadow_keep_probability, stochastic_shadow_keep_probability());
+                }
             }
         }
 
@@ -515,8 +601,8 @@ fn broad_prepass(
             broad_instance_meta[inst_idx] = BroadInstanceMeta(
                 strand_count,
                 u32(geo_visible),
-                stochastic_cull_threshold_camera(view, geo.aabb, instance.world_from_local),
-                0u,
+                camera_keep_probability,
+                shadow_keep_probability,
             );
         }
 
@@ -536,7 +622,8 @@ fn broad_strand_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let strand_hash = wang_hash((inst_idx * 16777619u) ^ strand_local);
-    if hash_to_unit_float(strand_hash) <= broad.cull_threshold {
+    let keep_probability = max(broad.camera_keep_probability, broad.shadow_keep_probability);
+    if hash_to_unit_float(strand_hash) > keep_probability {
         return;
     }
     let task_index = atomicAdd(&fine_phase_queue.tail, 1u);
@@ -548,16 +635,32 @@ fn broad_strand_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1, 1, 1)
 fn finalize_prepass() {
     let fine_task_count = atomicLoad(&fine_phase_queue.tail);
-    dispatch_args[0] = ceil_div_u32(fine_task_count, FINE_WORKGROUP_SIZE);
-    dispatch_args[1] = 1u;
+    let group_count = ceil_div_u32(fine_task_count, FINE_WORKGROUP_SIZE);
+    if group_count == 0u {
+        dispatch_args[0] = 0u;
+        dispatch_args[1] = 0u;
+        dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(group_count, MAX_DISPATCH_WORKGROUPS_PER_DIMENSION);
+    dispatch_args[0] = x;
+    dispatch_args[1] = ceil_div_u32(group_count, x);
     dispatch_args[2] = 1u;
 }
 
 @compute @workgroup_size(1, 1, 1)
 fn finalize_binning() {
     let binning_task_count = atomicLoad(&binning_queue.tail);
-    dispatch_args[0] = ceil_div_u32(binning_task_count, FINE_WORKGROUP_SIZE);
-    dispatch_args[1] = 1u;
+    let group_count = ceil_div_u32(binning_task_count, FINE_WORKGROUP_SIZE);
+    if group_count == 0u {
+        dispatch_args[0] = 0u;
+        dispatch_args[1] = 0u;
+        dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(group_count, MAX_DISPATCH_WORKGROUPS_PER_DIMENSION);
+    dispatch_args[0] = x;
+    dispatch_args[1] = ceil_div_u32(group_count, x);
     dispatch_args[2] = 1u;
 }
 
@@ -740,7 +843,7 @@ fn build_depth_warp_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
 fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let task_idx = gid.x;
+    let task_idx = gid.y * pc.workgroup_offset + gid.x;
     let fine_task_count = atomicLoad(&fine_phase_queue.tail);
 
     if task_idx >= fine_task_count {
@@ -754,13 +857,12 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let instance = strand_instances[task.inst_id];
-    let asset_id = instance.asset_id;
-    if asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_indices) {
+    if instance.meta_id >= arrayLength(&t_strand_metadata) || instance.index_id >= arrayLength(&t_indices) {
         return;
     }
 
-    let meta_ptr = t_strand_metadata[asset_id];
-    let index_ptr = t_indices[asset_id];
+    let meta_ptr = t_strand_metadata[instance.meta_id];
+    let index_ptr = t_indices[instance.index_id];
 
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) {
         return;
@@ -779,10 +881,21 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let segment_count = strand_meta.count - 1u;
     let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
+    let broad = broad_instance_meta[task.inst_id];
+    let strand_hash = wang_hash((task.inst_id * 16777619u) ^ task.strand_local);
+    let strand_random = hash_to_unit_float(strand_hash);
 
     for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
         let frustum = frustum_table[fi];
         if frustum.kind > 1u {
+            continue;
+        }
+        let keep_probability = select(
+            broad.camera_keep_probability,
+            broad.shadow_keep_probability,
+            frustum.kind == 1u,
+        );
+        if strand_random > keep_probability {
             continue;
         }
         let is_shadow = select(0u, 1u, frustum.kind == 1u);
@@ -1008,9 +1121,9 @@ fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, t
     var packed_segment = 0u;
     let inst_id = task.id_info;
     if inst_id < arrayLength(&strand_instances) {
-        let asset_id = strand_instances[inst_id].asset_id;
-        if asset_id < arrayLength(&t_strand_metadata) {
-            let meta_ptr = t_strand_metadata[asset_id];
+        let meta_id = strand_instances[inst_id].meta_id;
+        if meta_id < arrayLength(&t_strand_metadata) {
+            let meta_ptr = t_strand_metadata[meta_id];
             if is_valid_ptr(meta_ptr) {
                 let meta_base = meta_ptr.offset / SIZEOF_METADATA;
                 let meta_count = meta_ptr.size / SIZEOF_METADATA;
@@ -1363,13 +1476,12 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
     }
 
     let instance = strand_instances[inst_id];
-    let asset_id = instance.asset_id;
-    if asset_id >= arrayLength(&t_vertices) || asset_id >= arrayLength(&t_indices) {
+    if instance.vertex_id >= arrayLength(&t_vertices) || instance.index_id >= arrayLength(&t_indices) {
         return;
     }
 
-    let vertex_ptr = t_vertices[asset_id];
-    let index_ptr = t_indices[asset_id];
+    let vertex_ptr = t_vertices[instance.vertex_id];
+    let index_ptr = t_indices[instance.index_id];
     if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) {
         return;
     }
@@ -1412,7 +1524,8 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
 fn mark_coarse_count_pages_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    process_binning_task(gid.x, true, false);
+    let task_idx = gid.y * pc.workgroup_offset + gid.x;
+    process_binning_task(task_idx, true, false);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
@@ -1436,7 +1549,8 @@ fn allocate_coarse_count_pages(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
 fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    process_binning_task(gid.x, false, false);
+    let task_idx = gid.y * pc.workgroup_offset + gid.x;
+    process_binning_task(task_idx, false, false);
 }
 
 @compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
@@ -1530,7 +1644,8 @@ fn prefix_fine_pages(
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
 fn fill_fine_seg_refs(@builtin(global_invocation_id) gid: vec3<u32>) {
-    process_binning_task(gid.x, false, true);
+    let task_idx = gid.y * pc.workgroup_offset + gid.x;
+    process_binning_task(task_idx, false, true);
 }
 
 fn frustum_for_coarse_tile(tile_idx: u32) -> u32 {

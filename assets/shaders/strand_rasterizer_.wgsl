@@ -160,11 +160,11 @@ fn frustum_to_config(desc: FrustumDesc) -> FroxelConfig {
     );
 }
 
-fn get_segment_material(asset_id: u32, material_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || asset_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
+fn get_segment_material(meta_id: u32, material_id: u32, segment_ref: SegmentRef) -> StrandMaterial {
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_materials) == 0u || meta_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
     }
-    let meta_ptr = t_strand_metadata[asset_id];
+    let meta_ptr = t_strand_metadata[meta_id];
     let material_ptr = t_materials[material_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
         return StrandMaterial(vec4<f32>(1.0), vec4<f32>(1.0), 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.4, 2.0);
@@ -210,6 +210,10 @@ fn get_material_by_index(material_id: u32, material_idx: u32) -> StrandMaterial 
     return materials[material_ptr.slab].mats[material_base + material_idx];
 }
 
+fn shading_atlas_coord(linear_idx: u32, dims: vec2<u32>) -> vec2<i32> {
+    return vec2<i32>(i32(linear_idx % dims.x), i32(linear_idx / dims.x));
+}
+
 fn strand_radius_pixels(material: StrandMaterial, depth_key: f32) -> f32 {
     let min_radius = max(material.min_radius_pixels, 1e-4);
     let max_radius = max(material.max_radius_pixels, min_radius);
@@ -218,11 +222,11 @@ fn strand_radius_pixels(material: StrandMaterial, depth_key: f32) -> f32 {
 
 #ifndef SHADOWS
 
-fn get_segment_meta(asset_id: u32, segment_ref: SegmentRef) -> StrandMeta {
-    if arrayLength(&t_strand_metadata) == 0u || asset_id >= arrayLength(&t_strand_metadata) {
+fn get_segment_meta(meta_id: u32, segment_ref: SegmentRef) -> StrandMeta {
+    if arrayLength(&t_strand_metadata) == 0u || meta_id >= arrayLength(&t_strand_metadata) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
-    let meta_ptr = t_strand_metadata[asset_id];
+    let meta_ptr = t_strand_metadata[meta_id];
     if !is_valid_ptr(meta_ptr) {
         return StrandMeta(0u, 0u, 0u, 0u);
     }
@@ -237,13 +241,17 @@ fn get_segment_meta(asset_id: u32, segment_ref: SegmentRef) -> StrandMeta {
 
 #endif
 
-fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) -> mat2x4<f32> {
-    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || asset_id >= arrayLength(&t_strand_metadata) || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_vertices) || inst_id >= arrayLength(&strand_instances) {
+fn get_segment_vertices(inst_id: u32, segment_ref: SegmentRef) -> mat2x4<f32> {
+    if inst_id >= arrayLength(&strand_instances) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
-    let meta_ptr = t_strand_metadata[asset_id];
-    let index_ptr = t_indices[asset_id];
-    let vertex_ptr = t_vertices[asset_id];
+    let instance = strand_instances[inst_id];
+    if arrayLength(&t_strand_metadata) == 0u || arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || instance.meta_id >= arrayLength(&t_strand_metadata) || instance.index_id >= arrayLength(&t_indices) || instance.vertex_id >= arrayLength(&t_vertices) {
+        return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+    let meta_ptr = t_strand_metadata[instance.meta_id];
+    let index_ptr = t_indices[instance.index_id];
+    let vertex_ptr = t_vertices[instance.vertex_id];
     if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
@@ -271,7 +279,7 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
     if v0_strand_idx >= vertex_count || v1_strand_idx >= vertex_count {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
-    let world_from_local = strand_instances[inst_id].world_from_local;
+    let world_from_local = instance.world_from_local;
 
     return mat2x4<f32>(
         world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + v0_strand_idx], 1.0),
@@ -279,12 +287,12 @@ fn get_segment_vertices(inst_id: u32, asset_id: u32, segment_ref: SegmentRef) ->
     );
 }
 
-fn get_segment_vertices_from_index(world_from_local: mat4x4<f32>, asset_id: u32, segment_start_idx: u32) -> mat2x4<f32> {
-    if arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || asset_id >= arrayLength(&t_indices) || asset_id >= arrayLength(&t_vertices) {
+fn get_segment_vertices_from_index(world_from_local: mat4x4<f32>, vertex_id: u32, index_id: u32, segment_start_idx: u32) -> mat2x4<f32> {
+    if arrayLength(&t_indices) == 0u || arrayLength(&t_vertices) == 0u || index_id >= arrayLength(&t_indices) || vertex_id >= arrayLength(&t_vertices) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
-    let index_ptr = t_indices[asset_id];
-    let vertex_ptr = t_vertices[asset_id];
+    let index_ptr = t_indices[index_id];
+    let vertex_ptr = t_vertices[vertex_id];
     if !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
         return mat2x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0));
     }
@@ -482,9 +490,8 @@ fn rasterize_strands(
                         continue;
                     }
                     let instance = strand_instances[inst_id];
-                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -547,9 +554,8 @@ fn rasterize_strands(
                         continue;
                     }
                     let instance = strand_instances[inst_id];
-                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -795,14 +801,13 @@ fn rasterize_strands(
                         continue;
                     }
                     let instance = strand_instances[inst_id];
-                    let asset_id = instance.asset_id;
                     let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
                     let seg_local = fine_seg_ref_seg_local(seg_ref);
-                    if inst_id >= shading_layers || seg_local >= shading_dims.x || segment_ref.strand_idx >= shading_dims.y {
+                    if inst_id >= shading_layers {
                         continue;
                     }
 
-                    let V = get_segment_vertices_from_index(instance.world_from_local, asset_id, segment_ref.segment_start_idx);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
                     let v0_world = V[0];
                     let v1_world = V[1];
 
@@ -828,19 +833,25 @@ fn rasterize_strands(
                         let clip1 = camera_clip_from_world * v1_world;
                         let t_world = perspective_correct_line_t(t, clip0.w, clip1.w);
                         let p_world = mix(v0_world.xyz, v1_world.xyz, t_world);
-                        let seg_next = min(seg_local + 1u, shading_dims.x - 1u);
-                        let shaded0 = textureLoad(
-                            shading_buffer,
-                            vec2<i32>(i32(seg_local), i32(segment_ref.strand_idx)),
-                            i32(inst_id),
-                            0,
-                        );
-                        let shaded1 = textureLoad(
-                            shading_buffer,
-                            vec2<i32>(i32(seg_next), i32(segment_ref.strand_idx)),
-                            i32(inst_id),
-                            0,
-                        );
+                        let shading_capacity = shading_dims.x * shading_dims.y;
+                        let shade_idx0 = segment_ref.segment_start_idx;
+                        let shade_idx1 = min(shade_idx0 + 1u, shading_capacity - 1u);
+                        var shaded0 = mat.absorption_color;
+                        var shaded1 = mat.absorption_color;
+                        if shade_idx0 < shading_capacity {
+                            shaded0 = textureLoad(
+                                shading_buffer,
+                                shading_atlas_coord(shade_idx0, shading_dims),
+                                i32(inst_id),
+                                0,
+                            );
+                            shaded1 = textureLoad(
+                                shading_buffer,
+                                shading_atlas_coord(shade_idx1, shading_dims),
+                                i32(inst_id),
+                                0,
+                            );
+                        }
                         let shaded = mix(shaded0, shaded1, t_world);
                         let shadow_visibility = sample_shadow_visibility(p_world);
                         let hair_fragment = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
