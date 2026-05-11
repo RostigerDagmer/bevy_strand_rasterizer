@@ -10,6 +10,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vsms::prelude::BevyVsmsPlugin;
 mod dson;
+use default_material::{DefaultMaterial, DefaultMaterialPlugin, make_default_material};
 use dson::*;
 mod components;
 use components::*;
@@ -29,6 +30,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut extended_materials: ResMut<Assets<DefaultMaterial>>,
 ) {
     let handle2: Handle<DsonAsset> = asset_server.load("dForce Pixie Cut_708408.dsf".to_string());
     let handle: Handle<DsonAsset> = asset_server.load("curly/curly.dsf".to_string());
@@ -117,7 +119,7 @@ fn setup(
             ..Default::default()
         },
         Projection::from(PerspectiveProjection {
-            fov: 20.0_f32.to_radians(),
+            fov: 35.0_f32.to_radians(),
             ..default()
         }),
         TieFroxelsToView::Native,
@@ -138,6 +140,14 @@ fn setup(
     //     },
     //     Transform::from_xyz(4.0, 8.0, 4.0),
     // ));
+
+    let default_material = make_default_material(&mut extended_materials);
+
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(25.0, 25.0))),
+        MeshMaterial3d(default_material),
+        Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)),
+    ));
 
     commands.spawn((
         DirectionalLight {
@@ -294,6 +304,7 @@ fn main() {
             }),
             ..Default::default()
         }))
+        .add_plugins(DefaultMaterialPlugin)
         .add_plugins(BevyVsmsPlugin)
         .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
         .add_plugins(EguiPlugin::default())
