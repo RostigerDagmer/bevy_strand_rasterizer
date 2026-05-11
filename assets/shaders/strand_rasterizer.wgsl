@@ -90,6 +90,7 @@ struct FineSegRefBuffer {
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_TEXTURE}) var render_target: texture_storage_2d<rgba8unorm, write>;
 @group(#{RASTER_GROUP}) @binding(#{OUTPUT_DEPTH}) var depth_target: texture_storage_2d<r32float, write>;
 @group(#{RASTER_GROUP}) @binding(#{SHADING_BUFFER}) var shading_buffer: texture_2d_array<f32>;
+@group(#{RASTER_GROUP}) @binding(#{SHADOW_HISTORY_TEXTURE}) var shadow_history_texture: texture_2d_array<f32>;
 #endif
 @group(#{RASTER_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(#{RASTER_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
@@ -877,11 +878,14 @@ fn rasterize_strands(
                                     i32(layer),
                                     0,
                                 );
-                                color_batch_shadow_visibility0[batch_lane] = vec2<f32>(
-                                    sample_shadow_visibility(v0_world.xyz),
-                                    sample_shadow_visibility(v1_world.xyz),
-                                );
-                                color_batch_shadow_visibility1[batch_lane] = sample_shadow_visibility(mix(v0_world.xyz, v1_world.xyz, 0.5));
+                                let stable_shadow_visibility = textureLoad(
+                                    shadow_history_texture,
+                                    vec2<i32>(i32(seg_local), i32(strand_idx)),
+                                    i32(layer),
+                                    0,
+                                ).x;
+                                color_batch_shadow_visibility0[batch_lane] = vec2<f32>(stable_shadow_visibility);
+                                color_batch_shadow_visibility1[batch_lane] = stable_shadow_visibility;
                             }
                         }
                     }

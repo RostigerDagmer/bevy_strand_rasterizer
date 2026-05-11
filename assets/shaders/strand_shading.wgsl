@@ -97,6 +97,8 @@ struct FrustumDesc {
 @group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d_array<rgba8unorm, write>;
 @group(#{SHADING_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
 @group(#{SHADING_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+@group(#{SHADING_GROUP}) @binding(#{SHADOW_HISTORY_PREV}) var shadow_history_prev: texture_2d_array<f32>;
+@group(#{SHADING_GROUP}) @binding(#{SHADOW_HISTORY_NEXT}) var shadow_history_next: texture_storage_2d_array<rgba16float, write>;
 
 @group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_TEXTURE_BINDING}) var shadow_opacity_maps: binding_array<texture_3d<f32> >;
 @group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_POOL_SAMPLER_BINDING}) var shadow_opacity_sampler: sampler;
@@ -252,6 +254,18 @@ fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
         0,
     ).x;
     return clamp(1.0 - opacity, 0.08, 1.0);
+}
+
+fn sample_average_shadow_visibility(p_world: vec3<f32>) -> f32 {
+    let light_count = min(lights.n_directional_lights, 4u);
+    if light_count == 0u {
+        return 1.0;
+    }
+    var visibility = 0.0;
+    for (var i = 0u; i < light_count; i = i + 1u) {
+        visibility = visibility + sample_shadow_dom_visibility(p_world, i);
+    }
+    return visibility / f32(light_count);
 }
 
 fn csch(x: f32) -> f32 {
@@ -664,22 +678,36 @@ fn shade_strands(
     let material = materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 
     var accum_color = vec4<f32>(0.0, 0.0, 0.0, material.absorption_color.w);
+    let x_coord = seg_local;
+    let y_coord = strand_local;
+    let layer = inst_id;
+    let history_coord = vec2<i32>(i32(x_coord), i32(y_coord));
+    let strand_midpoint = mix(v0.xyz, v1.xyz, 0.5);
+    let current_scattering_visibility = sample_average_shadow_visibility(strand_midpoint);
+    let previous_scattering_visibility = textureLoad(shadow_history_prev, history_coord, i32(layer), 0).x;
+    let history_valid = previous_scattering_visibility > 0.0;
+    let scattering_visibility = select(
+        current_scattering_visibility,
+        mix(current_scattering_visibility, previous_scattering_visibility, 0.83),
+        history_valid,
+    );
+    textureStore(
+        shadow_history_next,
+        history_coord,
+        i32(layer),
+        vec4<f32>(scattering_visibility, current_scattering_visibility, 0.0, 1.0),
+    );
+    let scattering_occlusion = 1.0 - scattering_visibility;
 
     let light_count = lights.n_directional_lights;
     for (var j = 0u; j < light_count; j = j + 1u) {
         let light: types::DirectionalLight = lights.directional_lights[j];
         let L = normalize(light.direction_to_light);
-        let strand_midpoint = mix(v0.xyz, v1.xyz, 0.5);
-        let scattering_visibility = sample_shadow_dom_visibility(strand_midpoint, j);
-        let scattering_occlusion = 1.0 - scattering_visibility;
         let bcsdf = marschner(v0, L, V, U, material, scattering_occlusion);
         var c = bcsdf * (light.color.xyz / 255.0);
         c = mix(c, material.absorption_color.xyz * material.ambient_factor + (lights.ambient_color.xyz / 255.0) * material.ambient_factor, material.ambient_factor);
         accum_color += vec4<f32>(c.xyz, 0.0);
     }
 
-    let x_coord = seg_local;
-    let y_coord = strand_local;
-    let layer = inst_id;
     textureStore(output_texture, vec2<i32>(i32(x_coord), i32(y_coord)), i32(layer), accum_color);
 }

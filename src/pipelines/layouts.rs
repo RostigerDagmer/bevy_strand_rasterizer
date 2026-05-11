@@ -136,6 +136,7 @@ pub mod rasterizer {
     pub const STRAND_INSTANCES: u32 = 30;
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 33;
     pub const RASTER_TILE_RUN_QUEUE: u32 = 34;
+    pub const SHADOW_HISTORY_TEXTURE: u32 = 35;
 
     pub const VSMS_POOL_PAGE_TABLE_BINDING: u32 = 0;
     pub const VSMS_POOL_TEXTURE_BINDING: u32 = 1;
@@ -213,6 +214,7 @@ pub mod rasterizer {
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("RASTER_TILE_RUN_QUEUE".into(), RASTER_TILE_RUN_QUEUE),
+            ShaderDefVal::UInt("SHADOW_HISTORY_TEXTURE".into(), SHADOW_HISTORY_TEXTURE),
             ShaderDefVal::UInt(
                 "VSMS_POOL_PAGE_TABLE_BINDING".into(),
                 VSMS_POOL_PAGE_TABLE_BINDING,
@@ -311,6 +313,8 @@ pub mod shading {
     pub const OUTPUT_TEXTURE: u32 = 4;
     pub const STRAND_INSTANCES: u32 = 5;
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 6;
+    pub const SHADOW_HISTORY_PREV: u32 = 7;
+    pub const SHADOW_HISTORY_NEXT: u32 = 8;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -346,6 +350,8 @@ pub mod shading {
             ShaderDefVal::UInt("OUTPUT_TEXTURE".into(), OUTPUT_TEXTURE),
             ShaderDefVal::UInt("STRAND_INSTANCES".into(), STRAND_INSTANCES),
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
+            ShaderDefVal::UInt("SHADOW_HISTORY_PREV".into(), SHADOW_HISTORY_PREV),
+            ShaderDefVal::UInt("SHADOW_HISTORY_NEXT".into(), SHADOW_HISTORY_NEXT),
         ]
     }
 }

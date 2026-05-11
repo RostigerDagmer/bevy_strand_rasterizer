@@ -201,6 +201,16 @@ impl StrandRasterizerPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::SHADOW_HISTORY_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         )
     }
@@ -382,6 +392,12 @@ pub fn create_strand_raster_bind_group(
         .as_ref()
         .ok_or(())?;
     let shading_texture = shading_resources.output_texture.as_ref().ok_or(())?;
+    let shadow_history_idx = shading_resources
+        .shadow_history_index
+        .load(std::sync::atomic::Ordering::Relaxed) as usize;
+    let shadow_history_texture = shading_resources.shadow_history_textures[shadow_history_idx]
+        .as_ref()
+        .ok_or(())?;
     Ok((
         device.create_bind_group(
             Some("strand_rasterizer_bind_group"),
@@ -438,6 +454,10 @@ pub fn create_strand_raster_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::SHADING_BUFFER,
                     resource: BindingResource::TextureView(shading_texture),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADOW_HISTORY_TEXTURE,
+                    resource: BindingResource::TextureView(shadow_history_texture),
                 },
             ],
         ),

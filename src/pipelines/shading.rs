@@ -6,9 +6,9 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
-            PipelineCache, PushConstantRange, ShaderStages, ShaderType, StorageTextureAccess,
-            Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-            TextureView, TextureViewDescriptor, TextureViewDimension,
+            ImageSubresourceRange, PipelineCache, PushConstantRange, ShaderStages, ShaderType,
+            StorageTextureAccess, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
@@ -17,6 +17,7 @@ use bevy::{
 };
 use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
 use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::{
     pipelines::{
@@ -35,6 +36,10 @@ const SHADING_WORKGROUP_SIZE: u32 = 128;
 pub struct StrandShadingResources {
     pub output_texture_resource: Option<Texture>,
     pub output_texture: Option<TextureView>,
+    pub shadow_history_texture_resources: [Option<Texture>; 2],
+    pub shadow_history_textures: [Option<TextureView>; 2],
+    pub shadow_history_index: AtomicU32,
+    pub shadow_history_needs_clear: AtomicBool,
     pub strand_count: Option<u32>,
     pub max_segments_in_strand: Option<u32>,
     pub max_strands_in_instance: Option<u32>,
@@ -122,6 +127,28 @@ impl StrandShadingPipeline {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::SHADOW_HISTORY_PREV,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: bevy::render::render_resource::TextureSampleType::Float {
+                            filterable: false,
+                        },
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::SHADOW_HISTORY_NEXT,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba16Float,
+                        view_dimension: TextureViewDimension::D2Array,
                     },
                     count: None,
                 },
@@ -279,6 +306,16 @@ pub fn create_strand_shading_bind_group(
 ) -> Result<(BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let output_texture = shading_resources.output_texture.as_ref().ok_or(())?;
+    let history_read_idx = shading_resources
+        .shadow_history_index
+        .load(Ordering::Relaxed) as usize;
+    let history_write_idx = history_read_idx ^ 1usize;
+    let shadow_history_prev = shading_resources.shadow_history_textures[history_read_idx]
+        .as_ref()
+        .ok_or(())?;
+    let shadow_history_next = shading_resources.shadow_history_textures[history_write_idx]
+        .as_ref()
+        .ok_or(())?;
     let binning_queue = prepass_resources.binning_queue.as_ref().ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
@@ -320,6 +357,14 @@ pub fn create_strand_shading_bind_group(
                     binding: layouts::shading::SHADOW_DOM_SURFACE_IDS,
                     resource: shadow_dom_surface_ids.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::shading::SHADOW_HISTORY_PREV,
+                    resource: BindingResource::TextureView(shadow_history_prev),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::SHADOW_HISTORY_NEXT,
+                    resource: BindingResource::TextureView(shadow_history_next),
+                },
             ],
         ),
         vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
@@ -343,6 +388,33 @@ pub fn create_shading_target_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    (texture, view)
+}
+
+pub fn create_shadow_history_texture(
+    device: &RenderDevice,
+    layer_count: u32,
+    max_strands_in_instance: u32,
+    max_strand_segment_count: u32,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("strand_shadow_history"),
+        size: Extent3d {
+            width: max_strand_segment_count * MAX_SHADING_SUBSAMPLING_FACTOR,
+            height: max_strands_in_instance.clamp(1, MAX_TEXTURE_EXTENT),
+            depth_or_array_layers: layer_count.max(1),
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
         usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -404,6 +476,23 @@ pub fn run_shading_pass(
     }
 
     let encoder = render_context.command_encoder();
+    if resources
+        .shadow_history_needs_clear
+        .swap(false, Ordering::Relaxed)
+    {
+        let clear_range = ImageSubresourceRange {
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+        };
+        for texture in &resources.shadow_history_texture_resources {
+            if let Some(texture) = texture.as_ref() {
+                encoder.clear_texture(texture, &clear_range);
+            }
+        }
+    }
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("Strand Shading"),
         ..default()
@@ -446,4 +535,7 @@ pub fn run_shading_pass(
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    resources
+        .shadow_history_index
+        .fetch_xor(1, Ordering::Relaxed);
 }

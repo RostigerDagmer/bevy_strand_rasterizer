@@ -727,6 +727,22 @@ fn use_prepass_buffers(
         );
         shading_resources.output_texture_resource = Some(texture);
         shading_resources.output_texture = Some(view);
+        for i in 0..2 {
+            let (history_texture, history_view) = create_shadow_history_texture(
+                &device,
+                instance_count,
+                max_strands_in_instance,
+                max_segments_in_strand,
+            );
+            shading_resources.shadow_history_texture_resources[i] = Some(history_texture);
+            shading_resources.shadow_history_textures[i] = Some(history_view);
+        }
+        shading_resources
+            .shadow_history_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        shading_resources
+            .shadow_history_needs_clear
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     prepass_resources.instance_count = instance_count;
     prepass_resources.max_strands_in_instance = max_strands_in_instance;
