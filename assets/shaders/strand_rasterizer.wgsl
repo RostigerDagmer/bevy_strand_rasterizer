@@ -40,6 +40,8 @@ const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const DEBUG_FORCE_SINGLE_LIGHT: bool = false;
+const DEBUG_EXHAUSTIVE_SHADOW_Z0_SEARCH: bool = false;
+const DEBUG_DISABLE_COLOR_OPACITY_EARLY_OUT: bool = false;
 var<push_constant> pc: PushConstants;
 
 struct FrustumDesc {
@@ -601,7 +603,9 @@ fn rasterize_strands(
             }
             if work_item_hit {
                 found_z0 = true;
-                break;
+                if !DEBUG_EXHAUSTIVE_SHADOW_Z0_SEARCH {
+                    break;
+                }
             }
         }
 
@@ -1054,8 +1058,9 @@ fn rasterize_strands(
 
         if segment_worker == 0u && pixel_active && color_pixel_done[pixel_slot] == 0u {
             final_color = blend_over(final_color, froxel_color);
-            if final_color.a > 0.98 {
+            if final_color.a > 0.98 && !DEBUG_DISABLE_COLOR_OPACITY_EARLY_OUT {
                 color_pixel_done[pixel_slot] = 1u;
+                final_color.a = 1.0;
             }
         }
         workgroupBarrier();

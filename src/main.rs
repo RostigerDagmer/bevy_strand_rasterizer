@@ -47,7 +47,7 @@ fn squirrel_world_transform() -> Transform {
 
 fn squirrel_strand_material(group_name: &str) -> StrandMaterial {
     let mut material = StrandMaterial {
-        absorption_color: Vec4::new(0.42, 0.25, 0.14, 0.45),
+        absorption_color: Vec4::new(0.42, 0.25, 0.14, 0.35),
         specular_color: Vec4::new(0.9, 0.72, 0.52, 0.15),
         ambient_factor: 0.15,
         ao_factor: 0.1,
@@ -60,11 +60,11 @@ fn squirrel_strand_material(group_name: &str) -> StrandMaterial {
     };
 
     if group_name.contains("_Tail") {
-        material.absorption_color = Vec4::new(0.5, 0.32, 0.18, 0.7);
+        material.absorption_color = Vec4::new(0.5, 0.32, 0.18, 0.6);
         material.min_radius_pixels = 1.0;
         material.max_radius_pixels = 1.6;
     } else if group_name.contains("_Beard") || group_name.contains("_Eye") {
-        material.absorption_color = Vec4::new(0.85, 0.72, 0.56, 0.5);
+        material.absorption_color = Vec4::new(0.85, 0.72, 0.56, 0.45);
         material.max_radius_pixels = 1.0;
     }
 
@@ -99,10 +99,11 @@ fn spawn_squirrel_strand_group(commands: &mut Commands, asset_server: &AssetServ
                     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                         continue;
                     };
-                    // if file_name.contains("Head")
-                    //     || file_name.contains("Beard")
-                    //     || file_name.contains("Ears")
-                    //     || file_name.contains("Eye")
+                    // if file_name.contains("Body")
+                    // || file_name.contains("Claw")
+                    // || file_name.contains("Tail")
+                    // || file_name.contains("Ears")
+                    // || file_name.contains("Eye")
                     // {
                     let asset_path = format!("{SQUIRREL_SPLIT_ASSET_DIR}/{file_name}");
                     parent.spawn((

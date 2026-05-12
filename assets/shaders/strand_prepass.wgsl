@@ -63,6 +63,8 @@ const MAX_DISPATCH_WORKGROUPS_PER_DIMENSION: u32 = 65535u;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const INVALID_PTR: u32 = 0xFFFFFFFFu;
 const MARKED_COUNT_PAGE: u32 = 0xFFFFFFFEu;
+const DEBUG_DISABLE_OPAQUE_FINE_CULL: bool = false;
+const DEBUG_DISABLE_DEPTH_WARP_LUT: bool = false;
 
 var<workgroup> page_scan_values: array<u32, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> page_scan_counts: array<u32, COARSE_COUNT_PAGE_SIZE>;
@@ -463,7 +465,20 @@ fn dequantize_depth01(z_q: u32) -> f32 {
     return f32(z_q) / f32(DEPTH_QUANT_MAX);
 }
 
+fn disjoint_interval_gap(a_min: u32, a_max: u32, b_min: u32, b_max: u32) -> u32 {
+    if a_max < b_min {
+        return b_min - a_max;
+    }
+    if b_max < a_min {
+        return a_min - b_max;
+    }
+    return 0u;
+}
+
 fn fine_tile_occluded_by_opaque(frustum: FrustumDesc, fine_x: u32, fine_y: u32, nearest_depth: f32) -> bool {
+    if DEBUG_DISABLE_OPAQUE_FINE_CULL {
+        return false;
+    }
     if frustum.kind != 0u {
         return false;
     }
@@ -774,14 +789,29 @@ fn build_depth_warp_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
     if base + COARSE_DEPTH_SLICES > arrayLength(&coarse_depth_lut) {
         return;
     }
+    if DEBUG_DISABLE_DEPTH_WARP_LUT {
+        for (var i = 0u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
+            let start_q = (DEPTH_QUANT_MAX * i) / COARSE_DEPTH_SLICES;
+            let exclusive_end_q = (DEPTH_QUANT_MAX * (i + 1u)) / COARSE_DEPTH_SLICES;
+            let end_q = min(select(start_q, exclusive_end_q - 1u, exclusive_end_q > start_q), DEPTH_QUANT_MAX);
+            coarse_depth_lut[base + i] = CoarseDepthLutEntry(
+                start_q,
+                end_q,
+                start_q,
+                max(1u, end_q - start_q + 1u),
+            );
+        }
+        return;
+    }
 
     var interval_mins: array<u32, COARSE_DEPTH_SLICES>;
     var interval_maxs: array<u32, COARSE_DEPTH_SLICES>;
     var interval_count = 0u;
     var ref_idx = atomicLoad(&coarse_interval_heads[tile_idx]);
     var guard = 0u;
+    let max_ref_walk = arrayLength(&coarse_interval_refs.refs);
     loop {
-        if ref_idx == INVALID_PTR || ref_idx >= arrayLength(&coarse_interval_refs.refs) || guard >= 256u {
+        if ref_idx == INVALID_PTR || ref_idx >= max_ref_walk || guard >= max_ref_walk {
             break;
         }
         let interval_ref = coarse_interval_refs.refs[ref_idx];
@@ -807,11 +837,7 @@ fn build_depth_warp_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
                 var best = 0u;
                 var best_gap = 0xFFFFFFFFu;
                 for (var i = 0u; i < COARSE_DEPTH_SLICES; i = i + 1u) {
-                    let gap = select(
-                        interval_mins[i] - z_max,
-                        z_min - interval_maxs[i],
-                        interval_maxs[i] < z_min,
-                    );
+                    let gap = disjoint_interval_gap(interval_mins[i], interval_maxs[i], z_min, z_max);
                     if gap < best_gap {
                         best_gap = gap;
                         best = i;
@@ -851,21 +877,14 @@ fn build_depth_warp_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
         interval_maxs[j] = key_max;
     }
 
-    // TODO: Replace this equal-share cap with a proportional slice_count_for_interval policy
-    // once we have a test scene with wide-depth assets and separated overlapping intervals.
-    let capped_slices_per_interval = max(
-        1u,
-        min(
-            COARSE_MAX_SLICES_PER_ASSET_INTERVAL,
-            max(1u, COARSE_DEPTH_SLICES / interval_count),
-        ),
-    );
     var out_slice = 0u;
     for (var interval_idx = 0u; interval_idx < COARSE_DEPTH_SLICES; interval_idx = interval_idx + 1u) {
         if interval_idx >= interval_count {
             break;
         }
-        let slice_count = capped_slices_per_interval;
+        let base_slice_count = max(1u, COARSE_DEPTH_SLICES / interval_count);
+        let remainder = COARSE_DEPTH_SLICES % interval_count;
+        let slice_count = base_slice_count + select(0u, 1u, interval_idx < remainder);
         let z_min = interval_mins[interval_idx];
         let z_max = interval_maxs[interval_idx];
         let span = max(1u, z_max - z_min + 1u);
