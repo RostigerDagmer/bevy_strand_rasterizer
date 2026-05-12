@@ -18,7 +18,6 @@ use bevy_vsms::allocator::{VirtualSurfacePool, VirtualSurfaceRuntime};
 use std::collections::HashMap;
 
 use crate::{
-    components::FroxelConfig,
     pipelines::{layouts, prepass::StrandPrepassResources, task_contract::BINNING_POOL_CHUNK_SIZE},
     plugin::MAX_TEXTURE_EXTENT,
     resources::ComputeInvocationDims,
@@ -138,6 +137,16 @@ impl StrandShadowPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::STRAND_INSTANCES,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::SHADOW_DOM_SURFACE_IDS,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -343,6 +352,10 @@ pub fn create_strand_shadow_bind_group(
     let raster_tile_run_queue = prepass_resources.raster_tile_run_queue.as_ref().ok_or(())?;
     let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
+    let shadow_dom_surface_ids = prepass_resources
+        .shadow_dom_surface_ids
+        .as_ref()
+        .ok_or(())?;
 
     Ok((
         device.create_bind_group(
@@ -385,6 +398,10 @@ pub fn create_strand_shadow_bind_group(
                     binding: layouts::rasterizer::STRAND_INSTANCES,
                     resource: strand_instances.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::SHADOW_DOM_SURFACE_IDS,
+                    resource: shadow_dom_surface_ids.as_entire_binding(),
+                },
             ],
         ),
         vec![view_uniform_offset.offset, view_light_uniform_offset.offset],
@@ -424,11 +441,8 @@ pub fn run_shadow_pass(
     depth_storage_bind_group: &BindGroup,
     opacity_table_bind_group: &BindGroup,
     depth_table_bind_group: &BindGroup,
-    _froxel_config: &FroxelConfig,
-    frustum_id: u32,
-    opacity_surface_id: u32,
-    depth_surface_id: u32,
     resources: &StrandRasterizerResources,
+    frustum_count: u32,
     raster_tile_run_dispatch_args: &bevy::render::render_resource::Buffer,
     bind_group: &BindGroup,
     offsets: &[u32],
@@ -486,9 +500,7 @@ pub fn run_shadow_pass(
 
     let pushconstants = PushConstants {
         num_elements: resources.strand_count.unwrap_or(0),
-        workgroup_offset: depth_surface_id,
-        scan_load_base: frustum_id,
-        scan_save_base: opacity_surface_id,
+        frustum_count,
         ..Default::default()
     };
     pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));

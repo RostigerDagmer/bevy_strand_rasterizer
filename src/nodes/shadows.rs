@@ -10,16 +10,14 @@ use bevy::{
     },
 };
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
-use bevy_vsms::{
-    allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind, lifecycle::VirtualSurfaceMap,
-};
+use bevy_vsms::{allocator::VirtualSurfaceRuntime, api::VirtualSurfaceKind};
 
 use crate::pipelines::{
     prepass::StrandPrepassResources,
     raster::StrandRasterizerResources,
     shadows::{
-        StrandShadowPipeline, StrandShadowResources, create_strand_shadow_bind_group,
-        create_vsms_table_bind_group, run_shadow_pass,
+        StrandShadowPipeline, create_strand_shadow_bind_group, create_vsms_table_bind_group,
+        run_shadow_pass,
     },
 };
 
@@ -48,8 +46,6 @@ impl Node for StrandShadowRasterizerNode {
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
-        let shadow_resources = world.resource::<StrandShadowResources>();
-        let surface_map = world.resource::<VirtualSurfaceMap>();
         let view_uniforms = world.resource::<ViewUniforms>();
         let light_meta = world.resource::<LightMeta>();
 
@@ -121,50 +117,21 @@ impl Node for StrandShadowRasterizerNode {
             return Ok(());
         };
 
-        let mut frusta: Vec<_> = raster_resources.frustrum_config.iter().collect();
-        frusta.sort_by_key(|(entity, _)| entity.index());
-        for (entity, frustum_cfg) in frusta {
-            let Some(&frustum_id) = raster_resources.frustum_ids.get(entity) else {
-                continue;
-            };
-            if !shadow_resources
-                .light_layer_by_frustum
-                .contains_key(&frustum_id)
-            {
-                continue;
-            }
-            let Some((opacity_proxy, depth_proxy)) =
-                shadow_resources.dom_vsms_proxies.get(entity).copied()
-            else {
-                continue;
-            };
-            let Some(&opacity_surface_id) = surface_map.entity_to_surface.get(&opacity_proxy)
-            else {
-                continue;
-            };
-            let Some(&depth_surface_id) = surface_map.entity_to_surface.get(&depth_proxy) else {
-                continue;
-            };
-
-            run_shadow_pass(
-                render_context,
-                pipeline_cache,
-                shadow_pipeline,
-                allocator,
-                opacity_storage_bind_group,
-                depth_storage_bind_group,
-                &opacity_table_bind_group,
-                &depth_table_bind_group,
-                frustum_cfg,
-                frustum_id,
-                opacity_surface_id,
-                depth_surface_id,
-                raster_resources,
-                raster_tile_run_dispatch_args,
-                &shadow_bind_group,
-                &dynamic_offsets,
-            );
-        }
+        run_shadow_pass(
+            render_context,
+            pipeline_cache,
+            shadow_pipeline,
+            allocator,
+            opacity_storage_bind_group,
+            depth_storage_bind_group,
+            &opacity_table_bind_group,
+            &depth_table_bind_group,
+            raster_resources,
+            prepass_resources.frustum_count,
+            raster_tile_run_dispatch_args,
+            &shadow_bind_group,
+            &dynamic_offsets,
+        );
 
         Ok(())
     }

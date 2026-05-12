@@ -104,6 +104,9 @@ struct FineSegRefBuffer {
 #ifdef LINEAR
 @group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 #endif
+#ifdef SHADOWS
+@group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+#endif
 
 // Helper: Signed distance from point `p` to line segment `a` -> `b`
 // Returns distance. Clamps distance calc to the segment endpoints.
@@ -358,8 +361,16 @@ fn rasterize_strands(
     @builtin(local_invocation_id) local_id: vec3u,
     @builtin(num_workgroups) num_wg: vec3u,
 ) {
-    let active_frustum_id = pc.scan_load_base;
-    if active_frustum_id >= arrayLength(&frustum_table) {
+    let run_idx = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
+    if run_idx >= arrayLength(&raster_tile_run_queue.items) {
+        return;
+    }
+    let run = raster_tile_run_queue.items[run_idx];
+    if run.work_count == 0u {
+        return;
+    }
+    let active_frustum_id = run.frustum_id;
+    if active_frustum_id >= min(pc.frustum_count, arrayLength(&frustum_table)) {
         return;
     }
     let active_desc = frustum_table[active_frustum_id];
@@ -376,22 +387,21 @@ fn rasterize_strands(
     if light_layer >= lights.n_directional_lights {
         return;
     }
-    let opacity_surface_id = pc.scan_save_base;
-    let depth_surface_id = pc.workgroup_offset;
+    if active_frustum_id >= arrayLength(&shadow_dom_surface_ids) {
+        return;
+    }
+    let surface_ids = shadow_dom_surface_ids[active_frustum_id];
+    let opacity_surface_id = surface_ids.x;
+    let depth_surface_id = surface_ids.y;
+    if opacity_surface_id == 0xFFFFFFFFu || depth_surface_id == 0xFFFFFFFFu {
+        return;
+    }
     if opacity_surface_id >= arrayLength(&opacity_virtual_meta) || depth_surface_id >= arrayLength(&depth_virtual_meta) {
         return;
     }
     let opacity_meta = opacity_virtual_meta[opacity_surface_id];
     let depth_meta = depth_virtual_meta[depth_surface_id];
     if opacity_meta.entry_count == 0u || depth_meta.entry_count == 0u {
-        return;
-    }
-    let run_idx = (wg.z * num_wg.y + wg.y) * num_wg.x + wg.x;
-    if run_idx >= arrayLength(&raster_tile_run_queue.items) {
-        return;
-    }
-    let run = raster_tile_run_queue.items[run_idx];
-    if run.frustum_id != active_frustum_id || run.work_count == 0u {
         return;
     }
     let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
