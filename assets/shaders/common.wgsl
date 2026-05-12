@@ -94,16 +94,16 @@ fn world_to_screen_raw(
     position: vec4<f32>,
     clip_from_world: mat4x4<f32>,
     viewport: vec4<f32>, // (x, y, w, h)
-) -> vec3<f32> {
+) -> vec4<f32> {
     let clip = clip_from_world * position;
     if clip.w <= 0.0 {
-        return vec3<f32>(-1.0, -1.0, -1.0);
+        return vec4<f32>(-1.0, -1.0, -1.0, -1.0);
     }
     let ndc = clip.xyz / clip.w; // ndc in [-1,1]^2 x [0,1] (wgpu/Vulkan)
     let sx = viewport.x + (ndc.x * 0.5 + 0.5) * viewport.z;
     let sy = viewport.y + (ndc.y * -0.5 + 0.5) * viewport.w; // flip Y (top-left origin)
     // return NDC z directly (no reversal)
-    return vec3<f32>(sx, sy, ndc.z);
+    return vec4<f32>(sx, sy, ndc.z, clip.w);
 }
 
 fn world_to_screen_aabbnorm(position: vec4<f32>, clip_from_world: mat4x4<f32>, screen_width: f32, screen_height: f32, aabb_clip_bounds: mat2x3<f32>) -> vec3<f32> {

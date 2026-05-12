@@ -1,12 +1,15 @@
 use bevy::{
     ecs::world::World,
     log::*,
-    pbr::{LightMeta, ViewLightsUniformOffset, ViewShadowBindings},
+    pbr::{
+        LightEntity, LightMeta, ShadowView, ViewLightEntities, ViewLightsUniformOffset,
+        ViewShadowBindings,
+    },
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
-        render_resource::PipelineCache,
+        render_resource::{ImageSubresourceRange, PipelineCache, TextureAspect},
         renderer::{RenderContext, RenderDevice},
-        view::{ViewUniformOffset, ViewUniforms},
+        view::{ExtractedView, ViewUniformOffset, ViewUniforms},
     },
 };
 use bevy_gpu_paging_allocator::GpuPagingAllocator;
@@ -16,10 +19,12 @@ use crate::pipelines::{
     prepass::StrandPrepassResources,
     raster::StrandRasterizerResources,
     shadows::{
-        StrandShadowPipeline, create_strand_shadow_bind_group, create_vsms_table_bind_group,
-        run_shadow_pass,
+        ShadowStampParams, StrandShadowPipeline, StrandShadowResources,
+        create_shadow_stamp_bind_group, create_strand_shadow_bind_group,
+        create_vsms_table_bind_group, run_shadow_pass, run_shadow_stampback_pass,
     },
 };
+use wgpu::util::BufferInitDescriptor;
 
 #[derive(Debug, Clone, Default)]
 pub struct StrandShadowRasterizerNode;
@@ -46,6 +51,7 @@ impl Node for StrandShadowRasterizerNode {
         let raster_resources = world.resource::<StrandRasterizerResources>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
         let shadow_pipeline = world.resource::<StrandShadowPipeline>();
+        let shadow_resources = world.resource::<StrandShadowResources>();
         let view_uniforms = world.resource::<ViewUniforms>();
         let light_meta = world.resource::<LightMeta>();
 
@@ -57,6 +63,9 @@ impl Node for StrandShadowRasterizerNode {
             return Ok(());
         };
         let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
+            return Ok(());
+        };
+        let Some(view_light_entities) = world.get::<ViewLightEntities>(view_entity) else {
             return Ok(());
         };
         let Some(view_binding) = view_uniforms.uniforms.binding() else {
@@ -93,6 +102,13 @@ impl Node for StrandShadowRasterizerNode {
         else {
             return Ok(());
         };
+        let Some(depth_sample_bind_group) = vsms_runtime
+            .pool_bindings
+            .get(&VirtualSurfaceKind::Depth2DArray)
+            .map(|b| &b.bind_group)
+        else {
+            return Ok(());
+        };
         let Some(opacity_pool) = vsms_runtime.pools.get(&VirtualSurfaceKind::Opacity3D) else {
             return Ok(());
         };
@@ -121,6 +137,19 @@ impl Node for StrandShadowRasterizerNode {
             return Ok(());
         };
 
+        let clear_range = ImageSubresourceRange {
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+        };
+        for surface in &depth_pool.physical_surfaces {
+            render_context
+                .command_encoder()
+                .clear_texture(&surface.texture, &clear_range);
+        }
+
         run_shadow_pass(
             render_context,
             pipeline_cache,
@@ -136,6 +165,64 @@ impl Node for StrandShadowRasterizerNode {
             &shadow_bind_group,
             &dynamic_offsets,
         );
+
+        for target in shadow_resources.stamp_targets.iter().copied() {
+            if target.frustum_id >= prepass_resources.frustum_count {
+                continue;
+            }
+            let Some((shadow_view, extracted_view)) =
+                view_light_entities.lights.iter().find_map(|entity| {
+                    let light_entity = world.get::<LightEntity>(*entity)?;
+                    let LightEntity::Directional {
+                        light_entity,
+                        cascade_index,
+                    } = light_entity
+                    else {
+                        return None;
+                    };
+                    if *light_entity == target.light_entity
+                        && *cascade_index as u32 == target.cascade_index
+                    {
+                        Some((
+                            world.get::<ShadowView>(*entity)?,
+                            world.get::<ExtractedView>(*entity)?,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            else {
+                continue;
+            };
+            let params = ShadowStampParams {
+                frustum_id: target.frustum_id,
+                target_width: extracted_view.viewport.z,
+                target_height: extracted_view.viewport.w,
+                _pad2: 0,
+            };
+            let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("strand_shadow_stampback_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: bevy::render::render_resource::BufferUsages::UNIFORM,
+            });
+            let Some(stamp_bind_group) = create_shadow_stamp_bind_group(
+                render_device,
+                shadow_pipeline,
+                prepass_resources,
+                &params_buffer,
+            ) else {
+                continue;
+            };
+            run_shadow_stampback_pass(
+                render_context,
+                pipeline_cache,
+                shadow_pipeline,
+                depth_sample_bind_group,
+                &depth_table_bind_group,
+                &stamp_bind_group,
+                &shadow_view.depth_attachment.view,
+            );
+        }
 
         Ok(())
     }

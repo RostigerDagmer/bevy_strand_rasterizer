@@ -1,13 +1,17 @@
 use bevy::{
+    core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT,
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
-            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            PipelineCache, PushConstantRange, ShaderStages, ShaderType, TextureSampleType,
-            TextureView, TextureViewDimension,
+            CachedComputePipelineId, CachedRenderPipelineId, CompareFunction,
+            ComputePassDescriptor, ComputePipelineDescriptor, DepthBiasState, DepthStencilState,
+            FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState,
+            PushConstantRange, RenderPassDepthStencilAttachment, RenderPassDescriptor,
+            RenderPipelineDescriptor, ShaderStages, ShaderType, StencilState, StoreOp,
+            TextureSampleType, TextureView, TextureViewDimension, VertexState,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
@@ -36,13 +40,23 @@ pub struct StrandShadowResources {
     pub light_layer_by_frustum: HashMap<u32, u32>,
     pub light_entity_by_layer: Vec<Entity>,
     pub dom_vsms_proxies: HashMap<Entity, (Entity, Entity)>, // (opacity_proxy, depth_proxy)
+    pub stamp_targets: Vec<ShadowStampTarget>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowStampTarget {
+    pub frustum_id: u32,
+    pub light_entity: Entity,
+    pub cascade_index: u32,
 }
 
 #[derive(Resource)]
 pub struct StrandShadowPipeline {
     pub bind_group_layout: BindGroupLayout,
+    pub stamp_bind_group_layout: BindGroupLayout,
     pub vsms_table_bind_group_layout: BindGroupLayout,
     pub shadow_pipeline: Option<CachedComputePipelineId>,
+    pub stampback_pipeline: Option<CachedRenderPipelineId>,
     pub allocator_epoch: u64,
     pub workgroup_size: u32,
     pub opacity_storage_count: u32,
@@ -176,7 +190,7 @@ impl StrandShadowPipeline {
             &[
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::VSMS_VIRTUAL_META_BINDING,
-                    visibility: ShaderStages::COMPUTE,
+                    visibility: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -186,11 +200,49 @@ impl StrandShadowPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: layouts::rasterizer::VSMS_VIRTUAL_PAGE_TABLE_BINDING,
-                    visibility: ShaderStages::COMPUTE,
+                    visibility: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        )
+    }
+
+    pub fn stamp_bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
+            "strand_shadow_stampback_bind_group_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: layouts::shadow_stampback::FRUSTUM_TABLE,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shadow_stampback::SHADOW_DOM_SURFACE_IDS,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shadow_stampback::PARAMS,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(ShadowStampParams::min_size()),
                     },
                     count: None,
                 },
@@ -208,6 +260,9 @@ impl FromWorld for StrandShadowPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        let stamp_descriptor = Self::stamp_bind_group_layout_descriptor();
+        let stamp_bind_group_layout = device
+            .create_bind_group_layout(stamp_descriptor.label.as_ref(), &stamp_descriptor.entries);
         let vsms_table_descriptor = Self::vsms_table_bind_group_layout_descriptor();
         let vsms_table_bind_group_layout = device.create_bind_group_layout(
             vsms_table_descriptor.label.as_ref(),
@@ -216,14 +271,25 @@ impl FromWorld for StrandShadowPipeline {
 
         StrandShadowPipeline {
             bind_group_layout,
+            stamp_bind_group_layout,
             vsms_table_bind_group_layout,
             shadow_pipeline: None,
+            stampback_pipeline: None,
             allocator_epoch: u64::MAX,
             workgroup_size: 0,
             opacity_storage_count: 0,
             depth_storage_count: 0,
         }
     }
+}
+
+#[derive(Clone, Copy, ShaderType, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct ShadowStampParams {
+    pub frustum_id: u32,
+    pub target_width: u32,
+    pub target_height: u32,
+    pub _pad2: u32,
 }
 
 pub fn update_strand_shadow_pipeline(
@@ -244,6 +310,12 @@ pub fn update_strand_shadow_pipeline(
     };
     let Some(depth_storage_binding) = vsms_runtime
         .pool_storage_bindings
+        .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
+    else {
+        return;
+    };
+    let Some(depth_sample_binding) = vsms_runtime
+        .pool_bindings
         .get(&bevy_vsms::api::VirtualSurfaceKind::Depth2DArray)
     else {
         return;
@@ -275,6 +347,7 @@ pub fn update_strand_shadow_pipeline(
     );
     let opacity_storage_layout = opacity_storage_binding.layout_descriptor.clone();
     let depth_storage_layout = depth_storage_binding.layout_descriptor.clone();
+    let depth_sample_layout = depth_sample_binding.layout_descriptor.clone();
 
     let cdefs = [
         vec![
@@ -320,11 +393,20 @@ pub fn update_strand_shadow_pipeline(
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::rasterizer::RASTER_GROUP as usize] = shadow_layout;
     layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_storage_layout;
-    layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout;
+    layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout.clone();
     layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
-    layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
+    layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout.clone();
 
     let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
+    let stamp_shader = shader_loader.load("shaders/shadow_dom_stampback.wgsl");
+    let stamp_shader_defs = [
+        layouts::shadow_stampback::shader_defs(),
+        vec![ShaderDefVal::UInt(
+            layouts::rasterizer::VSMS_DEPTH_POOL_TEXTURE_COUNT_DEF.into(),
+            depth_storage_count,
+        )],
+    ]
+    .concat();
     pipeline.shadow_pipeline = Some(pipeline_cache.queue_compute_pipeline(
         ComputePipelineDescriptor {
             label: Some("strand_shadow_rasterize_pipeline".into()),
@@ -336,6 +418,36 @@ pub fn update_strand_shadow_pipeline(
                 range: 0..std::mem::size_of::<PushConstants>() as u32,
             }],
             entry_point: Some("rasterize_strands".into()),
+            zero_initialize_workgroup_memory: false,
+        },
+    ));
+    let stamp_layout = StrandShadowPipeline::stamp_bind_group_layout_descriptor();
+    pipeline.stampback_pipeline = Some(pipeline_cache.queue_render_pipeline(
+        RenderPipelineDescriptor {
+            label: Some("strand_shadow_stampback_pipeline".into()),
+            layout: vec![stamp_layout, depth_sample_layout, vsms_table_layout.clone()],
+            vertex: VertexState {
+                shader: stamp_shader.clone(),
+                shader_defs: stamp_shader_defs.clone(),
+                entry_point: Some("vertex".into()),
+                buffers: vec![],
+            },
+            fragment: Some(FragmentState {
+                shader: stamp_shader,
+                shader_defs: stamp_shader_defs,
+                entry_point: Some("fragment".into()),
+                targets: vec![],
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Always,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
+            multisample: MultisampleState::default(),
+            push_constant_ranges: vec![],
             zero_initialize_workgroup_memory: false,
         },
     ));
@@ -446,6 +558,85 @@ pub fn create_vsms_table_bind_group(
             },
         ],
     ))
+}
+
+pub fn create_shadow_stamp_bind_group(
+    device: &RenderDevice,
+    pipeline: &StrandShadowPipeline,
+    prepass_resources: &StrandPrepassResources,
+    params: &bevy::render::render_resource::Buffer,
+) -> Option<BindGroup> {
+    let frustum_table = prepass_resources.frustum_table.as_ref()?;
+    let shadow_dom_surface_ids = prepass_resources.shadow_dom_surface_ids.as_ref()?;
+    Some(device.create_bind_group(
+        Some("strand_shadow_stampback_bind_group"),
+        &pipeline.stamp_bind_group_layout,
+        &[
+            BindGroupEntry {
+                binding: layouts::shadow_stampback::FRUSTUM_TABLE,
+                resource: frustum_table.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: layouts::shadow_stampback::SHADOW_DOM_SURFACE_IDS,
+                resource: shadow_dom_surface_ids.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: layouts::shadow_stampback::PARAMS,
+                resource: params.as_entire_binding(),
+            },
+        ],
+    ))
+}
+
+pub fn run_shadow_stampback_pass(
+    render_context: &mut RenderContext,
+    pipeline_cache: &PipelineCache,
+    pipeline: &StrandShadowPipeline,
+    depth_sample_bind_group: &BindGroup,
+    depth_table_bind_group: &BindGroup,
+    stamp_bind_group: &BindGroup,
+    target_view: &TextureView,
+) {
+    let Some(pipeline_id) = pipeline.stampback_pipeline else {
+        warn!("Shadow stampback pipeline id not ready");
+        return;
+    };
+    let Some(stamp_pipeline) = pipeline_cache.get_render_pipeline(pipeline_id) else {
+        warn!("Shadow stampback pipeline not found");
+        return;
+    };
+
+    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("Strand Shadow Stampback"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view: target_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    pass.set_render_pipeline(stamp_pipeline);
+    pass.set_bind_group(
+        layouts::shadow_stampback::STAMP_GROUP as usize,
+        stamp_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::shadow_stampback::VSMS_DEPTH_READ_GROUP as usize,
+        depth_sample_bind_group,
+        &[],
+    );
+    pass.set_bind_group(
+        layouts::shadow_stampback::VSMS_DEPTH_TABLE_GROUP as usize,
+        depth_table_bind_group,
+        &[],
+    );
+    pass.draw(0..3, 0..1);
 }
 
 pub fn run_shadow_pass(

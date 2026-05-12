@@ -1,7 +1,7 @@
 use bevy::{
     animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex},
     gltf::GltfAssetLabel,
-    light::CascadeShadowConfigBuilder,
+    light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
     prelude::*,
     render::{
         RenderPlugin,
@@ -47,25 +47,33 @@ fn squirrel_world_transform() -> Transform {
 
 fn squirrel_strand_material(group_name: &str) -> StrandMaterial {
     let mut material = StrandMaterial {
-        absorption_color: Vec4::new(0.42, 0.25, 0.14, 0.35),
-        specular_color: Vec4::new(0.9, 0.72, 0.52, 0.15),
+        absorption_color: Vec4::new(0.56, 0.25, 0.14, 0.35),
+        specular_color: Vec4::new(0.9, 0.72, 0.52, 0.2),
         ambient_factor: 0.15,
         ao_factor: 0.1,
         eta: 1.55,
         beta: 0.85,
         alpha: 0.35,
         shift: 0.1,
-        min_radius_pixels: 0.7,
-        max_radius_pixels: 1.3,
+        min_radius_pixels: 0.3,
+        max_radius_pixels: 1.4,
     };
 
     if group_name.contains("_Tail") {
-        material.absorption_color = Vec4::new(0.5, 0.32, 0.18, 0.6);
-        material.min_radius_pixels = 1.0;
-        material.max_radius_pixels = 1.6;
-    } else if group_name.contains("_Beard") || group_name.contains("_Eye") {
+        material.absorption_color = Vec4::new(0.58, 0.32, 0.18, 0.6);
+        material.specular_color = Vec4::new(0.98, 0.72, 0.64, 0.12);
+        material.min_radius_pixels = 0.3;
+        material.max_radius_pixels = 1.8;
+    } else if group_name.contains("_Beard")
+        || group_name.contains("_Eye")
+        || group_name.contains("Head")
+    {
         material.absorption_color = Vec4::new(0.85, 0.72, 0.56, 0.45);
-        material.max_radius_pixels = 1.0;
+        material.specular_color = Vec4::new(0.98, 0.72, 0.64, 0.25);
+        material.beta = 0.75;
+        material.alpha = 0.25;
+        material.min_radius_pixels = 0.3;
+        material.max_radius_pixels = 1.2;
     }
 
     material
@@ -215,6 +223,7 @@ fn setup(
     //     GlobalTransform::default(), // StrandMaterial::default(),
     // ));
 
+    ////// SQUIRREL TEST SCENE /////////////
     let (squirrel_pose_graph, squirrel_pose_node) = AnimationGraph::from_clip(
         asset_server.load(GltfAssetLabel::Animation(0).from_asset(SQUIRREL_GLTF)),
     );
@@ -230,6 +239,8 @@ fn setup(
         GlobalTransform::default(),
     ));
     spawn_squirrel_strand_group(&mut commands, &asset_server);
+
+    ////// SQUIRREL TEST SCENE /////////////
 
     commands.spawn((
         FroxelConfig {
@@ -451,6 +462,7 @@ fn main() {
             }),
             ..Default::default()
         }))
+        .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .add_plugins(DefaultMaterialPlugin)
         .add_plugins(BevyVsmsPlugin)
         .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))

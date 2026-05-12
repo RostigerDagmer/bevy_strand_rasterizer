@@ -275,6 +275,10 @@ fn queue_prepass_pipeline(
         ),
         ShaderDefVal::UInt("DOM_PAGE_XY".into(), crate::plugin::DOM_PAGE_XY),
         ShaderDefVal::UInt(
+            "DOM_PREFETCH_PAGE_BORDER".into(),
+            crate::plugin::DOM_PREFETCH_PAGE_BORDER,
+        ),
+        ShaderDefVal::UInt(
             "COARSE_COUNT_PAGE_SIZE".into(),
             crate::plugin::COARSE_COUNT_PAGE_SIZE,
         ),

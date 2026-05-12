@@ -842,7 +842,7 @@ fn sample_shadow_visibility(p_world: vec3<f32>) -> f32 {
 const COLOR_PIXEL_SLOTS: u32 = 64u;
 const COLOR_SEGMENT_WORKERS: u32 = 4u;
 const COLOR_PARTIAL_COUNT: u32 = COLOR_PIXEL_SLOTS * COLOR_SEGMENT_WORKERS;
-const COLOR_SEGMENT_BATCH_SIZE: u32 = 8u;
+const COLOR_SEGMENT_BATCH_SIZE: u32 = 16u;
 var<workgroup> color_batch_valid: array<u32, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_p0_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_p1_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
@@ -955,8 +955,6 @@ fn rasterize_strands(
                             let p1_screen = world_to_screen_raw(v1_world, camera_clip_from_world, camera_viewport);
                             if !(p0_screen.x < 0.0 && p1_screen.x < 0.0) {
                                 let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
-                                let clip0 = camera_clip_from_world * v0_world;
-                                let clip1 = camera_clip_from_world * v1_world;
                                 let min_radius = max(mat.min_radius_pixels, 1e-4);
                                 let max_radius = max(mat.max_radius_pixels, min_radius);
                                 let shading_capacity = shading_dims.x * shading_dims.y;
@@ -966,7 +964,7 @@ fn rasterize_strands(
                                 color_batch_p0_xy[batch_lane] = p0_screen.xy;
                                 color_batch_p1_xy[batch_lane] = p1_screen.xy;
                                 color_batch_depth[batch_lane] = vec2<f32>(p0_screen.z, p1_screen.z);
-                                color_batch_clip_w[batch_lane] = vec2<f32>(clip0.w, clip1.w);
+                                color_batch_clip_w[batch_lane] = vec2<f32>(p0_screen.w, p1_screen.w);
                                 color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
                                 color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
                                 color_batch_max_xy[batch_lane] = max(p0_screen.xy, p1_screen.xy) + vec2<f32>(max_radius);

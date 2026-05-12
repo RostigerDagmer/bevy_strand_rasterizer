@@ -257,6 +257,45 @@ pub mod shadows {
     }
 }
 
+pub mod shadow_stampback {
+    use bevy::shader::ShaderDefVal;
+
+    pub const STAMP_GROUP: u32 = 0;
+    pub const VSMS_DEPTH_READ_GROUP: u32 = 1;
+    pub const VSMS_DEPTH_TABLE_GROUP: u32 = 2;
+
+    pub const FRUSTUM_TABLE: u32 = 0;
+    pub const SHADOW_DOM_SURFACE_IDS: u32 = 1;
+    pub const PARAMS: u32 = 2;
+
+    pub fn shader_defs() -> Vec<ShaderDefVal> {
+        vec![
+            ShaderDefVal::UInt("STAMP_GROUP".into(), STAMP_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_READ_GROUP".into(), VSMS_DEPTH_READ_GROUP),
+            ShaderDefVal::UInt("VSMS_DEPTH_TABLE_GROUP".into(), VSMS_DEPTH_TABLE_GROUP),
+            ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
+            ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
+            ShaderDefVal::UInt("PARAMS".into(), PARAMS),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_TEXTURE_BINDING".into(),
+                super::rasterizer::VSMS_POOL_TEXTURE_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_POOL_SAMPLER_BINDING".into(),
+                super::rasterizer::VSMS_POOL_SAMPLER_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_META_BINDING".into(),
+                super::rasterizer::VSMS_VIRTUAL_META_BINDING,
+            ),
+            ShaderDefVal::UInt(
+                "VSMS_VIRTUAL_PAGE_TABLE_BINDING".into(),
+                super::rasterizer::VSMS_VIRTUAL_PAGE_TABLE_BINDING,
+            ),
+        ]
+    }
+}
+
 pub mod binning {
     use bevy::shader::ShaderDefVal;
 

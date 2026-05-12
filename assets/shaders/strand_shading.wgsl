@@ -714,7 +714,7 @@ fn shade_strands(
     let history_valid = previous_scattering_visibility > 0.0;
     let scattering_visibility = select(
         current_scattering_visibility,
-        mix(current_scattering_visibility, previous_scattering_visibility, 0.83),
+        mix(current_scattering_visibility, previous_scattering_visibility, 0.88),
         history_valid,
     );
     textureStore(

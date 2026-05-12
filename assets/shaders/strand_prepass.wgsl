@@ -58,6 +58,7 @@ const COARSE_DEPTH_SLICES: u32 = #COARSE_DEPTH_SLICES;
 const COARSE_MAX_SLICES_PER_ASSET_INTERVAL: u32 = #COARSE_MAX_SLICES_PER_ASSET_INTERVAL;
 const COARSE_COUNT_PAGE_SIZE: u32 = #COARSE_COUNT_PAGE_SIZE;
 const DOM_PAGE_XY: u32 = #DOM_PAGE_XY;
+const DOM_PREFETCH_PAGE_BORDER: u32 = #DOM_PREFETCH_PAGE_BORDER;
 const DEPTH_QUANT_MAX: u32 = 16777215u;
 const MAX_DISPATCH_WORKGROUPS_PER_DIMENSION: u32 = 65535u;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
@@ -1768,6 +1769,32 @@ fn mark_vsms_request(surface_id: u32, page_tile: vec3<u32>) {
     atomicOr(&vsms_request_bits[addr.word_index], addr.bit_mask);
 }
 
+fn mark_shadow_dom_page_request(surface_ids: vec2<u32>, page_tile: vec3<u32>) {
+    mark_vsms_request(surface_ids.x, page_tile);
+    mark_vsms_request(surface_ids.y, page_tile);
+}
+
+fn mark_shadow_dom_page_request_with_border(surface_ids: vec2<u32>, page_tile: vec3<u32>) {
+    if surface_ids.x == INVALID_PTR || surface_ids.x >= arrayLength(&vsms_request_meta) {
+        return;
+    }
+    let request_row = vsms_request_meta[surface_ids.x];
+    if request_row.base_tiles_x == 0u || request_row.base_tiles_y == 0u {
+        return;
+    }
+
+    let min_x = page_tile.x - min(page_tile.x, DOM_PREFETCH_PAGE_BORDER);
+    let min_y = page_tile.y - min(page_tile.y, DOM_PREFETCH_PAGE_BORDER);
+    let max_x = min(page_tile.x + DOM_PREFETCH_PAGE_BORDER, request_row.base_tiles_x - 1u);
+    let max_y = min(page_tile.y + DOM_PREFETCH_PAGE_BORDER, request_row.base_tiles_y - 1u);
+
+    for (var py = min_y; py <= max_y; py = py + 1u) {
+        for (var px = min_x; px <= max_x; px = px + 1u) {
+            mark_shadow_dom_page_request(surface_ids, vec3<u32>(px, py, page_tile.z));
+        }
+    }
+}
+
 fn request_shadow_dom_pages(frustum_id: u32, frustum: FrustumDesc, fine_x: u32, fine_y: u32) {
     if frustum.kind != 1u || frustum_id >= arrayLength(&shadow_dom_surface_ids) {
         return;
@@ -1786,9 +1813,7 @@ fn request_shadow_dom_pages(frustum_id: u32, frustum: FrustumDesc, fine_x: u32, 
 
     for (var py = page_min.y; py <= page_max.y; py = py + 1u) {
         for (var px = page_min.x; px <= page_max.x; px = px + 1u) {
-            let page_tile = vec3<u32>(px, py, 0u);
-            mark_vsms_request(surface_ids.x, page_tile);
-            mark_vsms_request(surface_ids.y, page_tile);
+            mark_shadow_dom_page_request_with_border(surface_ids, vec3<u32>(px, py, 0u));
         }
     }
 }

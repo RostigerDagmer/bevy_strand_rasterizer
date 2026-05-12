@@ -63,6 +63,7 @@ const DOM_RESIDENT_PAGE_BUDGET_DIVISOR: u32 = 8;
 const DOM_MIN_RESIDENT_PAGES: u32 = 4;
 const DOM_MAX_RESIDENT_PAGES: u32 = 256;
 pub const DOM_PAGE_XY: u32 = 256;
+pub const DOM_PREFETCH_PAGE_BORDER: u32 = 1;
 pub(crate) const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
 
 fn cap_storage_capacity(
@@ -244,6 +245,11 @@ impl Plugin for StrandRasterizerPlugin {
             .add_render_graph_edge(
                 Core3d,
                 nodes::shadows::StrandShadowRasterizerLabel,
+                bevy::core_pipeline::core_3d::graph::Node3d::MainOpaquePass,
+            )
+            .add_render_graph_edge(
+                Core3d,
+                nodes::shadows::StrandShadowRasterizerLabel,
                 nodes::shading::StrandShadingLabel,
             )
             .add_render_graph_edge(
@@ -372,13 +378,28 @@ fn use_prepass_buffers(
         })
         .map(|(_, view)| view);
     let mut shadow_cascade_by_entity: HashMap<Entity, u32> = HashMap::default();
-    for (entity, light) in light_frusta_query.iter() {
+    let mut shadow_texture_base_by_entity: HashMap<Entity, u32> = HashMap::default();
+    let mut next_shadow_texture_layer = 0u32;
+    let mut sorted_lights: Vec<_> = light_frusta_query.iter().collect();
+    sorted_lights.sort_by_key(|(entity, _)| entity.index());
+    for (entity, light) in sorted_lights {
         let cascade_index =
             select_authoritative_shadow_cascade(main_view, &strand_world_centers, light);
         shadow_cascade_by_entity.insert(entity, cascade_index);
+        if light.shadows_enabled {
+            shadow_texture_base_by_entity.insert(entity, next_shadow_texture_layer);
+            let cascade_count = light
+                .cascade_shadow_config
+                .bounds
+                .len()
+                .min(bevy::pbr::MAX_CASCADES_PER_LIGHT)
+                .max(1) as u32;
+            next_shadow_texture_layer = next_shadow_texture_layer.saturating_add(cascade_count);
+        }
     }
     raster_resources.frustum_ids.clear();
     shadow_resources.light_layer_by_frustum.clear();
+    shadow_resources.stamp_targets.clear();
     let mut shadow_dom_surface_ids: Vec<[u32; 2]> = Vec::new();
     let mut light_layer: u32 = 0;
     let mut frusta: Vec<_> = raster_resources
@@ -400,6 +421,13 @@ fn use_prepass_buffers(
             shadow_resources
                 .light_layer_by_frustum
                 .insert(frustum_id as u32, light_layer);
+            if shadow_texture_base_by_entity.contains_key(&entity) {
+                shadow_resources.stamp_targets.push(ShadowStampTarget {
+                    frustum_id: frustum_id as u32,
+                    light_entity: entity,
+                    cascade_index,
+                });
+            }
             light_layer = light_layer.saturating_add(1);
         }
         let dom_surface_ids = shadow_resources
