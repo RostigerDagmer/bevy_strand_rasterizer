@@ -87,6 +87,10 @@ struct FrustumDesc {
     coarse_depth_tile_count: u32,
     coarse_tiles_x: u32,
     coarse_tiles_y: u32,
+    cascade_index: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 struct CoarseDepthLutEntry {
@@ -291,13 +295,24 @@ fn stochastic_camera_keep_probability(strand_count: u32, screen_area_px: f32) ->
     let target_density = max(pc.target_strands_per_pixel, 1e-5);
     let min_keep = clamp(pc.min_keep_probability, 0.0, 1.0);
     return clamp(screen_area_px * target_density / max(f32(strand_count), 1.0), min_keep, 1.0);
+    // let area_keep = clamp(screen_area_px * target_density / max(f32(strand_count), 1.0), 0.0, 1.0);
+    // return clamp(area_keep * area_keep, min_keep, 1.0);
 }
 
-fn stochastic_shadow_keep_probability() -> f32 {
+fn stochastic_shadow_keep_probability(strand_count: u32, screen_area_px: f32, frustum: FrustumDesc) -> f32 {
     if pc.stochastic_cull_enabled == 0u {
         return 1.0;
     }
-    return clamp(pc.shadow_keep_probability, 0.0, 1.0);
+    if screen_area_px < 0.0 {
+        return 0.0;
+    }
+    let target_density = max(pc.target_strands_per_pixel, 1e-5);
+    let min_keep = clamp(pc.min_keep_probability, 0.0, 1.0);
+    let slider_cap = clamp(pc.shadow_keep_probability, 0.0, 1.0);
+    let area_keep = clamp(screen_area_px * target_density / max(f32(strand_count), 1.0), min_keep, 1.0);
+    let curved_keep = area_keep * area_keep;
+    let cascade_keep_scale = 1.0 / exp2(f32(frustum.cascade_index));
+    return clamp(curved_keep * cascade_keep_scale * slider_cap, min_keep, 1.0);
 }
 
 fn ceil_div_u32(x: u32, y: u32) -> u32 {
@@ -333,11 +348,23 @@ fn light_layer_from_frustum(frustum_id: u32) -> u32 {
     return layer;
 }
 
+fn cascade_index_for_frustum(frustum_id: u32, light_layer: u32) -> u32 {
+    if frustum_id >= arrayLength(&frustum_table) || light_layer >= lights.n_directional_lights {
+        return 0u;
+    }
+    let num_cascades = lights.directional_lights[light_layer].num_cascades;
+    if num_cascades == 0u {
+        return 0u;
+    }
+    return min(frustum_table[frustum_id].cascade_index, num_cascades - 1u);
+}
+
 fn clip_from_world_for_frustum(frustum_id: u32) -> mat4x4<f32> {
     if frustum_id < arrayLength(&frustum_table) && frustum_table[frustum_id].kind == 1u {
         let light_layer = light_layer_from_frustum(frustum_id);
         if light_layer < lights.n_directional_lights {
-            return lights.directional_lights[light_layer].cascades[0].clip_from_world;
+            let cascade_index = cascade_index_for_frustum(frustum_id, light_layer);
+            return lights.directional_lights[light_layer].cascades[cascade_index].clip_from_world;
         }
     }
     return view.unjittered_clip_from_world;
@@ -588,7 +615,8 @@ fn broad_prepass(
                     let area = aabb_projected_screen_area(fi, geo.aabb, instance.world_from_local);
                     camera_keep_probability = max(camera_keep_probability, stochastic_camera_keep_probability(strand_count, area));
                 } else if visible_in_frustum && frustum.kind == 1u {
-                    shadow_keep_probability = max(shadow_keep_probability, stochastic_shadow_keep_probability());
+                    let area = aabb_projected_screen_area(fi, geo.aabb, instance.world_from_local);
+                    shadow_keep_probability = max(shadow_keep_probability, stochastic_shadow_keep_probability(strand_count, area, frustum));
                 }
             }
         }

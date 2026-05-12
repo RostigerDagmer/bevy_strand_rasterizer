@@ -276,7 +276,8 @@ impl Plugin for StrandRasterizerPlugin {
 
 fn use_prepass_buffers(
     geometry_query: Query<(Entity, &StrandGeometry, Option<&StrandInstanceTransform>)>,
-    light_frusta_query: Query<Entity, With<ExtractedDirectionalLight>>,
+    light_frusta_query: Query<(Entity, &ExtractedDirectionalLight)>,
+    view_query: Query<(Entity, &ExtractedView), Without<ExtractedDirectionalLight>>,
     storage_buffers: Res<RenderAssets<GpuVirtualShaderStorageBuffer>>,
     device: Res<RenderDevice>,
     render_queue: Res<bevy::render::renderer::RenderQueue>,
@@ -292,6 +293,7 @@ fn use_prepass_buffers(
     let mut max_segments_in_strand = 0u32;
     let mut max_shading_texels_in_instance = 0u32;
     let mut instances = Vec::new();
+    let mut strand_world_centers = Vec::new();
     let mut sorted_geometry: Vec<_> = geometry_query.iter().collect();
     sorted_geometry.sort_by_key(|(entity, _, _)| entity.index());
     for (_entity, geom, transform) in sorted_geometry {
@@ -319,6 +321,12 @@ fn use_prepass_buffers(
             world_from_local: transform.world_from_local,
             local_from_world: transform.local_from_world,
         });
+        let local_center = (geom.aabb.min + geom.aabb.max) * 0.5;
+        strand_world_centers.push(
+            transform
+                .world_from_local
+                .transform_point3(local_center.into()),
+        );
     }
 
     if total_strands == 0 {
@@ -351,7 +359,23 @@ fn use_prepass_buffers(
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
     let mut coarse_depth_tile_base = 0u32;
-    let light_entities: HashSet<Entity> = light_frusta_query.iter().collect();
+    let light_entities: HashSet<Entity> = light_frusta_query
+        .iter()
+        .map(|(entity, _)| entity)
+        .collect();
+    let main_view = view_query
+        .iter()
+        .find(|(entity, _)| {
+            raster_resources.frustrum_config.contains_key(entity)
+                && !light_entities.contains(entity)
+        })
+        .map(|(_, view)| view);
+    let mut shadow_cascade_by_entity: HashMap<Entity, u32> = HashMap::default();
+    for (entity, light) in light_frusta_query.iter() {
+        let cascade_index =
+            select_authoritative_shadow_cascade(main_view, &strand_world_centers, light);
+        shadow_cascade_by_entity.insert(entity, cascade_index);
+    }
     raster_resources.frustum_ids.clear();
     shadow_resources.light_layer_by_frustum.clear();
     let mut shadow_dom_surface_ids: Vec<[u32; 2]> = Vec::new();
@@ -367,6 +391,10 @@ fn use_prepass_buffers(
             .frustum_ids
             .insert(entity, frustum_id as u32);
         let is_light = light_entities.contains(&entity);
+        let cascade_index = shadow_cascade_by_entity
+            .get(&entity)
+            .copied()
+            .unwrap_or_default();
         if is_light {
             shadow_resources
                 .light_layer_by_frustum
@@ -401,6 +429,10 @@ fn use_prepass_buffers(
             coarse_depth_tile_count,
             coarse_tiles_x,
             coarse_tiles_y,
+            cascade_index,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         });
         bucket_base = bucket_base.saturating_add(bucket_count);
         coarse_depth_tile_base = coarse_depth_tile_base.saturating_add(coarse_depth_tile_count);
@@ -419,6 +451,10 @@ fn use_prepass_buffers(
             coarse_depth_tile_count: 1,
             coarse_tiles_x: 1,
             coarse_tiles_y: 1,
+            cascade_index: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         });
         bucket_base = 1;
         coarse_depth_tile_base = 1;
@@ -937,6 +973,35 @@ fn use_prepass_buffers(
     }
 }
 
+fn select_authoritative_shadow_cascade(
+    main_view: Option<&ExtractedView>,
+    strand_world_centers: &[Vec3],
+    light: &ExtractedDirectionalLight,
+) -> u32 {
+    let Some(view) = main_view else {
+        return 0;
+    };
+    if strand_world_centers.is_empty() || light.cascade_shadow_config.bounds.is_empty() {
+        return 0;
+    }
+
+    let view_from_world = view.world_from_view.to_matrix().inverse();
+    let max_depth = strand_world_centers
+        .iter()
+        .map(|center| -view_from_world.transform_point3(*center).z)
+        .filter(|depth| depth.is_finite() && *depth >= 0.0)
+        .fold(0.0_f32, f32::max);
+
+    light
+        .cascade_shadow_config
+        .bounds
+        .iter()
+        .position(|bound| max_depth < *bound)
+        .unwrap_or_else(|| light.cascade_shadow_config.bounds.len().saturating_sub(1))
+        .try_into()
+        .unwrap_or(0)
+}
+
 struct StrandTableIds {
     vertex_id: u32,
     index_id: u32,
@@ -1283,6 +1348,10 @@ struct GpuFrustumDesc {
     coarse_depth_tile_count: u32,
     coarse_tiles_x: u32,
     coarse_tiles_y: u32,
+    cascade_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 #[repr(C)]

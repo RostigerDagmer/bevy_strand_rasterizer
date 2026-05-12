@@ -78,6 +78,10 @@ struct FrustumDesc {
     coarse_depth_tile_count: u32,
     coarse_tiles_x: u32,
     coarse_tiles_y: u32,
+    cascade_index: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(#{BIND_ARRAYS}) @binding(#{VERTICES}) var<storage, read_write> vertices: binding_array<Vertices>;
@@ -180,6 +184,17 @@ fn light_frustum_from_layer(light_layer: u32) -> u32 {
     return INVALID_PTR;
 }
 
+fn cascade_index_for_frustum(frustum_id: u32, light_layer: u32) -> u32 {
+    if frustum_id >= arrayLength(&frustum_table) || light_layer >= lights.n_directional_lights {
+        return 0u;
+    }
+    let num_cascades = lights.directional_lights[light_layer].num_cascades;
+    if num_cascades == 0u {
+        return 0u;
+    }
+    return min(frustum_table[frustum_id].cascade_index, num_cascades - 1u);
+}
+
 fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
     let frustum_id = light_frustum_from_layer(light_layer);
     if frustum_id == INVALID_PTR || frustum_id >= arrayLength(&frustum_table) || frustum_id >= arrayLength(&shadow_dom_surface_ids) {
@@ -202,7 +217,8 @@ fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
 
     let desc = frustum_table[frustum_id];
     let viewport = vec4<f32>(0.0, 0.0, f32(desc.screen_width), f32(desc.screen_height));
-    let light_clip_from_world = lights.directional_lights[light_layer].cascades[0].clip_from_world;
+    let cascade_index = cascade_index_for_frustum(frustum_id, light_layer);
+    let light_clip_from_world = lights.directional_lights[light_layer].cascades[cascade_index].clip_from_world;
     let raw = world_to_screen_raw(vec4<f32>(p_world, 1.0), light_clip_from_world, viewport);
     if raw.x < 0.0 || raw.y < 0.0 || raw.x >= viewport.z || raw.y >= viewport.w || raw.z < 0.0 || raw.z > 1.0 {
         return 1.0;
