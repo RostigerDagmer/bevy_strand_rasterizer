@@ -6,7 +6,8 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            PipelineCache, PushConstantRange, ShaderStages, ShaderType, TextureView,
+            PipelineCache, PushConstantRange, ShaderStages, ShaderType, TextureSampleType,
+            TextureView, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
@@ -152,6 +153,16 @@ impl StrandShadowPipeline {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::D2Array,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -340,6 +351,7 @@ pub fn create_strand_shadow_bind_group(
     prepass_resources: &StrandPrepassResources,
     view_buffer: &BindingResource,
     light_buffer: &BindingResource,
+    directional_light_depth_texture_view: &TextureView,
     view_uniform_offset: &ViewUniformOffset,
     view_light_uniform_offset: &ViewLightsUniformOffset,
 ) -> Result<(BindGroup, Vec<u32>), ()> {
@@ -401,6 +413,10 @@ pub fn create_strand_shadow_bind_group(
                 BindGroupEntry {
                     binding: layouts::rasterizer::SHADOW_DOM_SURFACE_IDS,
                     resource: shadow_dom_surface_ids.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::rasterizer::DIRECTIONAL_LIGHT_DEPTH_TEXTURE,
+                    resource: BindingResource::TextureView(directional_light_depth_texture_view),
                 },
             ],
         ),

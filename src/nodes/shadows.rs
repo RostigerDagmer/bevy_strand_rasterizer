@@ -1,7 +1,7 @@
 use bevy::{
     ecs::world::World,
     log::*,
-    pbr::{LightMeta, ViewLightsUniformOffset},
+    pbr::{LightMeta, ViewLightsUniformOffset, ViewShadowBindings},
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::PipelineCache,
@@ -56,6 +56,9 @@ impl Node for StrandShadowRasterizerNode {
         else {
             return Ok(());
         };
+        let Some(view_shadow_bindings) = world.get::<ViewShadowBindings>(view_entity) else {
+            return Ok(());
+        };
         let Some(view_binding) = view_uniforms.uniforms.binding() else {
             return Ok(());
         };
@@ -69,6 +72,7 @@ impl Node for StrandShadowRasterizerNode {
             prepass_resources,
             &view_binding,
             &light_binding,
+            &view_shadow_bindings.directional_light_depth_texture_view,
             view_uniform_offset,
             view_light_uniform_offset,
         ) else {

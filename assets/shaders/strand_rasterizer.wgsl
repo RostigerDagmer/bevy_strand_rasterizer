@@ -110,6 +110,7 @@ struct FineSegRefBuffer {
 #endif
 #ifdef SHADOWS
 @group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
+@group(#{RASTER_GROUP}) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures: texture_depth_2d_array;
 #endif
 
 fn cascade_index_for_frustum(frustum_id: u32, light_layer: u32) -> u32 {
@@ -370,6 +371,52 @@ fn light_layer_from_frustum(frustum_id: u32) -> u32 {
     return layer;
 }
 
+fn sample_opaque_directional_shadow_depth(
+    px: vec2<u32>,
+    config: FroxelConfig,
+    light_layer: u32,
+    cascade_index: u32,
+) -> f32 {
+    let dims = textureDimensions(directional_shadow_textures);
+    if dims.x == 0u || dims.y == 0u || config.screen_width == 0u || config.screen_height == 0u {
+        return 0.0;
+    }
+    let uv = (vec2<f32>(px) + vec2<f32>(0.5, 0.5)) / vec2<f32>(
+        f32(config.screen_width),
+        f32(config.screen_height),
+    );
+    if any(uv < vec2<f32>(0.0, 0.0)) || any(uv >= vec2<f32>(1.0, 1.0)) {
+        return 0.0;
+    }
+    let layer_u = lights.directional_lights[light_layer].depth_texture_base_index + cascade_index;
+    if layer_u >= textureNumLayers(directional_shadow_textures) {
+        return 0.0;
+    }
+    let shadow_px = min(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(i32(dims.x) - 1, i32(dims.y) - 1));
+    let layer = i32(layer_u);
+    return textureLoad(directional_shadow_textures, shadow_px, layer, 0);
+}
+
+fn in_front_of_opaque_shadow_depth(strand_depth: f32, opaque_depth: f32) -> bool {
+    if opaque_depth <= 0.0 {
+        return true;
+    }
+    // Bevy directional shadow maps are reverse-Z in this path: larger depth is closer to the light.
+    return strand_depth > opaque_depth + 1e-4;
+}
+
+fn opaque_terminal_slice(z0: f32, opaque_depth: f32, slice_count: u32) -> u32 {
+    if opaque_depth <= 0.0 || z0 <= 0.0 {
+        return slice_count;
+    }
+    if opaque_depth >= z0 {
+        return 0u;
+    }
+    let dzp = clamp(max(0.0, z0 - opaque_depth) / max(z0, 1e-6), 0.0, 1.0);
+    let u = pow(dzp, DOM_GAMMA);
+    return min(u32(floor(u * f32(slice_count))), slice_count - 1u);
+}
+
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn rasterize_strands(
     @builtin(workgroup_id) wg: vec3u,
@@ -453,6 +500,7 @@ fn rasterize_strands(
     var opacity_physical_index = 0u;
     var depth_physical_index = 0u;
     var page_valid = false;
+    var opaque_shadow_depth = 0.0;
 
     if active_pixel {
         px_u = vec2<u32>(
@@ -496,6 +544,12 @@ fn rasterize_strands(
                 i32(px_u.y % depth_page_size.y),
             );
         }
+        opaque_shadow_depth = sample_opaque_directional_shadow_depth(
+            px_u,
+            active_config,
+            light_layer,
+            active_cascade_index,
+        );
     }
 
     if depth_worker == 0u && page_valid {
@@ -533,6 +587,9 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
+                    if !in_front_of_opaque_shadow_depth(p.z, opaque_shadow_depth) {
+                        continue;
+                    }
                     let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
@@ -548,7 +605,7 @@ fn rasterize_strands(
             }
         }
 
-        if !found_z0 {
+        if !found_z0 && opaque_shadow_depth <= 0.0 {
             textureStore(deep_opacity_maps_depth[i32(depth_physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
             for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
                 if i < opacity_page_size.z {
@@ -556,6 +613,9 @@ fn rasterize_strands(
                 }
             }
         } else {
+            if !found_z0 {
+                z0 = opaque_shadow_depth;
+            }
             shadow_z0[pixel_slot] = z0;
             shadow_pixel_ready[pixel_slot] = 1u;
         }
@@ -597,6 +657,9 @@ fn rasterize_strands(
                         continue;
                     }
                     let p = mix(p0, p1, t);
+                    if !in_front_of_opaque_shadow_depth(p.z, opaque_shadow_depth) {
+                        continue;
+                    }
                     let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
                     let r = strand_radius_pixels(mat, p.z);
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
@@ -628,6 +691,7 @@ fn rasterize_strands(
         textureStore(deep_opacity_maps_depth[i32(depth_physical_index)], depth_px, 0, vec4<f32>(shadow_z0[pixel_slot], 0.0, 0.0, 0.0));
 
         var acc = 0.0;
+        let terminal_slice = opaque_terminal_slice(shadow_z0[pixel_slot], opaque_shadow_depth, min(DOM_SLICES, opacity_page_size.z));
         for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
             var a = 0.0;
             for (var worker = 0u; worker < SHADOW_DEPTH_WORKERS; worker = worker + 1u) {
@@ -635,6 +699,9 @@ fn rasterize_strands(
                 a = a + (1.0 - a) * partial;
             }
             acc = acc + (1.0 - acc) * a;
+            if i >= terminal_slice {
+                acc = 1.0;
+            }
             if i < opacity_page_size.z {
                 textureStore(deep_opacity_maps[i32(opacity_physical_index)], vec3<i32>(opacity_px, i32(i)), vec4<f32>(acc, 0.0, 0.0, 0.0));
             }
@@ -751,7 +818,7 @@ fn sample_shadow_dom_visibility(p_world: vec3<f32>, light_layer: u32) -> f32 {
         vec3<i32>(opacity_px, i32(slice)),
         0,
     ).x;
-    return clamp(1.0 - opacity, 0.08, 1.0);
+    return clamp(1.0 - opacity, 0.0, 1.0);
 }
 
 fn sample_shadow_visibility(p_world: vec3<f32>) -> f32 {
