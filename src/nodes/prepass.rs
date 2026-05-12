@@ -1,4 +1,5 @@
 use bevy::{
+    core_pipeline::prepass::ViewPrepassTextures,
     ecs::world::World,
     log::*,
     pbr::{GlobalClusterableObjectMeta, LightMeta, ViewClusterBindings, ViewLightsUniformOffset},
@@ -14,8 +15,10 @@ use bevy_vsms::request::VirtualSurfaceRequestBitmapRuntime;
 
 use crate::{
     pipelines::prepass::{
-        StrandPrepassPipeline, StrandPrepassResources, create_prepass_bind_group, run_prepass,
+        StrandPrepassPipeline, StrandPrepassResources, create_depth_reduce_bind_group,
+        create_prepass_bind_group, run_depth_reduce, run_prepass,
     },
+    pipelines::raster::StrandRasterizerResources,
     resources::{ComputeInvocationDims, StochasticCullSettings},
 };
 
@@ -39,6 +42,7 @@ impl Node for WorkPreparationNode {
         let allocator = world.resource::<GpuPagingAllocator>();
         let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
         let prepass_resources = world.resource::<StrandPrepassResources>();
+        let raster_resources = world.resource::<StrandRasterizerResources>();
         let request_runtime = world.resource::<VirtualSurfaceRequestBitmapRuntime>();
         let invocation_dims = world.resource::<ComputeInvocationDims>();
         let cull_settings = world.resource::<StochasticCullSettings>();
@@ -100,6 +104,42 @@ impl Node for WorkPreparationNode {
             warn!("Failed to create prepass bind groups.");
             return Ok(());
         };
+        if let (Some(view_prepass_textures), Some(&frustum_id), Some(opaque_fine_depth_tiles)) = (
+            world.get::<ViewPrepassTextures>(view_entity),
+            raster_resources.frustum_ids.get(&view_entity),
+            prepass_resources.opaque_fine_depth_tiles.as_ref(),
+        ) {
+            if let Some(config) = raster_resources.frustrum_config.get(&view_entity) {
+                let fine_tiles_x = config.screen_width.div_ceil(config.froxel_size_x);
+                let fine_tiles_y = config.screen_height.div_ceil(config.froxel_size_y);
+                if let Ok(depth_reduce_bind_group) = create_depth_reduce_bind_group(
+                    render_device,
+                    prepass_pipeline,
+                    prepass_resources,
+                    view_prepass_textures,
+                ) {
+                    run_depth_reduce(
+                        render_context,
+                        pipeline_cache,
+                        prepass_pipeline,
+                        &depth_reduce_bind_group,
+                        opaque_fine_depth_tiles,
+                        frustum_id,
+                        fine_tiles_x.saturating_mul(fine_tiles_y),
+                    );
+                } else {
+                    render_context
+                        .command_encoder()
+                        .clear_buffer(opaque_fine_depth_tiles, 0, None);
+                }
+            }
+        } else if let Some(opaque_fine_depth_tiles) =
+            prepass_resources.opaque_fine_depth_tiles.as_ref()
+        {
+            render_context
+                .command_encoder()
+                .clear_buffer(opaque_fine_depth_tiles, 0, None);
+        }
         let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
             return Ok(());
         };

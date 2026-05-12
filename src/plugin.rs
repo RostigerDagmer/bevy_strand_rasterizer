@@ -359,6 +359,7 @@ fn use_prepass_buffers(
     let mut frustum_descs: Vec<GpuFrustumDesc> = Vec::new();
     let mut bucket_base = 0u32;
     let mut coarse_depth_tile_base = 0u32;
+    let mut fine_depth_tile_base = 0u32;
     let light_entities: HashSet<Entity> = light_frusta_query
         .iter()
         .map(|(entity, _)| entity)
@@ -413,6 +414,7 @@ fn use_prepass_buffers(
             .unwrap_or([u32::MAX, u32::MAX]);
         shadow_dom_surface_ids.push(dom_surface_ids);
         let (fine_tiles_x, fine_tiles_y, bucket_count) = cfg.get_num_tiles();
+        let fine_depth_tile_count = fine_tiles_x.saturating_mul(fine_tiles_y);
         let coarse_tiles_x = fine_tiles_x.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
         let coarse_tiles_y = fine_tiles_y.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
         let coarse_depth_tile_count = coarse_tiles_x.saturating_mul(coarse_tiles_y);
@@ -430,12 +432,13 @@ fn use_prepass_buffers(
             coarse_tiles_x,
             coarse_tiles_y,
             cascade_index,
-            _pad0: 0,
+            fine_depth_tile_base,
             _pad1: 0,
             _pad2: 0,
         });
         bucket_base = bucket_base.saturating_add(bucket_count);
         coarse_depth_tile_base = coarse_depth_tile_base.saturating_add(coarse_depth_tile_count);
+        fine_depth_tile_base = fine_depth_tile_base.saturating_add(fine_depth_tile_count);
     }
     if frustum_descs.is_empty() {
         frustum_descs.push(GpuFrustumDesc {
@@ -452,12 +455,13 @@ fn use_prepass_buffers(
             coarse_tiles_x: 1,
             coarse_tiles_y: 1,
             cascade_index: 0,
-            _pad0: 0,
+            fine_depth_tile_base: 0,
             _pad1: 0,
             _pad2: 0,
         });
         bucket_base = 1;
         coarse_depth_tile_base = 1;
+        fine_depth_tile_base = 1;
     }
     let frustum_task_multiplier = (frustum_descs.len() as u32).max(1);
     let requested_binning_capacity = base_binning_capacity
@@ -544,6 +548,7 @@ fn use_prepass_buffers(
         std::mem::size_of::<RasterTileRun>() as u64,
         max_storage_binding_bytes,
     );
+    let opaque_fine_depth_tile_capacity = fine_depth_tile_base.next_power_of_two().max(1);
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
@@ -571,6 +576,7 @@ fn use_prepass_buffers(
         || prepass_resources.fine_seg_refs.is_none()
         || prepass_resources.shadow_dom_surface_ids.is_none()
         || prepass_resources.broad_instance_meta.is_none()
+        || prepass_resources.opaque_fine_depth_tiles.is_none()
         || prepass_resources.strand_instances.is_none()
         || prepass_resources.prepass_task_capacity < prepass_capacity
         || prepass_resources.binning_task_capacity < binning_capacity
@@ -583,7 +589,8 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_range_capacity < coarse_range_capacity
         || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
         || prepass_resources.coarse_count_page_capacity < coarse_count_page_capacity
-        || prepass_resources.fine_seg_ref_capacity < fine_seg_ref_capacity;
+        || prepass_resources.fine_seg_ref_capacity < fine_seg_ref_capacity
+        || prepass_resources.opaque_fine_depth_tile_capacity < opaque_fine_depth_tile_capacity;
 
     if needs_realloc {
         log_storage_capacity_cap(
@@ -695,6 +702,8 @@ fn use_prepass_buffers(
             (fine_cell_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let fine_seg_refs_bytes = std::mem::size_of::<u32>() as u64
             + (fine_seg_ref_capacity as u64) * std::mem::size_of::<FineSegRef>() as u64;
+        let opaque_fine_depth_tiles_bytes =
+            (opaque_fine_depth_tile_capacity as u64) * (2 * std::mem::size_of::<u32>() as u64);
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -859,6 +868,12 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.opaque_fine_depth_tiles = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_opaque_fine_depth_tiles"),
+            size: opaque_fine_depth_tiles_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
         prepass_resources.prepass_task_capacity = prepass_capacity;
         prepass_resources.binning_task_capacity = binning_capacity;
@@ -875,6 +890,7 @@ fn use_prepass_buffers(
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
         prepass_resources.coarse_count_page_capacity = coarse_count_page_capacity;
         prepass_resources.fine_seg_ref_capacity = fine_seg_ref_capacity;
+        prepass_resources.opaque_fine_depth_tile_capacity = opaque_fine_depth_tile_capacity;
 
         info!(
             "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={} raster_tile_run_cap={}",
@@ -1349,7 +1365,7 @@ struct GpuFrustumDesc {
     coarse_tiles_x: u32,
     coarse_tiles_y: u32,
     cascade_index: u32,
-    _pad0: u32,
+    fine_depth_tile_base: u32,
     _pad1: u32,
     _pad2: u32,
 }

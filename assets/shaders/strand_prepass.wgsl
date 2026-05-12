@@ -88,7 +88,7 @@ struct FrustumDesc {
     coarse_tiles_x: u32,
     coarse_tiles_y: u32,
     cascade_index: u32,
-    pad0: u32,
+    fine_depth_tile_base: u32,
     pad1: u32,
     pad2: u32,
 }
@@ -215,6 +215,7 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{VSMS_REQUEST_BITS}) var<storage, read_write> vsms_request_bits: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{BROAD_INSTANCE_META}) var<storage, read_write> broad_instance_meta: array<BroadInstanceMeta>;
+@group(#{PREPASS_GROUP}) @binding(#{OPAQUE_FINE_DEPTH_TILES}) var<storage, read> opaque_fine_depth_tiles: array<vec2<u32>>;
 
 fn aabb_projected_screen_area(frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
     if frustum_id >= arrayLength(&frustum_table) {
@@ -460,6 +461,27 @@ fn quantize_depth01(z: f32) -> u32 {
 
 fn dequantize_depth01(z_q: u32) -> f32 {
     return f32(z_q) / f32(DEPTH_QUANT_MAX);
+}
+
+fn fine_tile_occluded_by_opaque(frustum: FrustumDesc, fine_x: u32, fine_y: u32, nearest_depth: f32) -> bool {
+    if frustum.kind != 0u {
+        return false;
+    }
+    let fine_tiles_x = ceil_div_u32(frustum.screen_width, frustum.froxel_size_x);
+    let fine_tiles_y = ceil_div_u32(frustum.screen_height, frustum.froxel_size_y);
+    if fine_x >= fine_tiles_x || fine_y >= fine_tiles_y {
+        return false;
+    }
+    let tile_idx = frustum.fine_depth_tile_base + fine_y * fine_tiles_x + fine_x;
+    if tile_idx >= arrayLength(&opaque_fine_depth_tiles) {
+        return false;
+    }
+    let opaque = opaque_fine_depth_tiles[tile_idx];
+    if opaque.x == 0u {
+        return false;
+    }
+    let farthest_opaque_depth = dequantize_depth01(opaque.y);
+    return nearest_depth <= farthest_opaque_depth - 1e-4;
 }
 
 fn emit_coarse_asset_range_for_aabb(inst_id: u32, frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> bool {
@@ -1342,6 +1364,23 @@ fn trace_segment_into_coarse_count_page(
         loop {
             if safety > COARSE_FINE_TILE_EXTENT + COARSE_FINE_TILE_EXTENT + COARSE_DEPTH_SLICES + 3u {
                 break;
+            }
+            let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + u32(f.x);
+            let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + u32(f.y);
+            if fine_tile_occluded_by_opaque(frustum, fine_x, fine_y, z_max) {
+                if all(f == f1) {
+                    break;
+                }
+                let a_min = canonical_min_mask(t_max);
+                let fd = select(vec3<i32>(0), step, a_min);
+                let dist = select(vec3<f32>(0), delta_dist, a_min);
+                f += fd;
+                t_max += dist;
+                if any(f < vec3<i32>(0)) || f.x >= i32(COARSE_FINE_TILE_EXTENT) || f.y >= i32(COARSE_FINE_TILE_EXTENT) || f.z >= i32(COARSE_DEPTH_SLICES) {
+                    break;
+                }
+                safety = safety + 1u;
+                continue;
             }
             if fill_refs {
                 write_fine_seg_ref(page_idx, u32(f.x), u32(f.y), u32(f.z), task);

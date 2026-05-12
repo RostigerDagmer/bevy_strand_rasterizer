@@ -7,6 +7,7 @@ use crate::{
     shader_types::{PushConstants, StrandGeo, StrandInstance, StrandMeta},
 };
 use bevy::{
+    core_pipeline::prepass::ViewPrepassTextures,
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
@@ -14,7 +15,8 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, IntoBinding,
-            PipelineCache, PushConstantRange, ShaderStages,
+            PipelineCache, PushConstantRange, ShaderStages, TextureSampleType,
+            TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -56,6 +58,7 @@ pub struct StrandPrepassResources {
     pub fine_seg_refs: Option<Buffer>,
     pub shadow_dom_surface_ids: Option<Buffer>,
     pub broad_instance_meta: Option<Buffer>,
+    pub opaque_fine_depth_tiles: Option<Buffer>,
     // capacities
     pub prepass_task_capacity: u32,
     pub binning_task_capacity: u32,
@@ -72,6 +75,7 @@ pub struct StrandPrepassResources {
     pub coarse_interval_ref_capacity: u32,
     pub coarse_count_page_capacity: u32,
     pub fine_seg_ref_capacity: u32,
+    pub opaque_fine_depth_tile_capacity: u32,
 }
 
 #[derive(Resource)]
@@ -91,6 +95,8 @@ pub struct StrandPrepassPipeline {
     pub fill_fine_seg_refs_pipeline: Option<CachedComputePipelineId>,
     pub emit_raster_work_pipeline: Option<CachedComputePipelineId>,
     pub finalize_raster_dispatch_pipeline: Option<CachedComputePipelineId>,
+    pub depth_reduce_bind_group_layout: BindGroupLayout,
+    pub depth_reduce_pipeline: Option<CachedComputePipelineId>,
 }
 
 impl StrandPrepassPipeline {
@@ -158,12 +164,38 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::VSMS_REQUEST_BITS, false),
                 Self::storage_entry(layouts::prepass::SHADOW_DOM_SURFACE_IDS, true),
                 Self::storage_entry(layouts::prepass::BROAD_INSTANCE_META, false),
+                Self::storage_entry(layouts::prepass::OPAQUE_FINE_DEPTH_TILES, true),
             ],
         )
     }
 
     pub fn create_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
         let descriptor = Self::bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
+
+    pub fn depth_reduce_bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
+            "strand_depth_reduce_bind_group_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Depth,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+                Self::storage_entry(1, true),
+                Self::storage_entry(2, false),
+            ],
+        )
+    }
+
+    pub fn create_depth_reduce_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::depth_reduce_bind_group_layout_descriptor();
         device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
     }
 }
@@ -277,6 +309,7 @@ impl FromWorld for StrandPrepassPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        let depth_reduce_bind_group_layout = Self::create_depth_reduce_bind_group_layout(device);
 
         let _invocation_dims = *world.resource::<ComputeInvocationDims>();
 
@@ -296,6 +329,8 @@ impl FromWorld for StrandPrepassPipeline {
             fill_fine_seg_refs_pipeline: None,
             emit_raster_work_pipeline: None,
             finalize_raster_dispatch_pipeline: None,
+            depth_reduce_bind_group_layout,
+            depth_reduce_pipeline: None,
         }
     }
 }
@@ -486,11 +521,82 @@ pub fn create_prepass_bind_group(
                     binding: layouts::prepass::BROAD_INSTANCE_META,
                     resource: broad_instance_meta.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::OPAQUE_FINE_DEPTH_TILES,
+                    resource: resources
+                        .opaque_fine_depth_tiles
+                        .as_ref()
+                        .ok_or(())?
+                        .as_entire_binding(),
+                },
             ],
         ),
         // Dynamic offsets order follows bind-group layout declaration order.
         vec![view_light_uniform_offset.offset, view_offsets.offset],
     ))
+}
+
+pub fn create_depth_reduce_bind_group(
+    device: &RenderDevice,
+    pipeline: &StrandPrepassPipeline,
+    resources: &StrandPrepassResources,
+    view_prepass_textures: &ViewPrepassTextures,
+) -> Result<BindGroup, ()> {
+    let depth_view = view_prepass_textures.depth_view().ok_or(())?;
+    let frustum_table = resources.frustum_table.as_ref().ok_or(())?;
+    let opaque_fine_depth_tiles = resources.opaque_fine_depth_tiles.as_ref().ok_or(())?;
+    Ok(device.create_bind_group(
+        Some("strand_depth_reduce_bind_group"),
+        &pipeline.depth_reduce_bind_group_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(depth_view),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: frustum_table.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: opaque_fine_depth_tiles.as_entire_binding(),
+            },
+        ],
+    ))
+}
+
+pub fn run_depth_reduce(
+    render_context: &mut RenderContext,
+    pipeline_cache: &PipelineCache,
+    pipeline: &StrandPrepassPipeline,
+    bind_group: &BindGroup,
+    opaque_fine_depth_tiles: &Buffer,
+    frustum_id: u32,
+    fine_tile_count: u32,
+) {
+    let encoder = render_context.command_encoder();
+    encoder.clear_buffer(opaque_fine_depth_tiles, 0, None);
+    let Some(pipeline_id) = pipeline.depth_reduce_pipeline else {
+        warn!("Depth reduce pipeline id not ready yet");
+        return;
+    };
+    let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
+        warn!("Depth reduce pipeline not found");
+        return;
+    };
+    let pushconstants = PushConstants {
+        num_elements: fine_tile_count,
+        scan_load_base: frustum_id,
+        ..Default::default()
+    };
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("Strand Depth Reduce"),
+        ..default()
+    });
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.dispatch_workgroups(fine_tile_count.max(1).div_ceil(64), 1, 1);
 }
 
 pub fn run_prepass(
@@ -822,6 +928,7 @@ pub fn update_strand_prepass_pipeline(
     let fill_fine_seg_refs_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let emit_raster_work_shader = shader_loader.load("shaders/strand_prepass.wgsl");
     let finalize_raster_dispatch_shader = shader_loader.load("shaders/strand_prepass.wgsl");
+    let depth_reduce_shader = shader_loader.load("shaders/opaque_depth_reduce.wgsl");
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
@@ -965,6 +1072,19 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let depth_reduce_pipeline_id =
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("strand_depth_reduce_pipeline".into()),
+            layout: vec![StrandPrepassPipeline::depth_reduce_bind_group_layout_descriptor()],
+            shader: depth_reduce_shader,
+            shader_defs: vec![ShaderDefVal::UInt("WORKGROUP_SIZE".into(), 64)],
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..std::mem::size_of::<PushConstants>() as u32,
+            }],
+            entry_point: Some("reduce_opaque_depth".into()),
+            zero_initialize_workgroup_memory: false,
+        });
     pipeline_res.broad_pipeline = Some(broad_pipeline_id);
     pipeline_res.broad_strand_pipeline = Some(broad_strand_pipeline_id);
     pipeline_res.finalize_pipeline = Some(finalize_pipeline_id);
@@ -980,6 +1100,7 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.fill_fine_seg_refs_pipeline = Some(fill_fine_seg_refs_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
     pipeline_res.finalize_raster_dispatch_pipeline = Some(finalize_raster_dispatch_pipeline_id);
+    pipeline_res.depth_reduce_pipeline = Some(depth_reduce_pipeline_id);
     debug!(
         "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?} finalize_raster_dispatch={:?}",
         broad_pipeline_id,
