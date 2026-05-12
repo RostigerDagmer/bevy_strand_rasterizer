@@ -1438,27 +1438,43 @@ fn flag_realloc_on_tie_change(mut commands: Commands, q: Query<Entity, Changed<T
 }
 
 fn tie_view_to_froxel_config(
-    cams: Query<
-        (Entity, &TieFroxelsToView, &ExtractedView, &mut FroxelConfig),
-        Changed<ExtractedView>,
-    >,
+    mut commands: Commands,
+    mut cams: Query<(Entity, &TieFroxelsToView, &Camera, &mut FroxelConfig)>,
 ) {
-    for (entity, tie_mode, extracted_view, mut config) in cams {
-        info!("Viewport change: {:?}", extracted_view.viewport);
-        let viewport_x = extracted_view.viewport.z;
-        let viewport_y = extracted_view.viewport.w;
-        match tie_mode {
-            TieFroxelsToView::Fixed(v) => {}
-            TieFroxelsToView::Native => {
-                config.screen_width = viewport_x;
-                config.screen_height = viewport_y;
-            }
-            TieFroxelsToView::Scaled(s) => {
-                let w = ((viewport_x as f32) * s) as u32;
-                let h = ((viewport_y as f32) * s) as u32;
-                config.screen_width = w;
-                config.screen_height = h;
-            }
+    for (entity, tie_mode, camera, mut config) in &mut cams {
+        let Some(viewport) = camera.physical_viewport_size() else {
+            continue;
+        };
+        let desired_size = froxel_size_from_viewport(viewport, *tie_mode);
+        if config.screen_width == desired_size.x && config.screen_height == desired_size.y {
+            continue;
+        }
+        config.screen_width = desired_size.x;
+        config.screen_height = desired_size.y;
+        commands.entity(entity).insert(NeedsRealloc);
+    }
+}
+
+fn froxel_size_from_viewport(viewport: UVec2, tie_mode: TieFroxelsToView) -> UVec2 {
+    match tie_mode {
+        TieFroxelsToView::Native => viewport,
+        TieFroxelsToView::Scaled {
+            numerator,
+            denominator,
+        } => {
+            let denominator = denominator.max(1);
+            UVec2::new(
+                viewport
+                    .x
+                    .saturating_mul(numerator)
+                    .div_ceil(denominator)
+                    .max(1),
+                viewport
+                    .y
+                    .saturating_mul(numerator)
+                    .div_ceil(denominator)
+                    .max(1),
+            )
         }
     }
 }

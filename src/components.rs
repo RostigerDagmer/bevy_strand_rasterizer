@@ -132,14 +132,15 @@ pub struct FroxelCapacity {
     pub packed_capacity_bytes: u64,
 }
 
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TieFroxelsToView {
     /// Raster at exactly the view resolution (AA handled analytically).
     Native,
-    /// Raster at view * scale (e.g. 0.7) then upscale/resolve.
-    Scaled(f32),
-    /// Raster at a fixed internal size (e.g. for stable perf).
-    Fixed(UVec2),
+    /// Raster at a rational multiple of the view resolution.
+    ///
+    /// This keeps depth-prepass reductions exactly mappable to froxel bins. For example,
+    /// `Scaled { numerator: 1, denominator: 2 }` means half resolution.
+    Scaled { numerator: u32, denominator: u32 },
 }
 
 #[derive(Component, Clone, Copy)]
