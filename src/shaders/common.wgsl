@@ -1,5 +1,5 @@
 #import bevy_render::view::View
-#import "shaders/types.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{
     Aabb,
     FroxelConfig,
     SegmentRef,

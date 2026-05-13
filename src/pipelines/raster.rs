@@ -343,7 +343,9 @@ pub fn update_strand_raster_pipeline(
     layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
     layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
 
-    let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
+    let rasterize_shader = shader_loader.load(crate::plugin::embedded_shader_path(
+        "strand_rasterizer.wgsl",
+    ));
     let rasterize_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("strand_rasterize_pipeline".into()),
         layout,

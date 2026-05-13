@@ -397,8 +397,12 @@ pub fn update_strand_shadow_pipeline(
     layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
     layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout.clone();
 
-    let rasterize_shader = shader_loader.load("shaders/strand_rasterizer.wgsl");
-    let stamp_shader = shader_loader.load("shaders/shadow_dom_stampback.wgsl");
+    let rasterize_shader = shader_loader.load(crate::plugin::embedded_shader_path(
+        "strand_rasterizer.wgsl",
+    ));
+    let stamp_shader = shader_loader.load(crate::plugin::embedded_shader_path(
+        "shadow_dom_stampback.wgsl",
+    ));
     let stamp_shader_defs = [
         layouts::shadow_stampback::shader_defs(),
         vec![ShaderDefVal::UInt(

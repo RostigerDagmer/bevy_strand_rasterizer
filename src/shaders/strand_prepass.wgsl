@@ -1,7 +1,7 @@
 #import bevy_render::view::View
 #import bevy_pbr::mesh_view_types as types
 
-#import "shaders/common.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/common.wgsl"::{
     is_valid_ptr,
     world_to_screen_raw,
     canonical_min_mask,
@@ -11,7 +11,7 @@
     normalize_depth01,
 }
 
-#import "shaders/types.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{
     Aabb,
     DevicePtr,
     Vertices,
@@ -24,7 +24,7 @@
     PushConstants,
 }
 
-#import "shaders/task_contract.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
     RasterWorkItem,
@@ -40,7 +40,7 @@
     vsms_request_local_tile_index,
 }
 
-#import "shaders/queues.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/queues.wgsl"::{
     FinePrepassQueue,
     BinningQueue,
 }

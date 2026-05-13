@@ -14,6 +14,7 @@ use bevy::{
         renderer::{RenderDevice, RenderQueue},
         view::ExtractedView,
     },
+    shader::load_shader_library,
     transform::TransformSystems,
     window::WindowResized,
 };
@@ -31,7 +32,7 @@ use wgpu::{BufferDescriptor, BufferUsages};
 use crate::{
     allocator::*,
     components::*,
-    dson::DsonAsset,
+    dson::{DsonAsset, DsonAssetLoader},
     nodes,
     pipelines::{
         composite::*,
@@ -48,7 +49,7 @@ use crate::{
     },
     resources::*,
     shader_types::*,
-    strand_cache::{StrandCacheAsset, StrandCacheStrand},
+    strand_cache::{StrandCacheAsset, StrandCacheAssetLoader, StrandCacheStrand},
 };
 
 pub const MAX_TEXTURE_EXTENT: u32 = 8192; // for shading (TODO: get this from device limits)
@@ -65,6 +66,33 @@ const DOM_MAX_RESIDENT_PAGES: u32 = 256;
 pub const DOM_PAGE_XY: u32 = 256;
 pub const DOM_PREFETCH_PAGE_BORDER: u32 = 1;
 pub(crate) const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
+pub(crate) const SHADER_PREFIX: &str = "embedded://strand_software_rasterizer/shaders/";
+
+pub(crate) fn embedded_shader_path(shader: &str) -> String {
+    format!("{SHADER_PREFIX}{shader}")
+}
+
+fn load_strand_shader_libraries(app: &mut App) {
+    load_shader_library!(app, "shaders/allocator_debug_noop.wgsl");
+    load_shader_library!(app, "shaders/common.wgsl");
+    load_shader_library!(app, "shaders/opaque_depth_reduce.wgsl");
+    load_shader_library!(app, "shaders/pool.wgsl");
+    load_shader_library!(app, "shaders/prefix_sum.wgsl");
+    load_shader_library!(app, "shaders/queues.wgsl");
+    load_shader_library!(app, "shaders/shading_LUTs.wgsl");
+    load_shader_library!(app, "shaders/shadow_dom_stampback.wgsl");
+    load_shader_library!(app, "shaders/spline.wgsl");
+    load_shader_library!(app, "shaders/strand_binning.wgsl");
+    load_shader_library!(app, "shaders/strand_binning_queue.wgsl");
+    load_shader_library!(app, "shaders/strand_composite.wgsl");
+    load_shader_library!(app, "shaders/strand_prepass.wgsl");
+    load_shader_library!(app, "shaders/strand_rasterizer.wgsl");
+    load_shader_library!(app, "shaders/strand_rasterizer_.wgsl");
+    load_shader_library!(app, "shaders/strand_shading.wgsl");
+    load_shader_library!(app, "shaders/strand_tile_debug.wgsl");
+    load_shader_library!(app, "shaders/task_contract.wgsl");
+    load_shader_library!(app, "shaders/types.wgsl");
+}
 
 fn cap_storage_capacity(
     requested: u32,
@@ -133,6 +161,7 @@ pub struct StrandRasterizerPlugin;
 
 impl Plugin for StrandRasterizerPlugin {
     fn build(&self, app: &mut App) {
+        load_strand_shader_libraries(app);
         app.add_plugins((
             ExtractComponentPlugin::<FroxelConfig>::default(),
             ExtractComponentPlugin::<StrandGeometry>::default(),
@@ -145,6 +174,10 @@ impl Plugin for StrandRasterizerPlugin {
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
         app.init_resource::<StrandAssetResources>();
+        app.init_asset::<DsonAsset>();
+        app.init_asset_loader::<DsonAssetLoader>();
+        app.init_asset::<StrandCacheAsset>();
+        app.init_asset_loader::<StrandCacheAssetLoader>();
         app.add_systems(
             Update,
             (

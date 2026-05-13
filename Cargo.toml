@@ -14,10 +14,6 @@ serde = "1.0.219"
 fluent-uri = { version = "0.3.2", features = ["serde"] }
 serde_json = "1.0.140"
 anyhow = "1.0.97"
-# bevy_radix_sort = "0.15.0"
-bevy_panorbit_camera = "0.34.0"
-# bevy-inspector-egui = { git = "https://github.com/jakobhellermann/bevy-inspector-egui.git", rev = "8d7580b304c7202054e5d821f6269e1e32b58712" }
-bevy_egui = "0.39.1"
 lazy_static = "1.5.0"
 nonmax = "0.5.5"
 offset-allocator = "0.2"
@@ -25,5 +21,9 @@ phf = {version="0.13.1", features=["macros"]}
 range-alloc = "0.1.4"
 wgpu = "27.0.1"
 bevy_gpu_paging_allocator={ path="../bevy_gpu_paging_allocator" }
-bevy_vsms = { path = "crates/bevy_vsms" }
-default_material = { path = "../default_material" }
+bevy_vsms = { path = "../bevy_vsms" }
+
+[dev-dependencies]
+bevy_egui = "0.39.1"
+bevy_panorbit_camera = "0.34.0"
+default_material = { path = "../../../default_material" }

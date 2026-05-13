@@ -6,8 +6,6 @@ use bevy::{
     reflect::TypePath,
 };
 
-use model::DsonFile;
-
 /// Asset type for DSON files
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct DsonAsset {

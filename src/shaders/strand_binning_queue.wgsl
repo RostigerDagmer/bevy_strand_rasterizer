@@ -1,8 +1,8 @@
 #import bevy_render::view::View
 #import bevy_render::mesh::mesh_bindings::Instance // If needed for transforms
 #import bevy_pbr::mesh_view_types as types
-#import "shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float, canonical_min, canonical_min_mask}
-#import "shaders/spline.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/common.wgsl"::{ find_clip_bounds, world_to_screen, world_to_screen_aabbnorm, screen_to_world, calculate_froxel_index, wang_hash, hash_to_unit_float, canonical_min, canonical_min_mask}
+#import "embedded://strand_software_rasterizer/shaders/spline.wgsl"::{
     solve_cubic_3d,
     catmull_rom_t,
     catmull_rom_T_a,
@@ -17,7 +17,7 @@
 
 // --- Structures ---
 
-#import "shaders/types.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{
     Aabb,
     FroxelConfig,
     SegmentRef,
@@ -26,7 +26,7 @@
     PushConstants,
 }
 
-#import "shaders/prefix_sum.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/prefix_sum.wgsl"::{
     get_scan_workgroup_index,
     workgroup_inclusive_scan_blelloch,
     workgroup_exclusive_scan,
@@ -37,7 +37,7 @@
     wg_scan_storage
 }
 
-#import "shaders/task_contract.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     BINNING_NUM_LEVELS,
     BinningTask,
     RasterWorkItem,

@@ -272,7 +272,7 @@ pub fn update_strand_shading_pipeline(
     layout[layouts::shading::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
     layout[layouts::shading::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout;
 
-    let shader = shader_loader.load("shaders/strand_shading.wgsl");
+    let shader = shader_loader.load(crate::plugin::embedded_shader_path("strand_shading.wgsl"));
     pipeline.shading_pipeline = Some(pipeline_cache.queue_compute_pipeline(
         ComputePipelineDescriptor {
             label: Some("strand_shading_pipeline".into()),

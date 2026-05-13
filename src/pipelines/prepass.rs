@@ -918,21 +918,24 @@ pub fn update_strand_prepass_pipeline(
 
     *last_state = Some(current_state);
 
-    let broad_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let broad_strand_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let finalize_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let fine_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let coarse_interval_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let build_depth_warp_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let finalize_binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let mark_coarse_count_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let allocate_coarse_count_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let binning_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let prefix_fine_pages_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let fill_fine_seg_refs_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let emit_raster_work_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let finalize_raster_dispatch_shader = shader_loader.load("shaders/strand_prepass.wgsl");
-    let depth_reduce_shader = shader_loader.load("shaders/opaque_depth_reduce.wgsl");
+    let prepass_shader_path = crate::plugin::embedded_shader_path("strand_prepass.wgsl");
+    let broad_shader = shader_loader.load(prepass_shader_path.clone());
+    let broad_strand_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_shader = shader_loader.load(prepass_shader_path.clone());
+    let fine_shader = shader_loader.load(prepass_shader_path.clone());
+    let coarse_interval_shader = shader_loader.load(prepass_shader_path.clone());
+    let build_depth_warp_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_binning_shader = shader_loader.load(prepass_shader_path.clone());
+    let mark_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
+    let allocate_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
+    let binning_shader = shader_loader.load(prepass_shader_path.clone());
+    let prefix_fine_pages_shader = shader_loader.load(prepass_shader_path.clone());
+    let fill_fine_seg_refs_shader = shader_loader.load(prepass_shader_path.clone());
+    let emit_raster_work_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_raster_dispatch_shader = shader_loader.load(prepass_shader_path);
+    let depth_reduce_shader = shader_loader.load(crate::plugin::embedded_shader_path(
+        "opaque_depth_reduce.wgsl",
+    ));
 
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,

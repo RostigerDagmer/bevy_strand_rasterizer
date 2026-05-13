@@ -1,4 +1,4 @@
-#import "shaders/types.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{
     PushConstants,
 }
 

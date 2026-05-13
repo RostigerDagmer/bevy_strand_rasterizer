@@ -4,7 +4,7 @@
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
 }
 #import bevy_pbr::mesh_view_types as types
-#import "shaders/shading_LUTs.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/shading_LUTs.wgsl"::{
     LEG_ROOTS_5,
     LEG_WEIGHTS_5,
     LEG_ROOTS_10,
@@ -12,7 +12,7 @@
     LEG_ROOTS_15,
     LEG_WEIGHTS_15,
 }
-#import "shaders/types.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{
     DevicePtr,
     FroxelConfig,
     StrandMeta,
@@ -30,16 +30,16 @@
     vsms_virtual_page_table_address,
 }
 
-#import "shaders/task_contract.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     BinningTask,
     unpack_binning_frustum,
 }
 
-#import "shaders/queues.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/queues.wgsl"::{
     BinningQueue,
 }
 
-#import "shaders/common.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/common.wgsl"::{
     DOM_GAMMA,
     // PI,
     // PI_HALF,

@@ -1,5 +1,5 @@
 
-#import "shaders/task_contract.wgsl"::{
+#import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
 }

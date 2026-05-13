@@ -1,4 +1,4 @@
-#import "shaders/types.wgsl"::{ PushConstants }
+#import "embedded://strand_software_rasterizer/shaders/types.wgsl"::{ PushConstants }
 
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
 const DEPTH_QUANT_MAX: u32 = 16777215u;

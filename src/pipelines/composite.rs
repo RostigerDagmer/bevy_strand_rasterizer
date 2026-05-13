@@ -108,7 +108,7 @@ impl FromWorld for CompositionPipeline {
 
         let shader = world
             .resource::<AssetServer>()
-            .load("shaders/strand_composite.wgsl");
+            .load(crate::plugin::embedded_shader_path("strand_composite.wgsl"));
 
         let pipeline_cache = world.resource::<PipelineCache>();
 

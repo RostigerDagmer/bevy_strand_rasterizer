@@ -128,7 +128,9 @@ impl FromWorld for TileDebugPipeline {
 
         let shader = world
             .resource::<AssetServer>()
-            .load("shaders/strand_tile_debug.wgsl");
+            .load(crate::plugin::embedded_shader_path(
+                "strand_tile_debug.wgsl",
+            ));
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
