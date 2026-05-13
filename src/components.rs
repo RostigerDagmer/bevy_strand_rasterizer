@@ -5,13 +5,12 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::{
-    allocator::VirtualShaderStorageBuffer, dson::DsonAsset, strand_cache::StrandCacheAsset,
-};
+use crate::{allocator::VirtualShaderStorageBuffer, strand_cache::StrandCacheAsset};
 
 #[derive(Component, Reflect)]
-pub struct StrandAsset {
-    pub handle: Handle<DsonAsset>,
+pub struct StrandList {
+    pub vertices: Vec<Vec3>,
+    pub strands: Vec<Vec<u32>>,
 }
 
 #[derive(Component, Reflect)]

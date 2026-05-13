@@ -22,15 +22,15 @@ pub fn add_example_plugins(app: &mut App) -> &mut App {
             ..Default::default()
         }),
         ..Default::default()
-    }))
-    .insert_resource(DirectionalLightShadowMap { size: 4096 })
-    .add_plugins(DefaultMaterialPlugin)
-    .add_plugins(BevyVsmsPlugin)
-    .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
-    .add_plugins(EguiPlugin::default())
-    .add_plugins(StrandRasterizerPlugin)
-    .add_plugins(PanOrbitCameraPlugin)
-    .add_systems(EguiPrimaryContextPass, strand_material_ui_system)
+    }));
+    app.insert_resource(DirectionalLightShadowMap { size: 4096 })
+        .add_plugins(DefaultMaterialPlugin)
+        .add_plugins(BevyVsmsPlugin)
+        .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.1)))
+        .add_plugins(EguiPlugin::default())
+        .add_plugins(StrandRasterizerPlugin)
+        .add_plugins(PanOrbitCameraPlugin)
+        .add_systems(EguiPrimaryContextPass, strand_material_ui_system)
 }
 
 pub fn spawn_camera(commands: &mut Commands, transform: Transform, focus: Vec3) {

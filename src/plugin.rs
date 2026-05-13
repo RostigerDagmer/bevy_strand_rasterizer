@@ -32,7 +32,6 @@ use wgpu::{BufferDescriptor, BufferUsages};
 use crate::{
     allocator::*,
     components::*,
-    dson::{DsonAsset, DsonAssetLoader},
     nodes,
     pipelines::{
         composite::*,
@@ -174,14 +173,12 @@ impl Plugin for StrandRasterizerPlugin {
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
         app.init_resource::<StrandAssetResources>();
-        app.init_asset::<DsonAsset>();
-        app.init_asset_loader::<DsonAssetLoader>();
         app.init_asset::<StrandCacheAsset>();
         app.init_asset_loader::<StrandCacheAssetLoader>();
         app.add_systems(
             Update,
             (
-                set_dson_strand_geometry,
+                set_strand_list_geometry,
                 set_cached_strand_geometry,
                 flag_realloc_on_view_change,
                 flag_realloc_on_config_change,
@@ -1282,45 +1279,16 @@ fn insert_packed_strand_geometry(
 }
 
 // main world buffer initialization
-fn set_dson_strand_geometry(
-    query: Query<(Entity, &StrandAsset, &StrandMaterial), Without<StrandGeometry>>,
-    assets: Res<Assets<DsonAsset>>,
+fn set_strand_list_geometry(
+    query: Query<(Entity, &StrandList, &StrandMaterial), Without<StrandGeometry>>,
     mut storage_buffers: ResMut<Assets<VirtualShaderStorageBuffer>>,
     mut commands: Commands,
 ) {
-    for (entity, strand_asset, material) in query.iter() {
-        let Some(asset) = assets.get(&strand_asset.handle) else {
-            continue;
-        };
-
-        let Some(geometry_library) = &asset.dson_file.geometry_library else {
-            warn!("Geometry library not found for entity: {:?}", entity);
-            continue;
-        };
-
-        if geometry_library.is_empty() {
-            warn!("Geometry library is empty for entity: {:?}", entity);
-            continue;
-        }
-
-        let geometry = &geometry_library[0];
-        let Some(polyline_list) = &geometry.polyline_list else {
-            warn!("Polyline list not found for entity: {:?}", entity);
-            continue;
-        };
-
-        let vertices = geometry
-            .vertices
-            .values
-            .iter()
-            .map(|v| Vec3::new(v[0], v[1], v[2]) * 0.0254);
-        let strands = polyline_list
-            .values
-            .iter()
-            .filter(|strand| strand.len() >= 4)
-            .map(|strand| strand[2..].to_vec());
-
-        let Some(packed) = pack_strands(vertices, strands) else {
+    for (entity, strand_list, material) in query.iter() {
+        let Some(packed) = pack_strands(
+            strand_list.vertices.iter().copied(),
+            strand_list.strands.clone(),
+        ) else {
             warn!("No valid strands found for entity: {:?}", entity);
             continue;
         };
@@ -1332,6 +1300,7 @@ fn set_dson_strand_geometry(
             &mut storage_buffers,
             &mut commands,
         );
+        commands.entity(entity).remove::<StrandList>();
     }
 }
 

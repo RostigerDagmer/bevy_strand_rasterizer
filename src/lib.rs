@@ -1,5 +1,4 @@
 pub mod components;
-pub mod dson;
 mod nodes;
 mod pipelines;
 mod plugin;
@@ -13,10 +12,9 @@ pub use plugin::StrandRasterizerPlugin;
 pub mod prelude {
     pub use crate::{
         components::{
-            FroxelConfig, StrandAsset, StrandCache, StrandGeometry, StrandInstanceTransform,
+            FroxelConfig, StrandCache, StrandGeometry, StrandInstanceTransform, StrandList,
             StrandMaterial, TieFroxelsToView,
         },
-        dson::{DsonAsset, DsonAssetLoader},
         plugin::StrandRasterizerPlugin,
         resources::{StochasticCullSettings, TileDebugSettings},
         strand_cache::{StrandCacheAsset, StrandCacheAssetLoader},
