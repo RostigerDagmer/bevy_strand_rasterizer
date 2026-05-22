@@ -124,7 +124,7 @@ enum DomVsmsProxyKind {
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref BIND_MAP: HashMap<SlabKind, u32> = [
+    pub static ref BIND_MAP: HashMap<SlabKind, u32> = [
         (SlabKind::Vert, 0),
         (SlabKind::Index, 1),
         (SlabKind::StrandMaterial, 5),
@@ -144,7 +144,7 @@ fn dom_resident_page_budget(tile_count: u32) -> u32 {
 }
 
 lazy_static! {
-    static ref LABEL_MAP: HashMap<SlabKind, &'static str> = [
+    pub static ref LABEL_MAP: HashMap<SlabKind, &'static str> = [
         (SlabKind::Vert, "VERTICES"),
         (SlabKind::Index, "INDICES"),
         (SlabKind::StrandMaterial, "STRAND_MATERIALS"),
@@ -168,7 +168,6 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<StrandMaterial>::default(),
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
-            GpuPagingAllocatorPlugin,
         ));
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
@@ -195,12 +194,6 @@ impl Plugin for StrandRasterizerPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.insert_resource(GpuPagingAllocatorSettings {
-            label_map: LABEL_MAP.clone(),
-            bind_map: BIND_MAP.clone(),
-            buffer_group_idx: 0,
-            table_group_idx: 1,
-        });
         render_app.init_resource::<StrandRasterizerResources>();
         render_app.init_resource::<StrandShadingResources>();
         render_app.init_resource::<StrandShadowResources>();

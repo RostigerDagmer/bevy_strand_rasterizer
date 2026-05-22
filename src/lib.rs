@@ -15,7 +15,7 @@ pub mod prelude {
             FroxelConfig, StrandCache, StrandGeometry, StrandInstanceTransform, StrandList,
             StrandMaterial, TieFroxelsToView,
         },
-        plugin::StrandRasterizerPlugin,
+        plugin::{BIND_MAP, LABEL_MAP, StrandRasterizerPlugin},
         resources::{StochasticCullSettings, TileDebugSettings},
         strand_cache::{StrandCacheAsset, StrandCacheAssetLoader},
     };

@@ -741,6 +741,7 @@ dependencies = [
  "dson",
  "either",
  "serde_json",
+ "strand_software_rasterizer",
  "thiserror 2.0.18",
 ]
 
