@@ -2,6 +2,7 @@ use bevy::{
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
@@ -526,6 +527,8 @@ pub fn run_raster_pass(
     uniform_offsets: &[u32],
     _dispatch_size: (u32, u32, u32),
 ) {
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder(); // Get CommandEncoder
     let clear_range = ImageSubresourceRange {
         aspect: TextureAspect::All,
@@ -605,7 +608,9 @@ pub fn run_raster_pass(
 
         pass.set_pipeline(raster_pipeline);
         pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
+        let span = diagnostics.time_span(&mut pass, "strand_rasterizer/rasterize");
         pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
+        span.end(&mut pass);
     }
 
     // --- Rasterization complete ---

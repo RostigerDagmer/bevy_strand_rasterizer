@@ -96,8 +96,8 @@ pub struct RasterTileRun {
     pub screen_tile_id: u32,
     pub load_score: u32,
     pub flags: u32,
-    pub pad0: u32,
-    pub pad1: u32,
+    pub raster_run_reserved_a: u32,
+    pub raster_run_reserved_b: u32,
 }
 
 #[repr(C)]

@@ -81,8 +81,8 @@ struct RasterTileRun {
     screen_tile_id: u32,
     load_score: u32,
     flags: u32,
-    pad0: u32,
-    pad1: u32,
+    raster_run_reserved_a: u32,
+    raster_run_reserved_b: u32,
 }
 
 struct FineSegRef {

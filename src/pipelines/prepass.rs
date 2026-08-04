@@ -11,6 +11,7 @@ use bevy::{
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
@@ -599,6 +600,8 @@ pub fn run_depth_reduce(
     frustum_id: u32,
     fine_tile_count: u32,
 ) {
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
     encoder.clear_buffer(opaque_fine_depth_tiles, 0, None);
     let Some(pipeline_id) = pipeline.depth_reduce_pipeline else {
@@ -621,7 +624,9 @@ pub fn run_depth_reduce(
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/depth_reduce");
     pass.dispatch_workgroups(fine_tile_count.max(1).div_ceil(64), 1, 1);
+    span.end(&mut pass);
 }
 
 pub fn run_prepass(
@@ -646,6 +651,8 @@ pub fn run_prepass(
     coarse_depth_tile_capacity: u32,
     coarse_range_capacity: u32,
 ) {
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
     let Some(allocator_buffer_bind_group) = &allocator.buffer_bind_group else {
         warn!("allocator buffer bind group is not ready yet.");
@@ -819,11 +826,13 @@ pub fn run_prepass(
         &[],
     );
     pass.set_bind_group(layouts::prepass::PREPASS_GROUP, bind_group, uniform_offsets);
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/broad_instances");
     pass.dispatch_workgroups(
         instance_count.div_ceil(settings.threads_per_workgroup),
         1,
         1,
     );
+    span.end(&mut pass);
     let broad_strand_pushconstants = PushConstants {
         num_elements: max_strands_in_instance.max(1),
         scan_load_base: instance_count,
@@ -831,6 +840,7 @@ pub fn run_prepass(
     };
     pass.set_pipeline(broad_strand_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&broad_strand_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/broad_strands");
     pass.dispatch_workgroups(
         max_strands_in_instance
             .max(1)
@@ -838,6 +848,7 @@ pub fn run_prepass(
         instance_count.max(1),
         1,
     );
+    span.end(&mut pass);
     let fine_indirect_pushconstants = PushConstants {
         workgroup_offset: crate::plugin::MAX_COMPUTE_WORKGROUPS_PER_DIMENSION
             .saturating_mul(settings.threads_per_workgroup),
@@ -849,38 +860,50 @@ pub fn run_prepass(
         indirect_args_bind_group,
         &[],
     );
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_fine_dispatch");
     pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
     pass.set_pipeline(fine_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/fine");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+    span.end(&mut pass);
     let coarse_interval_pushconstants = PushConstants {
         num_elements: coarse_range_capacity,
         ..pushconstants
     };
     pass.set_pipeline(coarse_interval_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&coarse_interval_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/coarse_intervals");
     pass.dispatch_workgroups(coarse_range_capacity, 1, 1);
+    span.end(&mut pass);
     let depth_warp_pushconstants = PushConstants {
         num_elements: coarse_depth_tile_capacity,
         ..pushconstants
     };
     pass.set_pipeline(build_depth_warp_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&depth_warp_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/depth_warp");
     pass.dispatch_workgroups(
         coarse_depth_tile_capacity.div_ceil(settings.threads_per_workgroup),
         1,
         1,
     );
+    span.end(&mut pass);
     pass.set_pipeline(finalize_binning_pipeline);
     pass.set_bind_group(
         layouts::prepass::INDIRECT_ARGS_GROUP,
         indirect_args_bind_group,
         &[],
     );
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_binning_dispatch");
     pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
     pass.set_pipeline(mark_coarse_count_pages_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/mark_count_pages");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+    span.end(&mut pass);
     let coarse_count_page_table_capacity =
         coarse_depth_tile_capacity.saturating_mul(crate::plugin::COARSE_DEPTH_SLICES);
     let allocate_count_pages_pushconstants = PushConstants {
@@ -889,24 +912,32 @@ pub fn run_prepass(
     };
     pass.set_pipeline(allocate_coarse_count_pages_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/allocate_count_pages");
     pass.dispatch_workgroups(
         coarse_count_page_table_capacity.div_ceil(settings.threads_per_workgroup),
         1,
         1,
     );
+    span.end(&mut pass);
     pass.set_pipeline(binning_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/binning");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+    span.end(&mut pass);
     pass.set_pipeline(prefix_fine_pages_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/prefix_fine_pages");
     pass.dispatch_workgroups(
         coarse_count_page_table_capacity.min(65_535),
         coarse_count_page_table_capacity.div_ceil(65_535),
         1,
     );
+    span.end(&mut pass);
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/fill_segment_refs");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
+    span.end(&mut pass);
     let fine_tile_stack_pushconstants = PushConstants {
         num_elements: coarse_depth_tile_capacity
             .saturating_mul(crate::plugin::COARSE_FINE_TILE_EXTENT)
@@ -920,13 +951,17 @@ pub fn run_prepass(
         .max(1);
     pass.set_pipeline(emit_raster_work_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_tile_stack_pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/emit_raster_work");
     pass.dispatch_workgroups(
         fine_tile_stack_workgroups_x,
         fine_tile_stack_workgroups_y,
         1,
     );
+    span.end(&mut pass);
     pass.set_pipeline(finalize_raster_dispatch_pipeline);
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_raster_dispatch");
     pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
 }
 
 pub fn update_strand_prepass_pipeline(
