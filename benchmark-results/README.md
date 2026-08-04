@@ -142,6 +142,28 @@ Both instrumented backends produce 11,482,864 page candidates. Page CSR produces
 references versus 25,231,835 for segment scatter: a five-reference difference (0.00002%) at
 floating-point cell boundaries. A visual regression check remains required before promoting it.
 
+## Color raster accumulation and access validation
+
+The color kernel now accumulates premultiplied color directly across work items, removing the
+second `froxel_color` accumulator and all per-blend unpremultiply operations. The recovered live
+state is spent staging the projected line vector and its inverse squared length once per segment.
+Perspective correction is algebraically reduced to one division.
+
+Fine segment references are also treated as trusted output from host-validated assets. The hot
+staging path no longer branches to fallback values for invalid instance, resource, index, vertex,
+material, shading-layer, or shading-atlas indices. Batch-tail and geometric visibility checks
+remain because they describe valid runtime work rather than malformed input.
+
+| Revision | Mean (ms) | Median (ms) | p95 (ms) | p99 (ms) | Median vs. control |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16-segment batch control | 7.458 | 6.822 | 9.683 | 10.195 | - |
+| Premultiplied + staged line math | 6.503 | 6.132 | 8.317 | 8.472 | -10.1% |
+| Unchecked asset access | 6.062 | 5.687 | 7.819 | 8.263 | -16.6% |
+
+The math/register change saves 0.690 ms at the median. Removing malformed-input handling saves a
+further 0.446 ms, for a combined 1.136 ms median reduction. Mean time falls by 18.7% across both
+changes. These results use the telemetry-free page-CSR path.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -170,6 +192,9 @@ floating-point cell boundaries. A visual regression check remains required befor
 - `16-segment-scatter-ab-control.json`: telemetry-free legacy control with the A/B switch present.
 - `17-page-csr-initial.json`: telemetry-free first page-owned CSR implementation.
 - `18-page-csr-telemetry.json`: page-owned workload and output-count telemetry.
+- `35-color-premult-precomputed-line.json`: premultiplied direct accumulation and staged projected
+  line math.
+- `36-color-unchecked-asset-access.json`: removes asset-validity fallbacks from raster staging.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
 reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are
