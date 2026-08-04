@@ -82,6 +82,16 @@ pub struct PrepassTelemetrySettings {
     pub enabled: bool,
 }
 
+/// Selects the implementation used to construct fine-cell segment-reference ranges.
+#[derive(Clone, Copy, Debug, Default, Resource, Reflect, ExtractResource, PartialEq, Eq)]
+pub enum FineBinningBackend {
+    /// Segment-owned count/prefix/fill traversal retained as the A/B reference.
+    #[default]
+    SegmentScatter,
+    /// Sparse page CSR followed by page-owned workgroup-local fine binning.
+    PageCsr,
+}
+
 impl Default for StochasticCullSettings {
     fn default() -> Self {
         Self {

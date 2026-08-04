@@ -99,4 +99,5 @@ struct PushConstants {
     min_keep_probability: f32,
     shadow_keep_probability: f32,
     telemetry_enabled: u32,
+    fine_binning_backend: u32,
 }

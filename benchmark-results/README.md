@@ -108,6 +108,40 @@ stored at 16-bit normalized precision. Boundary quantization changed the accepte
 count by 1,502 out of roughly 25.23 million (+0.006%); this should receive a visual regression
 check before treating the representation as final.
 
+## Page-owned CSR prototype
+
+Fine binning now has a temporary host-selected A/B backend. `segment` retains the previous
+segment-owned count/prefix/fill sequence; `page-csr` constructs compact candidate ranges and lets
+one workgroup own the 256 fine cells of each allocated page. Select it with:
+
+```sh
+--fine-binning segment
+--fine-binning page-csr
+```
+
+The CSR candidate count is folded into the existing page-mark traversal. Allocation transfers
+virtual page counts to compact physical page IDs, a one-workgroup scan prefixes the roughly
+12,700 counts, and a coarse-only scatter writes 32-bit task IDs into contiguous page ranges.
+
+| Backend/stage | Segment scatter (ms) | Page CSR (ms) |
+| --- | ---: | ---: |
+| Mark pages / count candidates | 0.532 | 0.657 |
+| Segment fine count | 0.976 | - |
+| Fine/page prefix | 0.024 | 0.028 |
+| Candidate scatter | - | 0.757 |
+| Segment fill | 1.909 | - |
+| Page-local count/scan/fill | - | 2.096 |
+| **Backend total** | **3.441** | **3.538** |
+
+The page-owned fine build replaces 2.909 ms of segment count/prefix/fill work with 2.096 ms
+(-28.0%, 0.813 ms). Candidate construction currently costs 0.910 ms, leaving this first complete
+prototype 0.097 ms (+2.8%) slower overall. The default therefore remains `segment` while the CSR
+path is retained for optimization.
+
+Both instrumented backends produce 11,482,864 page candidates. Page CSR produces 25,231,840 fine
+references versus 25,231,835 for segment scatter: a five-reference difference (0.00002%) at
+floating-point cell boundaries. A visual regression check remains required before promoting it.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -133,6 +167,9 @@ check before treating the representation as final.
 - `13-cached-projected-segments.json`: first canonical cache measurement with telemetry enabled.
 - `14-cached-projected-segments-confirmation.json`: independent instrumented confirmation.
 - `15-cached-projected-segments-production.json`: cache measurement with telemetry disabled.
+- `16-segment-scatter-ab-control.json`: telemetry-free legacy control with the A/B switch present.
+- `17-page-csr-initial.json`: telemetry-free first page-owned CSR implementation.
+- `18-page-csr-telemetry.json`: page-owned workload and output-count telemetry.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
 reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are

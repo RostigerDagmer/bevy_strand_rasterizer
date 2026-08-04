@@ -44,6 +44,11 @@ pub mod prepass {
     pub const RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 47;
     pub const TELEMETRY: u32 = 48;
     pub const PROJECTED_SEGMENTS: u32 = 49;
+    pub const PAGE_CANDIDATE_COUNTS: u32 = 50;
+    pub const PAGE_CANDIDATE_OFFSETS: u32 = 51;
+    pub const PAGE_CANDIDATE_CURSORS: u32 = 52;
+    pub const PAGE_CANDIDATES: u32 = 53;
+    pub const VIRTUAL_PAGE_CANDIDATE_COUNTS: u32 = 54;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -95,6 +100,14 @@ pub mod prepass {
             ),
             ShaderDefVal::UInt("TELEMETRY".into(), TELEMETRY),
             ShaderDefVal::UInt("PROJECTED_SEGMENTS".into(), PROJECTED_SEGMENTS),
+            ShaderDefVal::UInt("PAGE_CANDIDATE_COUNTS".into(), PAGE_CANDIDATE_COUNTS),
+            ShaderDefVal::UInt("PAGE_CANDIDATE_OFFSETS".into(), PAGE_CANDIDATE_OFFSETS),
+            ShaderDefVal::UInt("PAGE_CANDIDATE_CURSORS".into(), PAGE_CANDIDATE_CURSORS),
+            ShaderDefVal::UInt("PAGE_CANDIDATES".into(), PAGE_CANDIDATES),
+            ShaderDefVal::UInt(
+                "VIRTUAL_PAGE_CANDIDATE_COUNTS".into(),
+                VIRTUAL_PAGE_CANDIDATE_COUNTS,
+            ),
         ]
     }
 }

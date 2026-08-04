@@ -172,10 +172,12 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
             ExtractResourcePlugin::<PrepassTelemetrySettings>::default(),
+            ExtractResourcePlugin::<FineBinningBackend>::default(),
         ));
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
         app.init_resource::<PrepassTelemetrySettings>();
+        app.init_resource::<FineBinningBackend>();
         app.init_resource::<StrandAssetResources>();
         app.init_asset::<StrandCacheAsset>();
         app.init_asset_loader::<StrandCacheAssetLoader>();
@@ -532,6 +534,9 @@ fn use_prepass_buffers(
         std::mem::size_of::<FineSegRef>() as u64,
         max_storage_binding_bytes,
     );
+    // Every accepted fine reference comes from one page candidate. Reuse the larger fine-reference
+    // budget as a conservative transient CSR capacity during the A/B implementation.
+    let page_candidate_capacity = fine_seg_ref_capacity;
     let requested_raster_work_capacity = binning_capacity
         .saturating_mul(2)
         .next_power_of_two()
@@ -564,6 +569,11 @@ fn use_prepass_buffers(
         || prepass_resources.prefix_indirect_args.is_none()
         || prepass_resources.telemetry.is_none()
         || prepass_resources.projected_segments.is_none()
+        || prepass_resources.page_candidate_counts.is_none()
+        || prepass_resources.page_candidate_offsets.is_none()
+        || prepass_resources.page_candidate_cursors.is_none()
+        || prepass_resources.page_candidates.is_none()
+        || prepass_resources.virtual_page_candidate_counts.is_none()
         || prepass_resources.chunk_pool.is_none()
         || prepass_resources.free_heads.is_none()
         || prepass_resources.frustum_table.is_none()
@@ -598,6 +608,7 @@ fn use_prepass_buffers(
         || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
         || prepass_resources.coarse_count_page_capacity < coarse_count_page_capacity
         || prepass_resources.fine_seg_ref_capacity < fine_seg_ref_capacity
+        || prepass_resources.page_candidate_capacity < page_candidate_capacity
         || prepass_resources.opaque_fine_depth_tile_capacity < opaque_fine_depth_tile_capacity;
 
     if needs_realloc {
@@ -662,6 +673,14 @@ fn use_prepass_buffers(
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
         let projected_segments_bytes = (binning_capacity as u64)
             * std::mem::size_of::<crate::pipelines::task_contract::ProjectedSegment>() as u64;
+        let page_candidate_counts_bytes =
+            (coarse_count_page_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let page_candidate_offsets_bytes =
+            ((coarse_count_page_capacity as u64) + 1) * std::mem::size_of::<u32>() as u64;
+        let page_candidates_bytes =
+            (page_candidate_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let virtual_page_candidate_counts_bytes =
+            (coarse_count_page_table_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let instance_id_bytes = (instance_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let instance_prefix_bytes =
             ((instance_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
@@ -736,6 +755,37 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.page_candidate_counts = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_page_candidate_counts"),
+            size: page_candidate_counts_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.page_candidate_offsets = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_page_candidate_offsets"),
+            size: page_candidate_offsets_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.page_candidate_cursors = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_page_candidate_cursors"),
+            size: page_candidate_counts_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.page_candidates = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_page_candidates"),
+            size: page_candidates_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.virtual_page_candidate_counts =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_virtual_page_candidate_counts"),
+                size: virtual_page_candidate_counts_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
         prepass_resources.visibility_flags_buffer = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_visible_flags"),
             size: instance_id_bytes,
@@ -921,6 +971,7 @@ fn use_prepass_buffers(
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
         prepass_resources.coarse_count_page_capacity = coarse_count_page_capacity;
         prepass_resources.fine_seg_ref_capacity = fine_seg_ref_capacity;
+        prepass_resources.page_candidate_capacity = page_candidate_capacity;
         prepass_resources.opaque_fine_depth_tile_capacity = opaque_fine_depth_tile_capacity;
 
         info!(

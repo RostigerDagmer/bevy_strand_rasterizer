@@ -18,6 +18,7 @@ pub struct PushConstants {
     pub min_keep_probability: f32,
     pub shadow_keep_probability: f32,
     pub telemetry_enabled: u32,
+    pub fine_binning_backend: u32,
 }
 
 #[derive(Debug, Clone, ShaderType)]

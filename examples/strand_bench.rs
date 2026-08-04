@@ -50,6 +50,7 @@ struct BenchConfig {
     warmup_frames: usize,
     sample_frames: usize,
     telemetry: bool,
+    fine_binning: FineBinningBackend,
     output: PathBuf,
     asset: Option<String>,
     clusters: u32,
@@ -69,6 +70,7 @@ impl Default for BenchConfig {
             warmup_frames: 120,
             sample_frames: 300,
             telemetry: true,
+            fine_binning: FineBinningBackend::SegmentScatter,
             output: PathBuf::from("strand-bench.json"),
             asset: None,
             clusters: 125,
@@ -105,6 +107,17 @@ impl BenchConfig {
                 "--warmup" => config.warmup_frames = parse_usize(&arg, &value()?)?,
                 "--samples" => config.sample_frames = parse_usize(&arg, &value()?)?,
                 "--no-telemetry" => config.telemetry = false,
+                "--fine-binning" => {
+                    config.fine_binning = match value()?.as_str() {
+                        "segment" => FineBinningBackend::SegmentScatter,
+                        "page-csr" => FineBinningBackend::PageCsr,
+                        value => {
+                            return Err(format!(
+                                "invalid --fine-binning backend: {value} (expected segment or page-csr)"
+                            ));
+                        }
+                    }
+                }
                 "--output" => config.output = PathBuf::from(value()?),
                 "--clusters" => config.clusters = parse_u32(&arg, &value()?)?,
                 "--strands-per-cluster" => config.strands_per_cluster = parse_u32(&arg, &value()?)?,
@@ -171,6 +184,7 @@ fn print_help() {
            --width N --height N         render resolution (default 1920x1080)\n\
            --warmup N --samples N       warmup and measured GPU frames\n\
            --no-telemetry               disable prepass counters/readbacks\n\
+           --fine-binning BACKEND        segment (default) or page-csr\n\
            --output PATH                JSON result path (default strand-bench.json)\n\
            --clusters N                 clustered-grid entity count (default 125)\n\
            --strands-per-cluster N      synthetic strand count (default 128)\n\
@@ -225,6 +239,7 @@ fn main() {
         std::process::exit(2);
     });
     let telemetry_enabled = config.telemetry;
+    let fine_binning = config.fine_binning;
     let mut app = App::new();
 
     let render_plugin = RenderPlugin {
@@ -288,6 +303,7 @@ fn main() {
         .insert_resource(PrepassTelemetrySettings {
             enabled: telemetry_enabled,
         })
+        .insert_resource(fine_binning)
         .insert_resource(DirectionalLightShadowMap { size: 2048 })
         .insert_resource(ClearColor(Color::srgb(0.025, 0.025, 0.03)))
         .add_plugins((
@@ -846,6 +862,10 @@ fn make_report(
         "warmup_frames": config.warmup_frames,
         "sample_frames": config.sample_frames,
         "telemetry_enabled": config.telemetry,
+        "fine_binning_backend": match config.fine_binning {
+            FineBinningBackend::SegmentScatter => "segment",
+            FineBinningBackend::PageCsr => "page-csr",
+        },
         "seed": config.seed,
         "workload": {
             "geometry_count": geometry_count,

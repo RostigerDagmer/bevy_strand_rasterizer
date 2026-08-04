@@ -19,7 +19,9 @@ use crate::{
         create_prepass_bind_groups, run_depth_reduce, run_prepass,
     },
     pipelines::raster::StrandRasterizerResources,
-    resources::{ComputeInvocationDims, PrepassTelemetrySettings, StochasticCullSettings},
+    resources::{
+        ComputeInvocationDims, FineBinningBackend, PrepassTelemetrySettings, StochasticCullSettings,
+    },
 };
 
 pub fn work_preparation_pass(
@@ -39,6 +41,7 @@ pub fn work_preparation_pass(
     let invocation_dims = world.resource::<ComputeInvocationDims>();
     let cull_settings = world.resource::<StochasticCullSettings>();
     let telemetry_settings = world.resource::<PrepassTelemetrySettings>();
+    let fine_binning_backend = *world.resource::<FineBinningBackend>();
     let view_uniforms = world.resource::<ViewUniforms>();
     let light_meta = world.resource::<LightMeta>();
     let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -157,6 +160,17 @@ pub fn work_preparation_pass(
     let Some(fine_cell_write_cursors) = prepass_resources.fine_cell_write_cursors.as_ref() else {
         return;
     };
+    let Some(page_candidate_counts) = prepass_resources.page_candidate_counts.as_ref() else {
+        return;
+    };
+    let Some(page_candidate_cursors) = prepass_resources.page_candidate_cursors.as_ref() else {
+        return;
+    };
+    let Some(virtual_page_candidate_counts) =
+        prepass_resources.virtual_page_candidate_counts.as_ref()
+    else {
+        return;
+    };
     let Some(fine_seg_refs) = prepass_resources.fine_seg_refs.as_ref() else {
         return;
     };
@@ -176,10 +190,14 @@ pub fn work_preparation_pass(
         prefix_indirect_args,
         telemetry,
         telemetry_settings.enabled,
+        fine_binning_backend,
         coarse_depth_lut,
         coarse_count_page_table,
         coarse_count_pages,
         fine_cell_write_cursors,
+        page_candidate_counts,
+        page_candidate_cursors,
+        virtual_page_candidate_counts,
         fine_seg_refs,
         prepass_resources.frustum_count,
         prepass_resources.instance_count,

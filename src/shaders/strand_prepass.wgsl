@@ -225,6 +225,19 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{OPAQUE_FINE_DEPTH_TILES}) var<storage, read> opaque_fine_depth_tiles: array<vec2<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{TELEMETRY}) var<storage, read_write> prepass_telemetry: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{PROJECTED_SEGMENTS}) var<storage, read_write> projected_segments: array<ProjectedSegment>;
+@group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATE_COUNTS}) var<storage, read_write> page_candidate_counts: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATE_OFFSETS}) var<storage, read_write> page_candidate_offsets: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATE_CURSORS}) var<storage, read_write> page_candidate_cursors: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATES}) var<storage, read_write> page_candidates: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{VIRTUAL_PAGE_CANDIDATE_COUNTS}) var<storage, read_write> virtual_page_candidate_counts: array<atomic<u32>>;
+
+var<workgroup> candidate_scan_base: u32;
+var<workgroup> candidate_scan_block_base: u32;
+var<workgroup> candidate_scan_block_total: u32;
+var<workgroup> csr_cell_counts: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
+var<workgroup> csr_cell_cursors: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
+var<workgroup> csr_page_ref_base: u32;
+var<workgroup> csr_page_valid: u32;
 
 fn aabb_projected_screen_area(frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
     if frustum_id >= arrayLength(&frustum_table) {
@@ -1363,6 +1376,9 @@ fn trace_segment_into_coarse_count_page(
         let page_table_idx = coarse_count_page_table_idx(tile_idx, coarse_z);
         if mark_only {
             mark_coarse_count_page(page_table_idx);
+            if pc.fine_binning_backend != 0u && page_table_idx < arrayLength(&virtual_page_candidate_counts) {
+                atomicAdd(&virtual_page_candidate_counts[page_table_idx], 1u);
+            }
             continue;
         }
 
@@ -1583,6 +1599,202 @@ fn visit_segment_asset_coarse_tiles(p0: vec3<f32>, p1: vec3<f32>, frustum: Frust
     }
 }
 
+fn scatter_page_candidate(page_idx: u32, task_idx: u32) {
+    if page_idx >= arrayLength(&page_candidate_counts) {
+        return;
+    }
+    if page_idx >= arrayLength(&page_candidate_cursors) || page_idx >= arrayLength(&page_candidate_offsets) {
+        return;
+    }
+    let local_idx = atomicAdd(&page_candidate_cursors[page_idx], 1u);
+    let candidate_count = atomicLoad(&page_candidate_counts[page_idx]);
+    if local_idx >= candidate_count {
+        return;
+    }
+    let dst = page_candidate_offsets[page_idx] + local_idx;
+    if dst < arrayLength(&page_candidates) {
+        page_candidates[dst] = task_idx;
+    }
+}
+
+fn trace_segment_into_candidate_pages(
+    task_idx: u32,
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    frustum: FrustumDesc,
+    tile_idx: u32,
+    local_coarse_tile: u32,
+) {
+    let coarse_x = local_coarse_tile % frustum.coarse_tiles_x;
+    let coarse_y = local_coarse_tile / frustum.coarse_tiles_x;
+    let coarse_tile_px_x = max(1u, frustum.froxel_size_x * COARSE_FINE_TILE_EXTENT);
+    let coarse_tile_px_y = max(1u, frustum.froxel_size_y * COARSE_FINE_TILE_EXTENT);
+    let origin = vec2<f32>(f32(coarse_x * coarse_tile_px_x), f32(coarse_y * coarse_tile_px_y));
+    let tile_max = vec2<f32>(
+        min(origin.x + f32(coarse_tile_px_x), f32(frustum.screen_width)),
+        min(origin.y + f32(coarse_tile_px_y), f32(frustum.screen_height)),
+    ) - vec2<f32>(1e-3, 1e-3);
+    let clipped = clip_segment_to_box(
+        p0,
+        p1,
+        vec3<f32>(origin, 0.0),
+        vec3<f32>(max(origin, tile_max), 1.0),
+    );
+    if clipped.ok == 0u {
+        return;
+    }
+
+    let z0_slice = coarse_lut_slice_for_depth(tile_idx, clipped.p0.z);
+    let z1_slice = coarse_lut_slice_for_depth(tile_idx, clipped.p1.z);
+    if z0_slice == INVALID_PTR || z1_slice == INVALID_PTR {
+        return;
+    }
+
+    let lut_base = tile_idx * COARSE_DEPTH_SLICES;
+    for (var coarse_z = min(z0_slice, z1_slice); coarse_z <= max(z0_slice, z1_slice); coarse_z = coarse_z + 1u) {
+        let lut_idx = lut_base + coarse_z;
+        if lut_idx >= arrayLength(&coarse_depth_lut) {
+            continue;
+        }
+        let lut_entry = coarse_depth_lut[lut_idx];
+        if lut_entry.virtual_count_q == 0u {
+            continue;
+        }
+        let depth_clipped = clip_segment_to_box(
+            clipped.p0,
+            clipped.p1,
+            vec3<f32>(origin, dequantize_depth01(lut_entry.z_min_q)),
+            vec3<f32>(max(origin, tile_max), dequantize_depth01(lut_entry.z_max_q)),
+        );
+        if depth_clipped.ok == 0u {
+            continue;
+        }
+        let page_idx = get_coarse_count_page(coarse_count_page_table_idx(tile_idx, coarse_z));
+        if page_idx != INVALID_PTR {
+            scatter_page_candidate(page_idx, task_idx);
+        }
+    }
+}
+
+fn visit_segment_candidate_pages(
+    task_idx: u32,
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    frustum: FrustumDesc,
+    frustum_id: u32,
+    inst_id: u32,
+) {
+    let range_idx = find_coarse_asset_range(inst_id, frustum_id);
+    if range_idx == INVALID_PTR || range_idx >= arrayLength(&coarse_range_queue.ranges) {
+        return;
+    }
+    let range = coarse_range_queue.ranges[range_idx];
+    if range.frustum_id != frustum_id {
+        return;
+    }
+
+    let coarse_tile_px_x = max(1u, frustum.froxel_size_x * COARSE_FINE_TILE_EXTENT);
+    let coarse_tile_px_y = max(1u, frustum.froxel_size_y * COARSE_FINE_TILE_EXTENT);
+    let seg_min = min(p0.xy, p1.xy);
+    let seg_max = max(p0.xy, p1.xy);
+    let min_cx = max(range.min_x, min(u32(max(seg_min.x, 0.0)) / coarse_tile_px_x, frustum.coarse_tiles_x - 1u));
+    let max_cx = min(range.max_x, min(u32(max(seg_max.x, 0.0)) / coarse_tile_px_x, frustum.coarse_tiles_x - 1u));
+    let min_cy = max(range.min_y, min(u32(max(seg_min.y, 0.0)) / coarse_tile_px_y, frustum.coarse_tiles_y - 1u));
+    let max_cy = min(range.max_y, min(u32(max(seg_max.y, 0.0)) / coarse_tile_px_y, frustum.coarse_tiles_y - 1u));
+    if max_cx < min_cx || max_cy < min_cy {
+        return;
+    }
+
+    let coarse_box_min = vec3<f32>(f32(min_cx * coarse_tile_px_x), f32(min_cy * coarse_tile_px_y), 0.0);
+    let coarse_box_max = vec3<f32>(
+        min(f32((max_cx + 1u) * coarse_tile_px_x), f32(frustum.screen_width)) - 1e-3,
+        min(f32((max_cy + 1u) * coarse_tile_px_y), f32(frustum.screen_height)) - 1e-3,
+        1.0,
+    );
+    let clipped = clip_segment_to_box(p0, p1, coarse_box_min, coarse_box_max);
+    if clipped.ok == 0u {
+        return;
+    }
+
+    let p0_coarse = clipped.p0.xy / vec2<f32>(f32(coarse_tile_px_x), f32(coarse_tile_px_y));
+    let p1_coarse = clipped.p1.xy / vec2<f32>(f32(coarse_tile_px_x), f32(coarse_tile_px_y));
+    let f0 = vec2<i32>(
+        clamp(i32(floor(p0_coarse.x)), i32(min_cx), i32(max_cx)),
+        clamp(i32(floor(p0_coarse.y)), i32(min_cy), i32(max_cy)),
+    );
+    let f1 = vec2<i32>(
+        clamp(i32(floor(p1_coarse.x)), i32(min_cx), i32(max_cx)),
+        clamp(i32(floor(p1_coarse.y)), i32(min_cy), i32(max_cy)),
+    );
+    let dir = p1_coarse - p0_coarse;
+    let step = vec2<i32>(sgn_i32(dir.x), sgn_i32(dir.y));
+    let safe_dir = select(dir, vec2<f32>(1e-6), abs(dir) < vec2<f32>(1e-6));
+    let delta_dist = abs(vec2<f32>(1.0) / safe_dir);
+    var f = f0;
+    var t_max = select(
+        (floor(p0_coarse) - p0_coarse) / safe_dir,
+        ((floor(p0_coarse) + 1.0) - p0_coarse) / safe_dir,
+        step > vec2<i32>(0),
+    );
+    t_max = select(t_max, vec2<f32>(1e38), abs(dir) < vec2<f32>(1e-6));
+    var safety = 0u;
+    let max_steps = (max_cx - min_cx + 1u) + (max_cy - min_cy + 1u) + 2u;
+    loop {
+        if safety > max_steps || f.x < i32(min_cx) || f.x > i32(max_cx) || f.y < i32(min_cy) || f.y > i32(max_cy) {
+            break;
+        }
+        let local_tile = u32(f.y) * frustum.coarse_tiles_x + u32(f.x);
+        if local_tile < frustum.coarse_depth_tile_count {
+            trace_segment_into_candidate_pages(
+                task_idx,
+                p0,
+                p1,
+                frustum,
+                frustum.coarse_depth_tile_base + local_tile,
+                local_tile,
+            );
+        }
+        if all(f == f1) {
+            break;
+        }
+        if t_max.x <= t_max.y {
+            f.x += step.x;
+            t_max.x += delta_dist.x;
+        } else {
+            f.y += step.y;
+            t_max.y += delta_dist.y;
+        }
+        safety += 1u;
+    }
+}
+
+fn scatter_page_candidate_task(task_idx: u32) {
+    let binning_task_count = atomicLoad(&binning_queue.tail);
+    if task_idx >= binning_task_count || task_idx >= arrayLength(&projected_segments) {
+        return;
+    }
+    let task = binning_queue.tasks[task_idx];
+    let frustum_id = unpack_binning_frustum(task.packed_field);
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    if task.id_info >= arrayLength(&strand_instances) {
+        return;
+    }
+    let projected = projected_segments[task_idx];
+    let screen_size = vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height));
+    let depths = unpack2x16unorm(projected.depths);
+    visit_segment_candidate_pages(
+        task_idx,
+        vec3<f32>(unpack2x16unorm(projected.p0_xy) * screen_size, depths.x),
+        vec3<f32>(unpack2x16unorm(projected.p1_xy) * screen_size, depths.y),
+        frustum,
+        frustum_id,
+        task.id_info,
+    );
+}
+
 fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
     let binning_task_count = atomicLoad(&binning_queue.tail);
     if task_idx >= binning_task_count {
@@ -1651,6 +1863,12 @@ fn allocate_coarse_count_pages(@builtin(global_invocation_id) gid: vec3<u32>) {
         0u,
         0u,
     );
+    if pc.fine_binning_backend != 0u && page_idx < arrayLength(&page_candidate_counts) && page_table_idx < arrayLength(&virtual_page_candidate_counts) {
+        atomicStore(
+            &page_candidate_counts[page_idx],
+            atomicLoad(&virtual_page_candidate_counts[page_table_idx]),
+        );
+    }
     atomicStore(&coarse_count_page_table[page_table_idx], page_idx + 1u);
 }
 
@@ -1673,6 +1891,65 @@ fn finalize_prefix_dispatch() {
 fn binning_queue_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let task_idx = gid.y * pc.workgroup_offset + gid.x;
     process_binning_task(task_idx, false, false);
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn prefix_page_candidates(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+) {
+    let lane = local_id.x;
+    let page_count = min(atomicLoad(&coarse_count_pages.tail), arrayLength(&page_candidate_counts));
+    if lane == 0u {
+        candidate_scan_base = 0u;
+    }
+    workgroupBarrier();
+
+    let block_count = ceil_div_u32(page_count, WORKGROUP_SIZE);
+    for (var block = 0u; block < block_count; block += 1u) {
+        let page_idx = block * WORKGROUP_SIZE + lane;
+        var count = 0u;
+        if page_idx < page_count {
+            count = atomicLoad(&page_candidate_counts[page_idx]);
+        }
+        let subgroup_exclusive = subgroupExclusiveAdd(count);
+        let subgroup_inclusive = subgroupInclusiveAdd(count);
+        if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+            page_scan_values[subgroup_id] = subgroup_inclusive;
+        }
+        workgroupBarrier();
+        if lane == 0u {
+            var block_total = 0u;
+            for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i += 1u) {
+                let subtotal = page_scan_values[i];
+                page_scan_values[i] = block_total;
+                block_total += subtotal;
+            }
+            candidate_scan_block_base = candidate_scan_base;
+            candidate_scan_block_total = block_total;
+        }
+        workgroupBarrier();
+        if page_idx < page_count && page_idx < arrayLength(&page_candidate_offsets) {
+            page_candidate_offsets[page_idx] = candidate_scan_block_base
+                + page_scan_values[subgroup_id]
+                + subgroup_exclusive;
+        }
+        workgroupBarrier();
+        if lane == 0u {
+            candidate_scan_base += candidate_scan_block_total;
+        }
+        workgroupBarrier();
+    }
+    if lane == 0u && page_count < arrayLength(&page_candidate_offsets) {
+        page_candidate_offsets[page_count] = candidate_scan_base;
+    }
+}
+
+@compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
+fn scatter_page_candidates(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let task_idx = gid.y * pc.workgroup_offset + gid.x;
+    scatter_page_candidate_task(task_idx);
 }
 
 @compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
@@ -1770,7 +2047,10 @@ fn finalize_telemetry(@builtin(global_invocation_id) gid: vec3<u32>) {
     if telemetry_idx >= arrayLength(&prepass_telemetry) {
         return;
     }
-    let candidate_count = atomicLoad(&prepass_telemetry[telemetry_idx]);
+    var candidate_count = atomicLoad(&prepass_telemetry[telemetry_idx]);
+    if pc.fine_binning_backend != 0u && page_idx < arrayLength(&page_candidate_counts) {
+        candidate_count = atomicLoad(&page_candidate_counts[page_idx]);
+    }
     if candidate_count == 0u {
         return;
     }
@@ -1801,6 +2081,264 @@ fn frustum_for_coarse_tile(tile_idx: u32) -> u32 {
         }
     }
     return INVALID_PTR;
+}
+
+fn trace_candidate_inside_page(
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    frustum: FrustumDesc,
+    page_idx: u32,
+    page_desc: FinePageMeta,
+    fill_refs: bool,
+    seg_ref: FineSegRef,
+) {
+    let local_coarse_tile = page_desc.coarse_tile_id - frustum.coarse_depth_tile_base;
+    let coarse_x = local_coarse_tile % frustum.coarse_tiles_x;
+    let coarse_y = local_coarse_tile / frustum.coarse_tiles_x;
+    let coarse_tile_px_x = max(1u, frustum.froxel_size_x * COARSE_FINE_TILE_EXTENT);
+    let coarse_tile_px_y = max(1u, frustum.froxel_size_y * COARSE_FINE_TILE_EXTENT);
+    let origin = vec2<f32>(f32(coarse_x * coarse_tile_px_x), f32(coarse_y * coarse_tile_px_y));
+    let tile_max = vec2<f32>(
+        min(origin.x + f32(coarse_tile_px_x), f32(frustum.screen_width)),
+        min(origin.y + f32(coarse_tile_px_y), f32(frustum.screen_height)),
+    ) - vec2<f32>(1e-3);
+    let lut_idx = page_desc.coarse_tile_id * COARSE_DEPTH_SLICES + page_desc.coarse_z;
+    if lut_idx >= arrayLength(&coarse_depth_lut) {
+        return;
+    }
+    let lut_entry = coarse_depth_lut[lut_idx];
+    if lut_entry.virtual_count_q == 0u {
+        return;
+    }
+    let z_min = dequantize_depth01(lut_entry.z_min_q);
+    let z_max = dequantize_depth01(lut_entry.z_max_q);
+    let coarse_clipped = clip_segment_to_box(
+        p0,
+        p1,
+        vec3<f32>(origin, 0.0),
+        vec3<f32>(max(origin, tile_max), 1.0),
+    );
+    if coarse_clipped.ok == 0u {
+        return;
+    }
+    let clipped = clip_segment_to_box(
+        coarse_clipped.p0,
+        coarse_clipped.p1,
+        vec3<f32>(origin, z_min),
+        vec3<f32>(max(origin, tile_max), z_max),
+    );
+    if clipped.ok == 0u {
+        return;
+    }
+
+    let z_span = max(z_max - z_min, 1.0 / f32(DEPTH_QUANT_MAX));
+    let p0_local = vec3<f32>(
+        (clipped.p0.x - origin.x) / f32(frustum.froxel_size_x),
+        (clipped.p0.y - origin.y) / f32(frustum.froxel_size_y),
+        clamp((clipped.p0.z - z_min) / z_span, 0.0, 0.999999) * f32(COARSE_DEPTH_SLICES),
+    );
+    let p1_local = vec3<f32>(
+        (clipped.p1.x - origin.x) / f32(frustum.froxel_size_x),
+        (clipped.p1.y - origin.y) / f32(frustum.froxel_size_y),
+        clamp((clipped.p1.z - z_min) / z_span, 0.0, 0.999999) * f32(COARSE_DEPTH_SLICES),
+    );
+    let f0 = vec3<i32>(
+        clamp(i32(floor(p0_local.x)), 0, i32(COARSE_FINE_TILE_EXTENT) - 1),
+        clamp(i32(floor(p0_local.y)), 0, i32(COARSE_FINE_TILE_EXTENT) - 1),
+        clamp(i32(floor(p0_local.z)), 0, i32(COARSE_DEPTH_SLICES) - 1),
+    );
+    let f1 = vec3<i32>(
+        clamp(i32(floor(p1_local.x)), 0, i32(COARSE_FINE_TILE_EXTENT) - 1),
+        clamp(i32(floor(p1_local.y)), 0, i32(COARSE_FINE_TILE_EXTENT) - 1),
+        clamp(i32(floor(p1_local.z)), 0, i32(COARSE_DEPTH_SLICES) - 1),
+    );
+    let dir = p1_local - p0_local;
+    let step = vec3<i32>(sgn_i32(dir.x), sgn_i32(dir.y), sgn_i32(dir.z));
+    let safe_dir = select(dir, vec3<f32>(1e-6), abs(dir) < vec3<f32>(1e-6));
+    let delta_dist = abs(vec3<f32>(1.0) / safe_dir);
+    var f = f0;
+    var t_max = select(
+        (floor(p0_local) - p0_local) / safe_dir,
+        ((floor(p0_local) + 1.0) - p0_local) / safe_dir,
+        step > vec3<i32>(0),
+    );
+    t_max = select(t_max, vec3<f32>(1e38), abs(dir) < vec3<f32>(1e-6));
+    var safety = 0u;
+    loop {
+        if safety > COARSE_FINE_TILE_EXTENT + COARSE_FINE_TILE_EXTENT + COARSE_DEPTH_SLICES + 3u {
+            break;
+        }
+        let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + u32(f.x);
+        let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + u32(f.y);
+        if !fine_tile_occluded_by_opaque(frustum, fine_x, fine_y, z_max) {
+            let cell_idx = fine_cell_idx(u32(f.x), u32(f.y), u32(f.z));
+            if fill_refs {
+                let local_write = atomicAdd(&csr_cell_cursors[cell_idx], 1u);
+                let global_cell_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
+                let dst = csr_page_ref_base + fine_cell_offsets[global_cell_idx] + local_write;
+                if dst < arrayLength(&fine_seg_refs.refs) {
+                    fine_seg_refs.refs[dst] = seg_ref;
+                }
+            } else {
+                atomicAdd(&csr_cell_counts[cell_idx], 1u);
+            }
+        }
+        if all(f == f1) {
+            break;
+        }
+        let a_min = canonical_min_mask(t_max);
+        f += select(vec3<i32>(0), step, a_min);
+        t_max += select(vec3<f32>(0), delta_dist, a_min);
+        if any(f < vec3<i32>(0)) || f.x >= i32(COARSE_FINE_TILE_EXTENT) || f.y >= i32(COARSE_FINE_TILE_EXTENT) || f.z >= i32(COARSE_DEPTH_SLICES) {
+            break;
+        }
+        safety += 1u;
+    }
+}
+
+fn process_candidate_for_page(
+    task_idx: u32,
+    page_idx: u32,
+    page_desc: FinePageMeta,
+    frustum_id: u32,
+    frustum: FrustumDesc,
+    fill_refs: bool,
+) {
+    if task_idx >= atomicLoad(&binning_queue.tail) || task_idx >= arrayLength(&projected_segments) {
+        return;
+    }
+    let task = binning_queue.tasks[task_idx];
+    if unpack_binning_frustum(task.packed_field) != frustum_id || task.id_info >= arrayLength(&strand_instances) {
+        return;
+    }
+    let projected = projected_segments[task_idx];
+    let screen_size = vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height));
+    let depths = unpack2x16unorm(projected.depths);
+    var seg_ref = FineSegRef(task.id_info, task.seg_idx, 0u);
+    if fill_refs {
+        let instance = strand_instances[task.id_info];
+        seg_ref = make_fine_seg_ref(task, instance.meta_id);
+    }
+    trace_candidate_inside_page(
+        vec3<f32>(unpack2x16unorm(projected.p0_xy) * screen_size, depths.x),
+        vec3<f32>(unpack2x16unorm(projected.p1_xy) * screen_size, depths.y),
+        frustum,
+        page_idx,
+        page_desc,
+        fill_refs,
+        seg_ref,
+    );
+}
+
+@compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
+fn build_fine_pages_csr(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+) {
+    let page_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    let page_count = min(atomicLoad(&coarse_count_pages.tail), arrayLength(&fine_page_meta));
+    if page_idx >= page_count {
+        return;
+    }
+    let lane = local_id.x;
+    atomicStore(&csr_cell_counts[lane], 0u);
+    atomicStore(&csr_cell_cursors[lane], 0u);
+    if lane == 0u {
+        csr_page_ref_base = 0u;
+        csr_page_valid = 0u;
+    }
+    workgroupBarrier();
+
+    let page_desc = fine_page_meta[page_idx];
+    let frustum_id = frustum_for_coarse_tile(page_desc.coarse_tile_id);
+    if frustum_id == INVALID_PTR || page_idx >= arrayLength(&page_candidate_offsets) || page_idx >= arrayLength(&page_candidate_counts) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    let candidate_base = page_candidate_offsets[page_idx];
+    let candidate_count = atomicLoad(&page_candidate_counts[page_idx]);
+    let candidate_range_valid = candidate_base <= arrayLength(&page_candidates)
+        && candidate_count <= arrayLength(&page_candidates) - candidate_base;
+
+    if candidate_range_valid {
+        for (var candidate_local = lane; candidate_local < candidate_count; candidate_local += COARSE_COUNT_PAGE_SIZE) {
+            process_candidate_for_page(
+                page_candidates[candidate_base + candidate_local],
+                page_idx,
+                page_desc,
+                frustum_id,
+                frustum,
+                false,
+            );
+        }
+    }
+    workgroupBarrier();
+
+    let count = atomicLoad(&csr_cell_counts[lane]);
+    let subgroup_exclusive = subgroupExclusiveAdd(count);
+    let subgroup_inclusive = subgroupInclusiveAdd(count);
+    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+        page_scan_values[subgroup_id] = subgroup_inclusive;
+    }
+    workgroupBarrier();
+    if lane == 0u {
+        var accumulator = 0u;
+        for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i += 1u) {
+            let subtotal = page_scan_values[i];
+            page_scan_values[i] = accumulator;
+            accumulator += subtotal;
+        }
+        page_scan_total = accumulator;
+    }
+    workgroupBarrier();
+
+    let exclusive_offset = subgroup_exclusive + page_scan_values[subgroup_id];
+    let global_cell_idx = page_idx * COARSE_COUNT_PAGE_SIZE + lane;
+    if global_cell_idx < arrayLength(&fine_cell_offsets) {
+        fine_cell_offsets[global_cell_idx] = exclusive_offset;
+    }
+    if global_cell_idx < arrayLength(&coarse_count_pages.counts) {
+        atomicStore(&coarse_count_pages.counts[global_cell_idx], count);
+    }
+    if lane == 0u {
+        var flags = select(1u, 0u, candidate_range_valid);
+        var seg_ref_base = 0u;
+        if page_scan_total > 0u && flags == 0u {
+            seg_ref_base = atomicAdd(&fine_seg_refs.tail, page_scan_total);
+            if seg_ref_base + page_scan_total > arrayLength(&fine_seg_refs.refs) {
+                flags = 1u;
+            }
+        }
+        csr_page_ref_base = seg_ref_base;
+        csr_page_valid = select(1u, 0u, flags != 0u);
+        fine_page_meta[page_idx] = FinePageMeta(
+            seg_ref_base,
+            select(page_scan_total, 0u, flags != 0u),
+            0u,
+            0u,
+            page_desc.coarse_tile_id,
+            page_desc.coarse_z,
+            0u,
+            flags,
+        );
+    }
+    workgroupBarrier();
+
+    if csr_page_valid != 0u {
+        for (var candidate_local = lane; candidate_local < candidate_count; candidate_local += COARSE_COUNT_PAGE_SIZE) {
+            process_candidate_for_page(
+                page_candidates[candidate_base + candidate_local],
+                page_idx,
+                page_desc,
+                frustum_id,
+                frustum,
+                true,
+            );
+        }
+    }
 }
 
 fn raster_depth_key(page_table_idx: u32, fine_z: u32) -> u32 {
