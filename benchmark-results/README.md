@@ -42,6 +42,24 @@ The two-run average fill median improved from 2.848 ms to 2.438 ms (-14.4%). Ras
 improved by 1.8%, but raster mean and tail percentiles did not improve; the raster effect should
 therefore be treated as inconclusive rather than a demonstrated bandwidth win.
 
+## Allocated-page prefix dispatch
+
+The prefix pass now dispatches over compactly allocated count pages instead of the dense
+coarse-page table. Page allocation writes the reverse tile/depth mapping into `FinePageMeta`, and
+a separate 12-byte indirect-argument buffer keeps its storage write and indirect read in distinct
+WGPU usage scopes.
+
+| Revision | Prefix median (ms) | Dispatch setup median (ms) | Combined median (ms) |
+| --- | ---: | ---: | ---: |
+| Dense page table, run 1 | 0.185 | - | 0.185 |
+| Dense page table, run 2 | 0.185 | - | 0.185 |
+| Allocated pages, run 1 | 0.023 | 0.004 | 0.027 |
+| Allocated pages, run 2 | 0.024 | 0.004 | 0.028 |
+
+The two-run average combined median improved from 0.185 ms to 0.027 ms (-85.2%). The prefix
+kernel itself improved by 87.3%. This saves only about 0.158 ms on squirrel because its dense
+table was cheap, but it removes the sparse page-table probe that dominated the DSON trace.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -60,7 +78,10 @@ therefore be treated as inconclusive rather than a demonstrated bandwidth win.
 - `07-fill-ref-read-reduction-confirmation.json`: independent confirmation of the fill-pass win.
 - `08-fine-seg-ref-12b.json`: first measurement of the compact three-word reference.
 - `09-fine-seg-ref-12b-confirmation.json`: independent compact-reference confirmation.
+- `10-allocated-page-prefix.json`: prefixes only allocated count pages via indirect dispatch.
+- `11-allocated-page-prefix-confirmation.json`: independent allocated-page confirmation.
 
-The final implementation includes the hot-loop cleanup, subgroup tree reduction, and fill-pass
-read reduction, with compact fine-segment references. Percentiles are not paired samples, so small
-differences between unrelated stages should be treated as run-to-run noise.
+The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
+reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are
+not paired samples, so small differences between unrelated stages should be treated as run-to-run
+noise.

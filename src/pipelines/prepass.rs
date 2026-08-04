@@ -37,6 +37,7 @@ pub struct StrandPrepassResources {
     pub strand_instances: Option<Buffer>,
     // products
     pub indirect_args: Option<Buffer>,
+    pub prefix_indirect_args: Option<Buffer>,
     // queue-binning allocator buffers
     pub chunk_pool: Option<Buffer>,
     pub free_heads: Option<Buffer>,
@@ -91,6 +92,7 @@ pub struct StrandPrepassPipeline {
     pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
     pub mark_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
     pub allocate_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_prefix_dispatch_pipeline: Option<CachedComputePipelineId>,
     pub binning_pipeline: Option<CachedComputePipelineId>,
     pub prefix_fine_pages_pipeline: Option<CachedComputePipelineId>,
     pub fill_fine_seg_refs_pipeline: Option<CachedComputePipelineId>,
@@ -346,6 +348,7 @@ impl FromWorld for StrandPrepassPipeline {
             finalize_binning_pipeline: None,
             mark_coarse_count_pages_pipeline: None,
             allocate_coarse_count_pages_pipeline: None,
+            finalize_prefix_dispatch_pipeline: None,
             binning_pipeline: None,
             prefix_fine_pages_pipeline: None,
             fill_fine_seg_refs_pipeline: None,
@@ -369,7 +372,7 @@ pub fn create_prepass_bind_groups(
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
     request_runtime: &VirtualSurfaceRequestBitmapRuntime,
-) -> Result<(BindGroup, BindGroup, Vec<u32>), ()> {
+) -> Result<(BindGroup, BindGroup, BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
     let binning_queue = resources.binning_queue.as_ref().ok_or(())?;
@@ -377,6 +380,7 @@ pub fn create_prepass_bind_groups(
     let visible_geos_buffer = resources.visible_geos_buffer.as_ref().ok_or(())?;
     let geos_prefix_buffer = resources.geos_prefix_buffer.as_ref().ok_or(())?;
     let dispatch_args = resources.indirect_args.as_ref().ok_or(())?;
+    let prefix_dispatch_args = resources.prefix_indirect_args.as_ref().ok_or(())?;
     let frustum_table = resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
@@ -557,6 +561,14 @@ pub fn create_prepass_bind_groups(
                 resource: dispatch_args.as_entire_binding(),
             }],
         ),
+        device.create_bind_group(
+            Some("strand_prefix_indirect_args_bind_group"),
+            &pipeline.indirect_args_bind_group_layout,
+            &[BindGroupEntry {
+                binding: layouts::prepass::INDIRECT_ARGS,
+                resource: prefix_dispatch_args.as_entire_binding(),
+            }],
+        ),
         // Dynamic offsets order follows bind-group layout declaration order.
         vec![view_light_uniform_offset.offset, view_offsets.offset],
     ))
@@ -638,8 +650,10 @@ pub fn run_prepass(
     cull_settings: &crate::resources::StochasticCullSettings,
     bind_group: &BindGroup,
     indirect_args_bind_group: &BindGroup,
+    prefix_indirect_args_bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
+    prefix_indirect_args: &Buffer,
     coarse_depth_lut: &Buffer,
     coarse_count_page_table: &Buffer,
     coarse_count_pages: &Buffer,
@@ -708,6 +722,11 @@ pub fn run_prepass(
         warn!("Allocate coarse count pages pipeline id not ready yet");
         return;
     };
+    let Some(finalize_prefix_dispatch_pipeline_id) = pipeline.finalize_prefix_dispatch_pipeline
+    else {
+        warn!("Finalize prefix dispatch pipeline id not ready yet");
+        return;
+    };
     let Some(binning_pipeline_id) = pipeline.binning_pipeline else {
         warn!("Binning queue pipeline id not ready yet");
         return;
@@ -774,6 +793,12 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(allocate_coarse_count_pages_pipeline_id)
     else {
         warn!("Allocate coarse count pages pipeline not found");
+        return;
+    };
+    let Some(finalize_prefix_dispatch_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_prefix_dispatch_pipeline_id)
+    else {
+        warn!("Finalize prefix dispatch pipeline not found");
         return;
     };
     let Some(binning_pipeline) = pipeline_cache.get_compute_pipeline(binning_pipeline_id) else {
@@ -919,19 +944,29 @@ pub fn run_prepass(
         1,
     );
     span.end(&mut pass);
+    pass.set_pipeline(finalize_prefix_dispatch_pipeline);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        prefix_indirect_args_bind_group,
+        &[],
+    );
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_prefix_dispatch");
+    pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
+    // The next indirect dispatch must not have its argument buffer bound as storage.
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        indirect_args_bind_group,
+        &[],
+    );
     pass.set_pipeline(binning_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     let span = diagnostics.time_span(&mut pass, "strand_prepass/binning");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     span.end(&mut pass);
     pass.set_pipeline(prefix_fine_pages_pipeline);
-    pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
     let span = diagnostics.time_span(&mut pass, "strand_prepass/prefix_fine_pages");
-    pass.dispatch_workgroups(
-        coarse_count_page_table_capacity.min(65_535),
-        coarse_count_page_table_capacity.div_ceil(65_535),
-        1,
-    );
+    pass.dispatch_workgroups_indirect(prefix_indirect_args, 0);
     span.end(&mut pass);
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
@@ -995,6 +1030,7 @@ pub fn update_strand_prepass_pipeline(
     let finalize_binning_shader = shader_loader.load(prepass_shader_path.clone());
     let mark_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
     let allocate_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_prefix_dispatch_shader = shader_loader.load(prepass_shader_path.clone());
     let binning_shader = shader_loader.load(prepass_shader_path.clone());
     let prefix_fine_pages_shader = shader_loader.load(prepass_shader_path.clone());
     let fill_fine_seg_refs_shader = shader_loader.load(prepass_shader_path.clone());
@@ -1096,6 +1132,16 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(finalize_prefix_dispatch_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_prefix_dispatch_shader,
+        &allocator,
+        &dims,
+        "finalize_prefix_dispatch",
+        true,
+    ) else {
+        return;
+    };
     let Some(binning_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         binning_shader,
@@ -1166,6 +1212,7 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.mark_coarse_count_pages_pipeline = Some(mark_coarse_count_pages_pipeline_id);
     pipeline_res.allocate_coarse_count_pages_pipeline =
         Some(allocate_coarse_count_pages_pipeline_id);
+    pipeline_res.finalize_prefix_dispatch_pipeline = Some(finalize_prefix_dispatch_pipeline_id);
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     pipeline_res.prefix_fine_pages_pipeline = Some(prefix_fine_pages_pipeline_id);
     pipeline_res.fill_fine_seg_refs_pipeline = Some(fill_fine_seg_refs_pipeline_id);
@@ -1173,7 +1220,7 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.finalize_raster_dispatch_pipeline = Some(finalize_raster_dispatch_pipeline_id);
     pipeline_res.depth_reduce_pipeline = Some(depth_reduce_pipeline_id);
     debug!(
-        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?} finalize_raster_dispatch={:?}",
+        "Rebuilt strand prepass pipelines: broad={:?} broad_strand={:?} finalize={:?} fine={:?} coarse_interval={:?} depth_warp={:?} finalize_binning={:?} mark_pages={:?} allocate_pages={:?} finalize_prefix={:?} binning={:?} prefix_pages={:?} fill_refs={:?} emit_work={:?} finalize_raster_dispatch={:?}",
         broad_pipeline_id,
         broad_strand_pipeline_id,
         finalize_pipeline_id,
@@ -1183,6 +1230,7 @@ pub fn update_strand_prepass_pipeline(
         finalize_binning_pipeline_id,
         mark_coarse_count_pages_pipeline_id,
         allocate_coarse_count_pages_pipeline_id,
+        finalize_prefix_dispatch_pipeline_id,
         binning_pipeline_id,
         prefix_fine_pages_pipeline_id,
         fill_fine_seg_refs_pipeline_id,

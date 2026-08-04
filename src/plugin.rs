@@ -561,6 +561,7 @@ fn use_prepass_buffers(
         || prepass_resources.visible_geos_buffer.is_none()
         || prepass_resources.geos_prefix_buffer.is_none()
         || prepass_resources.indirect_args.is_none()
+        || prepass_resources.prefix_indirect_args.is_none()
         || prepass_resources.chunk_pool.is_none()
         || prepass_resources.free_heads.is_none()
         || prepass_resources.frustum_table.is_none()
@@ -748,6 +749,12 @@ fn use_prepass_buffers(
         }));
         prepass_resources.indirect_args = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_indirect_args"),
+            size: (3 * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.prefix_indirect_args = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prefix_indirect_args"),
             size: (3 * std::mem::size_of::<u32>()) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -965,6 +972,9 @@ fn use_prepass_buffers(
         render_queue.write_buffer(interval_refs, 0, bytemuck::cast_slice(&[0u32]));
     }
     if let Some(indirect) = &prepass_resources.indirect_args {
+        render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
+    }
+    if let Some(indirect) = &prepass_resources.prefix_indirect_args {
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
     }
     if let Some(free_heads) = &prepass_resources.free_heads {

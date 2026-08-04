@@ -78,20 +78,24 @@ pub fn work_preparation_pass(
     let Some(cluster_offsets_binding) = view_cluster_bindings.offsets_and_counts_binding() else {
         return;
     };
-    let Ok((prepass_bind_group, indirect_args_bind_group, dynamic_offsets)) =
-        create_prepass_bind_groups(
-            render_device,
-            prepass_pipeline,
-            &prepass_resources,
-            &view_binding,
-            &light_binding,
-            view_uniform_offset,
-            view_light_uniform_offset,
-            &cluster_indices_binding,
-            &cluster_offsets_binding,
-            &clusterable_objects,
-            request_runtime,
-        )
+    let Ok((
+        prepass_bind_group,
+        indirect_args_bind_group,
+        prefix_indirect_args_bind_group,
+        dynamic_offsets,
+    )) = create_prepass_bind_groups(
+        render_device,
+        prepass_pipeline,
+        &prepass_resources,
+        &view_binding,
+        &light_binding,
+        view_uniform_offset,
+        view_light_uniform_offset,
+        &cluster_indices_binding,
+        &cluster_offsets_binding,
+        &clusterable_objects,
+        request_runtime,
+    )
     else {
         warn!("Failed to create prepass bind groups.");
         return;
@@ -134,6 +138,9 @@ pub fn work_preparation_pass(
     let Some(indirect_args) = prepass_resources.indirect_args.as_ref() else {
         return;
     };
+    let Some(prefix_indirect_args) = prepass_resources.prefix_indirect_args.as_ref() else {
+        return;
+    };
     let Some(coarse_depth_lut) = prepass_resources.coarse_depth_lut.as_ref() else {
         return;
     };
@@ -159,8 +166,10 @@ pub fn work_preparation_pass(
         cull_settings,
         &prepass_bind_group,
         &indirect_args_bind_group,
+        &prefix_indirect_args_bind_group,
         &dynamic_offsets,
         indirect_args,
+        prefix_indirect_args,
         coarse_depth_lut,
         coarse_count_page_table,
         coarse_count_pages,

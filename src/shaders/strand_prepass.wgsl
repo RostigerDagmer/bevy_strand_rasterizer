@@ -1623,7 +1623,34 @@ fn allocate_coarse_count_pages(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&coarse_count_page_table[page_table_idx], 0u);
         return;
     }
+    // Keep the reverse mapping next to the compact page allocation. Prefixing can
+    // then iterate allocated pages instead of probing the sparse page table.
+    fine_page_meta[page_idx] = FinePageMeta(
+        0u,
+        0u,
+        0u,
+        0u,
+        page_table_idx / COARSE_DEPTH_SLICES,
+        page_table_idx % COARSE_DEPTH_SLICES,
+        0u,
+        0u,
+    );
     atomicStore(&coarse_count_page_table[page_table_idx], page_idx + 1u);
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn finalize_prefix_dispatch() {
+    let page_count = min(atomicLoad(&coarse_count_pages.tail), arrayLength(&fine_page_meta));
+    if page_count == 0u {
+        dispatch_args[0] = 0u;
+        dispatch_args[1] = 0u;
+        dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(page_count, MAX_DISPATCH_WORKGROUPS_PER_DIMENSION);
+    dispatch_args[0] = x;
+    dispatch_args[1] = ceil_div_u32(page_count, x);
+    dispatch_args[2] = 1u;
 }
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
@@ -1640,24 +1667,14 @@ fn prefix_fine_pages(
     @builtin(subgroup_invocation_id) subgroup_local_id: u32,
     @builtin(num_workgroups) num_workgroups: vec3<u32>,
 ) {
-    // TODO(perf): this still dispatches over the dense coarse_count_page_table,
-    // so many workgroups only load a page-table entry before returning. Store
-    // tile/coarse_z metadata when allocating count pages, then dispatch this
-    // pass over allocated page_idx directly, ideally from coarse_count_pages.tail
-    // via indirect args.
-    let page_table_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    let page_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
     let cell_idx = local_id.x;
-    if page_table_idx >= pc.num_elements || page_table_idx >= arrayLength(&coarse_count_page_table) {
+    // A single-row dispatch is exact. Only a two-dimensional dispatch can have
+    // padding in its final row, so keep the page-tail load out of the common path.
+    if num_workgroups.y > 1u && page_idx >= min(atomicLoad(&coarse_count_pages.tail), arrayLength(&fine_page_meta)) {
         return;
     }
-    let page_handle = atomicLoad(&coarse_count_page_table[page_table_idx]);
-    if page_handle == 0u || page_handle == MARKED_COUNT_PAGE {
-        return;
-    }
-    let page_idx = page_handle - 1u;
-    if page_idx >= arrayLength(&fine_page_meta) {
-        return;
-    }
+    let page_desc = fine_page_meta[page_idx];
 
     let count_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
     var count = 0u;
@@ -1713,8 +1730,8 @@ fn prefix_fine_pages(
             select(seg_ref_count, 0u, flags != 0u),
             0u,
             0u,
-            page_table_idx / COARSE_DEPTH_SLICES,
-            page_table_idx % COARSE_DEPTH_SLICES,
+            page_desc.coarse_tile_id,
+            page_desc.coarse_z,
             0u,
             flags,
         );
