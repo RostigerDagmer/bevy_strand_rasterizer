@@ -209,7 +209,7 @@ fn get_segment_material(meta_id: u32, material_id: u32, segment_ref: SegmentRef)
 }
 
 fn fine_seg_ref_material_idx(seg_ref: FineSegRef) -> u32 {
-    return seg_ref.packed_segment >> 16u;
+    return seg_ref.material_idx;
 }
 
 fn get_material_by_index(material_id: u32, material_idx: u32) -> StrandMaterial {
@@ -569,8 +569,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let instance = strand_instances[inst_id];
-                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -641,8 +640,7 @@ fn rasterize_strands(
                         continue;
                     }
                     let instance = strand_instances[inst_id];
-                    let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
-                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
+                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
                     let v0 = V[0];
                     let v1 = V[1];
                     if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
@@ -919,10 +917,9 @@ fn rasterize_strands(
                     let inst_id = seg_ref.inst_id;
                     if inst_id < arrayLength(&strand_instances) {
                         let instance = strand_instances[inst_id];
-                        let segment_ref = SegmentRef(seg_ref.strand_id, seg_ref.seg_id);
                         let layer = inst_id;
                         if layer < shading_layers {
-                            let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, segment_ref.segment_start_idx);
+                            let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
                             let v0_world = V[0];
                             let v1_world = V[1];
                             let p0_screen = world_to_screen_raw(v0_world, camera_clip_from_world, camera_viewport);
@@ -932,7 +929,7 @@ fn rasterize_strands(
                                 let min_radius = max(mat.min_radius_pixels, 1e-4);
                                 let max_radius = max(mat.max_radius_pixels, min_radius);
                                 let shading_capacity = shading_dims.x * shading_dims.y;
-                                let shade_idx0 = segment_ref.segment_start_idx;
+                                let shade_idx0 = seg_ref.seg_id;
                                 let shade_idx1 = min(shade_idx0 + 1u, shading_capacity - 1u);
                                 color_batch_valid[batch_lane] = 1u;
                                 color_batch_p0_xy[batch_lane] = p0_screen.xy;

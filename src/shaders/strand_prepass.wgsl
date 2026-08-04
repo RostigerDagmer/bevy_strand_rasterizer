@@ -1157,7 +1157,7 @@ fn fine_cell_idx(local_x: u32, local_y: u32, local_z: u32) -> u32 {
 }
 
 fn make_fine_seg_ref(task: BinningTask, meta_id: u32) -> FineSegRef {
-    var packed_segment = 0u;
+    var material_idx = 0u;
     if meta_id < arrayLength(&t_strand_metadata) {
         let meta_ptr = t_strand_metadata[meta_id];
         if is_valid_ptr(meta_ptr) {
@@ -1165,15 +1165,11 @@ fn make_fine_seg_ref(task: BinningTask, meta_id: u32) -> FineSegRef {
             let meta_count = meta_ptr.size / SIZEOF_METADATA;
             if task.chunk_id < meta_count {
                 let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + task.chunk_id];
-                if task.seg_idx >= strand_meta.offset {
-                    let seg_local = min(task.seg_idx - strand_meta.offset, 0xFFFFu);
-                    let material_idx = min(strand_meta.material_idx, 0xFFFFu);
-                    packed_segment = seg_local | (material_idx << 16u);
-                }
+                material_idx = strand_meta.material_idx;
             }
         }
     }
-    return FineSegRef(task.id_info, task.chunk_id, task.seg_idx, packed_segment);
+    return FineSegRef(task.id_info, task.seg_idx, material_idx);
 }
 
 fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, seg_ref: FineSegRef) {
@@ -1597,7 +1593,7 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
     );
     let p0 = vec3<f32>(p0_raw.xy, depth_key_for_frustum(p0_raw.z, frustum));
     let p1 = vec3<f32>(p1_raw.xy, depth_key_for_frustum(p1_raw.z, frustum));
-    var seg_ref = FineSegRef(task.id_info, task.chunk_id, task.seg_idx, 0u);
+    var seg_ref = FineSegRef(task.id_info, task.seg_idx, 0u);
     if fill_refs {
         seg_ref = make_fine_seg_ref(task, instance.meta_id);
     }

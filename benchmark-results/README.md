@@ -25,6 +25,23 @@ target/release/examples/strand_bench \
 | Remove redundant count read | 2.918 | 2.862 | 3.113 | 3.299 | -6.3% |
 | Confirmation run | 2.899 | 2.833 | 3.207 | 3.243 | -7.3% |
 
+## Fine-reference layout
+
+`FineSegRef` was reduced from four words (16 bytes) to three words (12 bytes) by removing the
+unused strand index and segment-local value. The remaining material index is stored as a full
+`u32`, so the compact layout introduces no new range restriction.
+
+| Revision | Fill median (ms) | Raster median (ms) |
+| --- | ---: | ---: |
+| 16-byte reference, run 1 | 2.862 | 7.061 |
+| 16-byte reference, run 2 | 2.833 | 7.226 |
+| 12-byte reference, run 1 | 2.427 | 7.018 |
+| 12-byte reference, run 2 | 2.448 | 7.016 |
+
+The two-run average fill median improved from 2.848 ms to 2.438 ms (-14.4%). Raster median
+improved by 1.8%, but raster mean and tail percentiles did not improve; the raster effect should
+therefore be treated as inconclusive rather than a demonstrated bandwidth win.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -41,7 +58,9 @@ target/release/examples/strand_bench \
 - `06-fill-ref-read-reduction.json`: also removes the redundant atomic cell-count load and cursor
   bound check. The preceding deterministic count traversal reserves exactly this range.
 - `07-fill-ref-read-reduction-confirmation.json`: independent confirmation of the fill-pass win.
+- `08-fine-seg-ref-12b.json`: first measurement of the compact three-word reference.
+- `09-fine-seg-ref-12b-confirmation.json`: independent compact-reference confirmation.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, and fill-pass
-read reduction. Percentiles are not paired samples, so small differences between unrelated stages
-should be treated as run-to-run noise.
+read reduction, with compact fine-segment references. Percentiles are not paired samples, so small
+differences between unrelated stages should be treated as run-to-run noise.

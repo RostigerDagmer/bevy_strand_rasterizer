@@ -87,9 +87,8 @@ struct RasterTileRun {
 
 struct FineSegRef {
     inst_id: u32,
-    strand_id: u32,
     seg_id: u32,
-    packed_segment: u32,
+    material_idx: u32,
 }
 
 struct FinePageMeta {

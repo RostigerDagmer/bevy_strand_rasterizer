@@ -104,11 +104,11 @@ pub struct RasterTileRun {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FineSegRef {
     pub inst_id: u32,
-    pub strand_id: u32,
     pub seg_id: u32,
-    /// Low 16 bits: segment-local index inside strand. High 16 bits: strand material index.
-    pub packed_segment: u32,
+    pub material_idx: u32,
 }
+
+const _: () = assert!(std::mem::size_of::<FineSegRef>() == 12);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
