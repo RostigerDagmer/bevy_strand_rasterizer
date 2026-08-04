@@ -3,6 +3,7 @@ use bevy::{
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
@@ -474,7 +475,10 @@ pub fn create_strand_shadow_bind_group(
     let froxel_bucket_heads = prepass_resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = prepass_resources.chunk_pool.as_ref().ok_or(())?;
     let raster_work_queue = prepass_resources.raster_work_queue.as_ref().ok_or(())?;
-    let raster_tile_run_queue = prepass_resources.raster_tile_run_queue.as_ref().ok_or(())?;
+    let raster_tile_run_queue = prepass_resources
+        .shadow_raster_tile_run_queue
+        .as_ref()
+        .ok_or(())?;
     let fine_seg_refs = prepass_resources.fine_seg_refs.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
     let shadow_dom_surface_ids = prepass_resources
@@ -656,6 +660,8 @@ pub fn run_shadow_pass(
     bind_group: &BindGroup,
     offsets: &[u32],
 ) {
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let Some(pipeline_id) = pipeline.shadow_pipeline else {
         warn!("Shadow pipeline id not ready");
         return;
@@ -714,5 +720,7 @@ pub fn run_shadow_pass(
     };
     pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
 
+    let span = diagnostics.time_span(&mut pass, "strand_shadow_rasterizer/rasterize");
     pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
+    span.end(&mut pass);
 }

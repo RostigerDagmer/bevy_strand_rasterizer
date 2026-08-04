@@ -122,8 +122,9 @@ pub fn strand_shadow_rasterizer_pass(
     ) else {
         return;
     };
-    let Some(raster_tile_run_dispatch_args) =
-        prepass_resources.raster_tile_run_dispatch_args.as_ref()
+    let Some(raster_tile_run_dispatch_args) = prepass_resources
+        .shadow_raster_tile_run_dispatch_args
+        .as_ref()
     else {
         return;
     };

@@ -58,8 +58,10 @@ pub struct StrandPrepassResources {
     pub frustum_table: Option<Buffer>,
     pub froxel_bucket_heads: Option<Buffer>,
     pub raster_work_queue: Option<Buffer>,
-    pub raster_tile_run_queue: Option<Buffer>,
-    pub raster_tile_run_dispatch_args: Option<Buffer>,
+    pub camera_raster_tile_run_queue: Option<Buffer>,
+    pub camera_raster_tile_run_dispatch_args: Option<Buffer>,
+    pub shadow_raster_tile_run_queue: Option<Buffer>,
+    pub shadow_raster_tile_run_dispatch_args: Option<Buffer>,
     pub coarse_depth_lut: Option<Buffer>,
     pub coarse_range_queue: Option<Buffer>,
     pub coarse_interval_heads: Option<Buffer>,
@@ -84,7 +86,8 @@ pub struct StrandPrepassResources {
     pub frustum_count: u32,
     pub froxel_bucket_capacity: u32,
     pub raster_work_capacity: u32,
-    pub raster_tile_run_capacity: u32,
+    pub camera_raster_tile_run_capacity: u32,
+    pub shadow_raster_tile_run_capacity: u32,
     pub coarse_depth_tile_capacity: u32,
     pub coarse_range_capacity: u32,
     pub coarse_interval_ref_capacity: u32,
@@ -177,8 +180,11 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
                 Self::storage_entry(layouts::prepass::FREE_HEADS, false),
                 Self::storage_entry(layouts::prepass::RASTER_WORK_QUEUE, false),
-                Self::storage_entry(layouts::prepass::RASTER_TILE_RUN_QUEUE, false),
-                Self::storage_entry(layouts::prepass::RASTER_TILE_RUN_DISPATCH_ARGS, false),
+                Self::storage_entry(layouts::prepass::CAMERA_RASTER_TILE_RUN_QUEUE, false),
+                Self::storage_entry(
+                    layouts::prepass::CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS,
+                    false,
+                ),
                 Self::storage_entry(layouts::prepass::COARSE_DEPTH_LUT, false),
                 Self::storage_entry(layouts::prepass::COARSE_RANGE_QUEUE, false),
                 Self::storage_entry(layouts::prepass::COARSE_INTERVAL_HEADS, false),
@@ -204,6 +210,11 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::PAGE_CANDIDATES, false),
                 Self::storage_entry(layouts::prepass::VIRTUAL_PAGE_CANDIDATE_COUNTS, false),
                 Self::storage_entry(layouts::prepass::FRUSTUM_INSTANCE_KEEP_PROBABILITIES, false),
+                Self::storage_entry(layouts::prepass::SHADOW_RASTER_TILE_RUN_QUEUE, false),
+                Self::storage_entry(
+                    layouts::prepass::SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS,
+                    false,
+                ),
             ],
         )
     }
@@ -435,9 +446,16 @@ pub fn create_prepass_bind_groups(
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
     let free_heads = resources.free_heads.as_ref().ok_or(())?;
     let raster_work_queue = resources.raster_work_queue.as_ref().ok_or(())?;
-    let raster_tile_run_queue = resources.raster_tile_run_queue.as_ref().ok_or(())?;
-    let raster_tile_run_dispatch_args =
-        resources.raster_tile_run_dispatch_args.as_ref().ok_or(())?;
+    let camera_raster_tile_run_queue = resources.camera_raster_tile_run_queue.as_ref().ok_or(())?;
+    let camera_raster_tile_run_dispatch_args = resources
+        .camera_raster_tile_run_dispatch_args
+        .as_ref()
+        .ok_or(())?;
+    let shadow_raster_tile_run_queue = resources.shadow_raster_tile_run_queue.as_ref().ok_or(())?;
+    let shadow_raster_tile_run_dispatch_args = resources
+        .shadow_raster_tile_run_dispatch_args
+        .as_ref()
+        .ok_or(())?;
     let coarse_depth_lut = resources.coarse_depth_lut.as_ref().ok_or(())?;
     let coarse_range_queue = resources.coarse_range_queue.as_ref().ok_or(())?;
     let coarse_interval_heads = resources.coarse_interval_heads.as_ref().ok_or(())?;
@@ -521,12 +539,20 @@ pub fn create_prepass_bind_groups(
                     resource: raster_work_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::prepass::RASTER_TILE_RUN_QUEUE,
-                    resource: raster_tile_run_queue.as_entire_binding(),
+                    binding: layouts::prepass::CAMERA_RASTER_TILE_RUN_QUEUE,
+                    resource: camera_raster_tile_run_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: layouts::prepass::RASTER_TILE_RUN_DISPATCH_ARGS,
-                    resource: raster_tile_run_dispatch_args.as_entire_binding(),
+                    binding: layouts::prepass::CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS,
+                    resource: camera_raster_tile_run_dispatch_args.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::SHADOW_RASTER_TILE_RUN_QUEUE,
+                    resource: shadow_raster_tile_run_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS,
+                    resource: shadow_raster_tile_run_dispatch_args.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::COARSE_DEPTH_LUT,

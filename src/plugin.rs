@@ -345,6 +345,8 @@ fn use_prepass_buffers(
     let mut bucket_base = 0u32;
     let mut coarse_depth_tile_base = 0u32;
     let mut fine_depth_tile_base = 0u32;
+    let mut camera_fine_depth_tile_count = 0u32;
+    let mut shadow_fine_depth_tile_count = 0u32;
     let light_entities: HashSet<Entity> = light_frusta_query
         .iter()
         .map(|(entity, _)| entity)
@@ -422,6 +424,13 @@ fn use_prepass_buffers(
         shadow_dom_surface_ids.push(dom_surface_ids);
         let (fine_tiles_x, fine_tiles_y, bucket_count) = cfg.get_num_tiles();
         let fine_depth_tile_count = fine_tiles_x.saturating_mul(fine_tiles_y);
+        if is_light {
+            shadow_fine_depth_tile_count =
+                shadow_fine_depth_tile_count.saturating_add(fine_depth_tile_count);
+        } else {
+            camera_fine_depth_tile_count =
+                camera_fine_depth_tile_count.saturating_add(fine_depth_tile_count);
+        }
         let coarse_tiles_x = fine_tiles_x.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
         let coarse_tiles_y = fine_tiles_y.div_ceil(COARSE_FINE_TILE_EXTENT).max(1);
         let coarse_depth_tile_count = coarse_tiles_x.saturating_mul(coarse_tiles_y);
@@ -469,6 +478,7 @@ fn use_prepass_buffers(
         bucket_base = 1;
         coarse_depth_tile_base = 1;
         fine_depth_tile_base = 1;
+        camera_fine_depth_tile_count = 1;
     }
     let frustum_task_multiplier = (frustum_descs.len() as u32).max(1);
     let requested_binning_capacity = base_binning_capacity
@@ -547,13 +557,18 @@ fn use_prepass_buffers(
         std::mem::size_of::<RasterWorkItem>() as u64,
         max_storage_binding_bytes,
     );
-    let requested_raster_tile_run_capacity = coarse_depth_tile_capacity
-        .saturating_mul(COARSE_FINE_TILE_EXTENT)
-        .saturating_mul(COARSE_FINE_TILE_EXTENT)
-        .next_power_of_two()
-        .max(1024);
-    let raster_tile_run_capacity = cap_storage_capacity(
-        requested_raster_tile_run_capacity,
+    let requested_camera_raster_tile_run_capacity =
+        camera_fine_depth_tile_count.next_power_of_two().max(1024);
+    let camera_raster_tile_run_capacity = cap_storage_capacity(
+        requested_camera_raster_tile_run_capacity,
+        queue_header_bytes,
+        std::mem::size_of::<RasterTileRun>() as u64,
+        max_storage_binding_bytes,
+    );
+    let requested_shadow_raster_tile_run_capacity =
+        shadow_fine_depth_tile_count.next_power_of_two().max(1024);
+    let shadow_raster_tile_run_capacity = cap_storage_capacity(
+        requested_shadow_raster_tile_run_capacity,
         queue_header_bytes,
         std::mem::size_of::<RasterTileRun>() as u64,
         max_storage_binding_bytes,
@@ -582,8 +597,14 @@ fn use_prepass_buffers(
         || prepass_resources.frustum_table.is_none()
         || prepass_resources.froxel_bucket_heads.is_none()
         || prepass_resources.raster_work_queue.is_none()
-        || prepass_resources.raster_tile_run_queue.is_none()
-        || prepass_resources.raster_tile_run_dispatch_args.is_none()
+        || prepass_resources.camera_raster_tile_run_queue.is_none()
+        || prepass_resources
+            .camera_raster_tile_run_dispatch_args
+            .is_none()
+        || prepass_resources.shadow_raster_tile_run_queue.is_none()
+        || prepass_resources
+            .shadow_raster_tile_run_dispatch_args
+            .is_none()
         || prepass_resources.coarse_depth_lut.is_none()
         || prepass_resources.coarse_range_queue.is_none()
         || prepass_resources.coarse_interval_heads.is_none()
@@ -605,7 +626,8 @@ fn use_prepass_buffers(
         || prepass_resources.frustum_capacity < frustum_capacity
         || prepass_resources.froxel_bucket_capacity < froxel_bucket_capacity
         || prepass_resources.raster_work_capacity < raster_work_capacity
-        || prepass_resources.raster_tile_run_capacity < raster_tile_run_capacity
+        || prepass_resources.camera_raster_tile_run_capacity < camera_raster_tile_run_capacity
+        || prepass_resources.shadow_raster_tile_run_capacity < shadow_raster_tile_run_capacity
         || prepass_resources.coarse_depth_tile_capacity < coarse_depth_tile_capacity
         || prepass_resources.coarse_range_capacity < coarse_range_capacity
         || prepass_resources.coarse_interval_ref_capacity < coarse_interval_ref_capacity
@@ -664,9 +686,15 @@ fn use_prepass_buffers(
             max_storage_binding_bytes,
         );
         log_storage_capacity_cap(
-            "raster tile run queue",
-            requested_raster_tile_run_capacity,
-            raster_tile_run_capacity,
+            "camera raster tile run queue",
+            requested_camera_raster_tile_run_capacity,
+            camera_raster_tile_run_capacity,
+            max_storage_binding_bytes,
+        );
+        log_storage_capacity_cap(
+            "shadow raster tile run queue",
+            requested_shadow_raster_tile_run_capacity,
+            shadow_raster_tile_run_capacity,
             max_storage_binding_bytes,
         );
 
@@ -708,8 +736,14 @@ fn use_prepass_buffers(
             (froxel_bucket_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let raster_work_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (raster_work_capacity as u64) * (std::mem::size_of::<RasterWorkItem>() as u64);
-        let raster_tile_run_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
-            + (raster_tile_run_capacity as u64) * (std::mem::size_of::<RasterTileRun>() as u64);
+        let camera_raster_tile_run_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>())
+            as u64
+            + (camera_raster_tile_run_capacity as u64)
+                * (std::mem::size_of::<RasterTileRun>() as u64);
+        let shadow_raster_tile_run_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>())
+            as u64
+            + (shadow_raster_tile_run_capacity as u64)
+                * (std::mem::size_of::<RasterTileRun>() as u64);
         let raster_tile_run_dispatch_args_bytes = (3 * std::mem::size_of::<u32>()) as u64;
         let coarse_depth_lut_bytes = (coarse_depth_tile_capacity as u64)
             * (COARSE_DEPTH_SLICES as u64)
@@ -885,15 +919,30 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        prepass_resources.raster_tile_run_queue = Some(device.create_buffer(&BufferDescriptor {
-            label: Some("strand_raster_tile_run_queue"),
-            size: raster_tile_run_queue_bytes,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        prepass_resources.raster_tile_run_dispatch_args =
+        prepass_resources.camera_raster_tile_run_queue =
             Some(device.create_buffer(&BufferDescriptor {
-                label: Some("strand_raster_tile_run_dispatch_args"),
+                label: Some("strand_camera_raster_tile_run_queue"),
+                size: camera_raster_tile_run_queue_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.shadow_raster_tile_run_queue =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_shadow_raster_tile_run_queue"),
+                size: shadow_raster_tile_run_queue_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.camera_raster_tile_run_dispatch_args =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_camera_raster_tile_run_dispatch_args"),
+                size: raster_tile_run_dispatch_args_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.shadow_raster_tile_run_dispatch_args =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_shadow_raster_tile_run_dispatch_args"),
                 size: raster_tile_run_dispatch_args_bytes,
                 usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -980,7 +1029,8 @@ fn use_prepass_buffers(
         prepass_resources.frustum_count = frustum_descs.len() as u32;
         prepass_resources.froxel_bucket_capacity = froxel_bucket_capacity;
         prepass_resources.raster_work_capacity = raster_work_capacity;
-        prepass_resources.raster_tile_run_capacity = raster_tile_run_capacity;
+        prepass_resources.camera_raster_tile_run_capacity = camera_raster_tile_run_capacity;
+        prepass_resources.shadow_raster_tile_run_capacity = shadow_raster_tile_run_capacity;
         prepass_resources.coarse_depth_tile_capacity = coarse_depth_tile_capacity;
         prepass_resources.coarse_range_capacity = coarse_range_capacity;
         prepass_resources.coarse_interval_ref_capacity = coarse_interval_ref_capacity;
@@ -990,7 +1040,7 @@ fn use_prepass_buffers(
         prepass_resources.opaque_fine_depth_tile_capacity = opaque_fine_depth_tile_capacity;
 
         info!(
-            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={} raster_tile_run_cap={}",
+            "Allocated prepass buffers: strands={} segment_budget={} instances={} frusta={} prepass_cap={} binning_cap={} bucket_cap={} coarse_depth_tiles={} coarse_ranges={} coarse_interval_refs={} coarse_count_pages={} fine_seg_refs={} raster_work_cap={} camera_raster_tile_run_cap={} shadow_raster_tile_run_cap={}",
             total_strands,
             total_segment_budget,
             instance_count,
@@ -1004,7 +1054,8 @@ fn use_prepass_buffers(
             coarse_count_page_capacity,
             fine_seg_ref_capacity,
             raster_work_capacity,
-            raster_tile_run_capacity,
+            camera_raster_tile_run_capacity,
+            shadow_raster_tile_run_capacity,
         );
     }
     if needs_shading_realloc {
@@ -1044,7 +1095,10 @@ fn use_prepass_buffers(
     if let Some(queue_buf) = &prepass_resources.raster_work_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
-    if let Some(queue_buf) = &prepass_resources.raster_tile_run_queue {
+    if let Some(queue_buf) = &prepass_resources.camera_raster_tile_run_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
+    if let Some(queue_buf) = &prepass_resources.shadow_raster_tile_run_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
     if let Some(seg_refs) = &prepass_resources.fine_seg_refs {

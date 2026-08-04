@@ -40,8 +40,8 @@ pub mod prepass {
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 43;
     pub const BROAD_INSTANCE_META: u32 = 44;
     pub const OPAQUE_FINE_DEPTH_TILES: u32 = 45;
-    pub const RASTER_TILE_RUN_QUEUE: u32 = 46;
-    pub const RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 47;
+    pub const CAMERA_RASTER_TILE_RUN_QUEUE: u32 = 46;
+    pub const CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 47;
     pub const TELEMETRY: u32 = 48;
     pub const PROJECTED_SEGMENTS: u32 = 49;
     pub const PAGE_CANDIDATE_COUNTS: u32 = 50;
@@ -50,6 +50,8 @@ pub mod prepass {
     pub const PAGE_CANDIDATES: u32 = 53;
     pub const VIRTUAL_PAGE_CANDIDATE_COUNTS: u32 = 54;
     pub const FRUSTUM_INSTANCE_KEEP_PROBABILITIES: u32 = 55;
+    pub const SHADOW_RASTER_TILE_RUN_QUEUE: u32 = 56;
+    pub const SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 57;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -94,10 +96,13 @@ pub mod prepass {
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("BROAD_INSTANCE_META".into(), BROAD_INSTANCE_META),
             ShaderDefVal::UInt("OPAQUE_FINE_DEPTH_TILES".into(), OPAQUE_FINE_DEPTH_TILES),
-            ShaderDefVal::UInt("RASTER_TILE_RUN_QUEUE".into(), RASTER_TILE_RUN_QUEUE),
             ShaderDefVal::UInt(
-                "RASTER_TILE_RUN_DISPATCH_ARGS".into(),
-                RASTER_TILE_RUN_DISPATCH_ARGS,
+                "CAMERA_RASTER_TILE_RUN_QUEUE".into(),
+                CAMERA_RASTER_TILE_RUN_QUEUE,
+            ),
+            ShaderDefVal::UInt(
+                "CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS".into(),
+                CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS,
             ),
             ShaderDefVal::UInt("TELEMETRY".into(), TELEMETRY),
             ShaderDefVal::UInt("PROJECTED_SEGMENTS".into(), PROJECTED_SEGMENTS),
@@ -112,6 +117,14 @@ pub mod prepass {
             ShaderDefVal::UInt(
                 "FRUSTUM_INSTANCE_KEEP_PROBABILITIES".into(),
                 FRUSTUM_INSTANCE_KEEP_PROBABILITIES,
+            ),
+            ShaderDefVal::UInt(
+                "SHADOW_RASTER_TILE_RUN_QUEUE".into(),
+                SHADOW_RASTER_TILE_RUN_QUEUE,
+            ),
+            ShaderDefVal::UInt(
+                "SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS".into(),
+                SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS,
             ),
         ]
     }

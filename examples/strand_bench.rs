@@ -716,7 +716,8 @@ fn collect_benchmark_samples(
     for diagnostic in diagnostics.iter() {
         let path = diagnostic.path().as_str();
         if (path.starts_with("render/strand_prepass/")
-            || path.starts_with("render/strand_rasterizer/"))
+            || path.starts_with("render/strand_rasterizer/")
+            || path.starts_with("render/strand_shadow_rasterizer/"))
             && path.ends_with("/elapsed_gpu")
             && let Some(value) = diagnostic.value()
         {

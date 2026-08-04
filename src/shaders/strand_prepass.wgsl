@@ -216,8 +216,10 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{CHUNK_POOL}) var<storage, read_write> chunk_pool_words: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{FREE_HEADS}) var<storage, read_write> free_heads: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{RASTER_WORK_QUEUE}) var<storage, read_write> raster_work_queue: RasterWorkQueue;
-@group(#{PREPASS_GROUP}) @binding(#{RASTER_TILE_RUN_QUEUE}) var<storage, read_write> raster_tile_run_queue: RasterTileRunQueue;
-@group(#{PREPASS_GROUP}) @binding(#{RASTER_TILE_RUN_DISPATCH_ARGS}) var<storage, read_write> raster_tile_run_dispatch_args: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{CAMERA_RASTER_TILE_RUN_QUEUE}) var<storage, read_write> camera_raster_tile_run_queue: RasterTileRunQueue;
+@group(#{PREPASS_GROUP}) @binding(#{CAMERA_RASTER_TILE_RUN_DISPATCH_ARGS}) var<storage, read_write> camera_raster_tile_run_dispatch_args: array<u32>;
+@group(#{PREPASS_GROUP}) @binding(#{SHADOW_RASTER_TILE_RUN_QUEUE}) var<storage, read_write> shadow_raster_tile_run_queue: RasterTileRunQueue;
+@group(#{PREPASS_GROUP}) @binding(#{SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS}) var<storage, read_write> shadow_raster_tile_run_dispatch_args: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_DEPTH_LUT}) var<storage, read_write> coarse_depth_lut: array<CoarseDepthLutEntry>;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_RANGE_QUEUE}) var<storage, read_write> coarse_range_queue: CoarseAssetRangeQueue;
 @group(#{PREPASS_GROUP}) @binding(#{COARSE_INTERVAL_HEADS}) var<storage, read_write> coarse_interval_heads: array<atomic<u32>>;
@@ -2573,9 +2575,18 @@ fn emit_raster_work(
         tile_run_idx = INVALID_PTR;
         tile_run_work_base = INVALID_PTR;
         if work_acc > 0u {
-            let run_idx = atomicAdd(&raster_tile_run_queue.tail, 1u);
-            tile_run_idx = run_idx;
-            if run_idx < arrayLength(&raster_tile_run_queue.items) {
+            if frustum.kind == 1u {
+                let run_idx = atomicAdd(&shadow_raster_tile_run_queue.tail, 1u);
+                if run_idx < arrayLength(&shadow_raster_tile_run_queue.items) {
+                    tile_run_idx = run_idx;
+                }
+            } else {
+                let run_idx = atomicAdd(&camera_raster_tile_run_queue.tail, 1u);
+                if run_idx < arrayLength(&camera_raster_tile_run_queue.items) {
+                    tile_run_idx = run_idx;
+                }
+            }
+            if tile_run_idx != INVALID_PTR {
                 tile_run_work_base = atomicAdd(&raster_work_queue.tail, work_acc);
                 request_shadow_dom_pages(frustum_id, frustum, fine_x, fine_y);
             }
@@ -2601,8 +2612,8 @@ fn emit_raster_work(
     }
     workgroupBarrier();
 
-    if cell_lane == 0u && tile_run_idx != INVALID_PTR && tile_run_idx < arrayLength(&raster_tile_run_queue.items) {
-        raster_tile_run_queue.items[tile_run_idx] = RasterTileRun(
+    if cell_lane == 0u && tile_run_idx != INVALID_PTR {
+        let run = RasterTileRun(
             tile_run_work_base,
             tile_run_work_count,
             frustum_id,
@@ -2612,6 +2623,11 @@ fn emit_raster_work(
             0u,
             0u,
         );
+        if frustum.kind == 1u {
+            shadow_raster_tile_run_queue.items[tile_run_idx] = run;
+        } else {
+            camera_raster_tile_run_queue.items[tile_run_idx] = run;
+        }
         frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_RASTER_RUNS, 1u);
         frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_RASTER_LOAD, tile_run_load_score);
         frustum_telemetry_max(frustum_id, FRUSTUM_TELEMETRY_MAX_RASTER_LOAD, tile_run_load_score);
@@ -2620,18 +2636,27 @@ fn emit_raster_work(
 
 @compute @workgroup_size(1, 1, 1)
 fn finalize_raster_dispatch() {
-    let run_count = min(atomicLoad(&raster_tile_run_queue.tail), arrayLength(&raster_tile_run_queue.items));
-    if arrayLength(&raster_tile_run_dispatch_args) < 3u {
-        return;
+    let camera_run_count = min(atomicLoad(&camera_raster_tile_run_queue.tail), arrayLength(&camera_raster_tile_run_queue.items));
+    if camera_run_count == 0u {
+        camera_raster_tile_run_dispatch_args[0] = 0u;
+        camera_raster_tile_run_dispatch_args[1] = 0u;
+        camera_raster_tile_run_dispatch_args[2] = 0u;
+    } else {
+        let x = min(camera_run_count, 65535u);
+        camera_raster_tile_run_dispatch_args[0] = x;
+        camera_raster_tile_run_dispatch_args[1] = ceil_div_u32(camera_run_count, x);
+        camera_raster_tile_run_dispatch_args[2] = 1u;
     }
-    if run_count == 0u {
-        raster_tile_run_dispatch_args[0] = 0u;
-        raster_tile_run_dispatch_args[1] = 0u;
-        raster_tile_run_dispatch_args[2] = 0u;
-        return;
+
+    let shadow_run_count = min(atomicLoad(&shadow_raster_tile_run_queue.tail), arrayLength(&shadow_raster_tile_run_queue.items));
+    if shadow_run_count == 0u {
+        shadow_raster_tile_run_dispatch_args[0] = 0u;
+        shadow_raster_tile_run_dispatch_args[1] = 0u;
+        shadow_raster_tile_run_dispatch_args[2] = 0u;
+    } else {
+        let x = min(shadow_run_count, 65535u);
+        shadow_raster_tile_run_dispatch_args[0] = x;
+        shadow_raster_tile_run_dispatch_args[1] = ceil_div_u32(shadow_run_count, x);
+        shadow_raster_tile_run_dispatch_args[2] = 1u;
     }
-    let x = min(run_count, 65535u);
-    raster_tile_run_dispatch_args[0] = x;
-    raster_tile_run_dispatch_args[1] = ceil_div_u32(run_count, x);
-    raster_tile_run_dispatch_args[2] = 1u;
 }
