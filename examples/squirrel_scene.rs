@@ -133,7 +133,7 @@ fn setup(
 
     commands.spawn((
         Name::new("RedSquirrel_Winter_1 base geometry"),
-        SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(SQUIRREL_GLTF))),
+        WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(SQUIRREL_GLTF))),
         squirrel_world_transform(),
         GlobalTransform::default(),
     ));

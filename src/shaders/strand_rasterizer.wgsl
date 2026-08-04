@@ -42,7 +42,7 @@ const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const DEBUG_FORCE_SINGLE_LIGHT: bool = false;
 const DEBUG_EXHAUSTIVE_SHADOW_Z0_SEARCH: bool = false;
 const DEBUG_DISABLE_COLOR_OPACITY_EARLY_OUT: bool = false;
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 
 struct FrustumDesc {
     screen_width: u32,

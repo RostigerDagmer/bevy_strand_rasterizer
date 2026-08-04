@@ -23,7 +23,7 @@ impl Plugin for FpsDisplayPlugin {
 
 fn setup_fps_ui_strict(mut commands: Commands) {
     let font = TextFont {
-        font_size: 10.0,
+        font_size: FontSize::Px(10.0),
         ..Default::default()
     };
 

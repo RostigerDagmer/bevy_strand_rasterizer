@@ -1,19 +1,12 @@
 use bevy::{
     core_pipeline::FullscreenShader,
     prelude::*,
-    render::{
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
-        render_resource::{
-            BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-            BindingType, BlendState, BufferBindingType, BufferInitDescriptor,
-            CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, LoadOp,
-            MultisampleState, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
-            RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType,
-            TextureViewDimension,
-        },
-        renderer::RenderContext,
-        view::ViewTarget,
+    render::render_resource::{
+        BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState,
+        BufferBindingType, CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState,
+        MultisampleState, PipelineCache, PrimitiveState, RenderPipelineDescriptor, Sampler,
+        SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, TextureFormat,
+        TextureSampleType, TextureViewDimension,
     },
 };
 
@@ -142,7 +135,7 @@ impl FromWorld for TileDebugPipeline {
                 shader_defs: layouts::tile_debug::shader_defs(),
                 entry_point: Some("fragment".into()),
                 targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::bevy_default(),
+                    format: TextureFormat::Rgba8UnormSrgb,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
@@ -150,7 +143,7 @@ impl FromWorld for TileDebugPipeline {
             primitive: PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState::default(),
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             zero_initialize_workgroup_memory: false,
         });
 

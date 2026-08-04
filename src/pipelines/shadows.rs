@@ -9,9 +9,9 @@ use bevy::{
             CachedComputePipelineId, CachedRenderPipelineId, CompareFunction,
             ComputePassDescriptor, ComputePipelineDescriptor, DepthBiasState, DepthStencilState,
             FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState,
-            PushConstantRange, RenderPassDepthStencilAttachment, RenderPassDescriptor,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, StencilState, StoreOp,
-            TextureSampleType, TextureView, TextureViewDimension, VertexState,
+            RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+            ShaderStages, ShaderType, StencilState, StoreOp, TextureSampleType, TextureView,
+            TextureViewDimension, VertexState,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
@@ -417,10 +417,7 @@ pub fn update_strand_shadow_pipeline(
             layout,
             shader: rasterize_shader,
             shader_defs: cdefs,
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            immediate_size: std::mem::size_of::<PushConstants>() as u32,
             entry_point: Some("rasterize_strands".into()),
             zero_initialize_workgroup_memory: false,
         },
@@ -445,13 +442,13 @@ pub fn update_strand_shadow_pipeline(
             primitive: PrimitiveState::default(),
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::Always,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::Always),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
             multisample: MultisampleState::default(),
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             zero_initialize_workgroup_memory: false,
         },
     ));
@@ -623,6 +620,7 @@ pub fn run_shadow_stampback_pass(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     pass.set_render_pipeline(stamp_pipeline);
     pass.set_bind_group(
@@ -714,7 +712,7 @@ pub fn run_shadow_pass(
         frustum_count,
         ..Default::default()
     };
-    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
 
     pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
 }

@@ -15,8 +15,7 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, IntoBinding,
-            PipelineCache, PushConstantRange, ShaderStages, TextureSampleType,
-            TextureViewDimension,
+            PipelineCache, ShaderStages, TextureSampleType, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -81,6 +80,7 @@ pub struct StrandPrepassResources {
 #[derive(Resource)]
 pub struct StrandPrepassPipeline {
     pub bind_group_layout: BindGroupLayout,
+    pub indirect_args_bind_group_layout: BindGroupLayout,
     pub broad_pipeline: Option<CachedComputePipelineId>,
     pub broad_strand_pipeline: Option<CachedComputePipelineId>,
     pub finalize_pipeline: Option<CachedComputePipelineId>,
@@ -140,7 +140,6 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::VISIBLE_FLAGS, false),
                 Self::storage_entry(layouts::prepass::VISIBLE_GEO, false),
                 Self::storage_entry(layouts::prepass::GEO_PREFIX, false),
-                Self::storage_entry(layouts::prepass::INDIRECT_BUFFER, false),
                 Self::storage_entry(layouts::prepass::FRUSTUM_TABLE, true),
                 Self::storage_entry(layouts::prepass::FROXEL_BUCKET_HEADS, false),
                 Self::storage_entry(layouts::prepass::CHUNK_POOL, false),
@@ -174,6 +173,18 @@ impl StrandPrepassPipeline {
         device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
     }
 
+    pub fn indirect_args_bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
+            "strand_prepass_indirect_args_bind_group_layout",
+            &[Self::storage_entry(layouts::prepass::INDIRECT_ARGS, false)],
+        )
+    }
+
+    pub fn create_indirect_args_bind_group_layout(device: &RenderDevice) -> BindGroupLayout {
+        let descriptor = Self::indirect_args_bind_group_layout_descriptor();
+        device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+    }
+
     pub fn depth_reduce_bind_group_layout_descriptor() -> BindGroupLayoutDescriptor {
         BindGroupLayoutDescriptor::new(
             "strand_depth_reduce_bind_group_layout",
@@ -203,10 +214,10 @@ impl StrandPrepassPipeline {
 fn queue_prepass_pipeline(
     pipeline_cache: &PipelineCache,
     shader: Handle<Shader>,
-    _bind_group_layout: BindGroupLayout,
     allocator: &GpuPagingAllocator,
     invocation_dims: &ComputeInvocationDims,
     entry_point: &'static str,
+    uses_indirect_args_storage: bool,
 ) -> Option<CachedComputePipelineId> {
     if allocator.buffer_bind_group_layout.is_none()
         || allocator.pagetable_bind_group_layout.is_none()
@@ -284,14 +295,21 @@ fn queue_prepass_pipeline(
         ),
     ]);
 
-    let max_group = allocator
+    let mut max_group = allocator
         .buffer_group_idx
         .max(allocator.table_group_idx)
         .max(layouts::prepass::PREPASS_GROUP);
+    if uses_indirect_args_storage {
+        max_group = max_group.max(layouts::prepass::INDIRECT_ARGS_GROUP);
+    }
     let mut layout = vec![bind_group_layout.clone(); (max_group + 1) as usize];
     layout[allocator.buffer_group_idx as usize] = buffer_layout;
     layout[allocator.table_group_idx as usize] = table_layout;
     layout[layouts::prepass::PREPASS_GROUP as usize] = bind_group_layout;
+    if uses_indirect_args_storage {
+        layout[layouts::prepass::INDIRECT_ARGS_GROUP as usize] =
+            StrandPrepassPipeline::indirect_args_bind_group_layout_descriptor();
+    }
 
     Some(
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -299,10 +317,7 @@ fn queue_prepass_pipeline(
             layout,
             shader,
             shader_defs,
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            immediate_size: std::mem::size_of::<PushConstants>() as u32,
             entry_point: Some(entry_point.into()),
             zero_initialize_workgroup_memory: false,
         }),
@@ -313,12 +328,14 @@ impl FromWorld for StrandPrepassPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         let bind_group_layout = Self::create_bind_group_layout(device);
+        let indirect_args_bind_group_layout = Self::create_indirect_args_bind_group_layout(device);
         let depth_reduce_bind_group_layout = Self::create_depth_reduce_bind_group_layout(device);
 
         let _invocation_dims = *world.resource::<ComputeInvocationDims>();
 
         StrandPrepassPipeline {
             bind_group_layout,
+            indirect_args_bind_group_layout,
             broad_pipeline: None,
             broad_strand_pipeline: None,
             finalize_pipeline: None,
@@ -339,7 +356,7 @@ impl FromWorld for StrandPrepassPipeline {
     }
 }
 
-pub fn create_prepass_bind_group(
+pub fn create_prepass_bind_groups(
     device: &RenderDevice,
     pipeline: &StrandPrepassPipeline,
     resources: &StrandPrepassResources,
@@ -351,7 +368,7 @@ pub fn create_prepass_bind_group(
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
     request_runtime: &VirtualSurfaceRequestBitmapRuntime,
-) -> Result<(BindGroup, Vec<u32>), ()> {
+) -> Result<(BindGroup, BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
     let binning_queue = resources.binning_queue.as_ref().ok_or(())?;
@@ -428,10 +445,6 @@ pub fn create_prepass_bind_group(
                 BindGroupEntry {
                     binding: layouts::prepass::GEO_PREFIX,
                     resource: geos_prefix_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: layouts::prepass::INDIRECT_BUFFER,
-                    resource: dispatch_args.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::FRUSTUM_TABLE,
@@ -535,6 +548,14 @@ pub fn create_prepass_bind_group(
                 },
             ],
         ),
+        device.create_bind_group(
+            Some("strand_prepass_indirect_args_bind_group"),
+            &pipeline.indirect_args_bind_group_layout,
+            &[BindGroupEntry {
+                binding: layouts::prepass::INDIRECT_ARGS,
+                resource: dispatch_args.as_entire_binding(),
+            }],
+        ),
         // Dynamic offsets order follows bind-group layout declaration order.
         vec![view_light_uniform_offset.offset, view_offsets.offset],
     ))
@@ -599,7 +620,7 @@ pub fn run_depth_reduce(
     });
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
-    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
     pass.dispatch_workgroups(fine_tile_count.max(1).div_ceil(64), 1, 1);
 }
 
@@ -611,6 +632,7 @@ pub fn run_prepass(
     settings: &ComputeInvocationDims,
     cull_settings: &crate::resources::StochasticCullSettings,
     bind_group: &BindGroup,
+    indirect_args_bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
     coarse_depth_lut: &Buffer,
@@ -789,7 +811,7 @@ pub fn run_prepass(
         ..Default::default()
     };
     pass.set_pipeline(broad_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
     pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
     pass.set_bind_group(
         allocator.table_group_idx,
@@ -808,7 +830,7 @@ pub fn run_prepass(
         ..pushconstants
     };
     pass.set_pipeline(broad_strand_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&broad_strand_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&broad_strand_pushconstants));
     pass.dispatch_workgroups(
         max_strands_in_instance
             .max(1)
@@ -822,32 +844,42 @@ pub fn run_prepass(
         ..pushconstants
     };
     pass.set_pipeline(finalize_pipeline);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        indirect_args_bind_group,
+        &[],
+    );
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(fine_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let coarse_interval_pushconstants = PushConstants {
         num_elements: coarse_range_capacity,
         ..pushconstants
     };
     pass.set_pipeline(coarse_interval_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&coarse_interval_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&coarse_interval_pushconstants));
     pass.dispatch_workgroups(coarse_range_capacity, 1, 1);
     let depth_warp_pushconstants = PushConstants {
         num_elements: coarse_depth_tile_capacity,
         ..pushconstants
     };
     pass.set_pipeline(build_depth_warp_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&depth_warp_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&depth_warp_pushconstants));
     pass.dispatch_workgroups(
         coarse_depth_tile_capacity.div_ceil(settings.threads_per_workgroup),
         1,
         1,
     );
     pass.set_pipeline(finalize_binning_pipeline);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        indirect_args_bind_group,
+        &[],
+    );
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(mark_coarse_count_pages_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let coarse_count_page_table_capacity =
         coarse_depth_tile_capacity.saturating_mul(crate::plugin::COARSE_DEPTH_SLICES);
@@ -856,24 +888,24 @@ pub fn run_prepass(
         ..pushconstants
     };
     pass.set_pipeline(allocate_coarse_count_pages_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
     pass.dispatch_workgroups(
         coarse_count_page_table_capacity.div_ceil(settings.threads_per_workgroup),
         1,
         1,
     );
     pass.set_pipeline(binning_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     pass.set_pipeline(prefix_fine_pages_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
     pass.dispatch_workgroups(
         coarse_count_page_table_capacity.min(65_535),
         coarse_count_page_table_capacity.div_ceil(65_535),
         1,
     );
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     let fine_tile_stack_pushconstants = PushConstants {
         num_elements: coarse_depth_tile_capacity
@@ -887,7 +919,7 @@ pub fn run_prepass(
         .div_ceil(fine_tile_stack_workgroups_x)
         .max(1);
     pass.set_pipeline(emit_raster_work_pipeline);
-    pass.set_push_constants(0, bytemuck::bytes_of(&fine_tile_stack_pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&fine_tile_stack_pushconstants));
     pass.dispatch_workgroups(
         fine_tile_stack_workgroups_x,
         fine_tile_stack_workgroups_y,
@@ -940,10 +972,10 @@ pub fn update_strand_prepass_pipeline(
     let Some(broad_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         broad_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "broad_prepass",
+        false,
     ) else {
         warn!("Could not queue broad prepass pipeline");
         return;
@@ -951,10 +983,10 @@ pub fn update_strand_prepass_pipeline(
     let Some(broad_strand_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         broad_strand_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "broad_strand_prepass",
+        false,
     ) else {
         warn!("Could not queue broad strand prepass pipeline");
         return;
@@ -962,120 +994,120 @@ pub fn update_strand_prepass_pipeline(
     let Some(finalize_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         finalize_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "finalize_prepass",
+        true,
     ) else {
         return;
     };
     let Some(fine_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         fine_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "fine_prepass",
+        false,
     ) else {
         return;
     };
     let Some(coarse_interval_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         coarse_interval_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "coarse_interval_pass",
+        false,
     ) else {
         return;
     };
     let Some(build_depth_warp_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         build_depth_warp_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "build_depth_warp_lut",
+        false,
     ) else {
         return;
     };
     let Some(finalize_binning_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         finalize_binning_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "finalize_binning",
+        true,
     ) else {
         return;
     };
     let Some(mark_coarse_count_pages_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         mark_coarse_count_pages_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "mark_coarse_count_pages_pass",
+        false,
     ) else {
         return;
     };
     let Some(allocate_coarse_count_pages_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         allocate_coarse_count_pages_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "allocate_coarse_count_pages",
+        false,
     ) else {
         return;
     };
     let Some(binning_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         binning_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "binning_queue_pass",
+        false,
     ) else {
         return;
     };
     let Some(prefix_fine_pages_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         prefix_fine_pages_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "prefix_fine_pages",
+        false,
     ) else {
         return;
     };
     let Some(fill_fine_seg_refs_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         fill_fine_seg_refs_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "fill_fine_seg_refs",
+        false,
     ) else {
         return;
     };
     let Some(emit_raster_work_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         emit_raster_work_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "emit_raster_work",
+        false,
     ) else {
         return;
     };
     let Some(finalize_raster_dispatch_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         finalize_raster_dispatch_shader,
-        pipeline_res.bind_group_layout.clone(),
         &allocator,
         &dims,
         "finalize_raster_dispatch",
+        false,
     ) else {
         return;
     };
@@ -1085,10 +1117,7 @@ pub fn update_strand_prepass_pipeline(
             layout: vec![StrandPrepassPipeline::depth_reduce_bind_group_layout_descriptor()],
             shader: depth_reduce_shader,
             shader_defs: vec![ShaderDefVal::UInt("WORKGROUP_SIZE".into(), 64)],
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            immediate_size: std::mem::size_of::<PushConstants>() as u32,
             entry_point: Some("reduce_opaque_depth".into()),
             zero_initialize_workgroup_memory: false,
         });

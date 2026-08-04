@@ -2,6 +2,8 @@ pub mod prepass {
     use bevy::shader::ShaderDefVal;
 
     pub const PREPASS_GROUP: u32 = 2;
+    pub const INDIRECT_ARGS_GROUP: u32 = 3;
+    pub const INDIRECT_ARGS: u32 = 0;
 
     // Queues
     pub const PREPASS_QUEUE: u32 = 4;
@@ -16,7 +18,6 @@ pub mod prepass {
     pub const VISIBLE_FLAGS: u32 = 11;
     pub const VISIBLE_GEO: u32 = 12;
     pub const GEO_PREFIX: u32 = 13;
-    pub const INDIRECT_BUFFER: u32 = 15;
     pub const FRUSTUM_TABLE: u32 = 21;
     pub const FROXEL_BUCKET_HEADS: u32 = 22;
     pub const CHUNK_POOL: u32 = 23;
@@ -45,6 +46,8 @@ pub mod prepass {
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
             ShaderDefVal::UInt("PREPASS_GROUP".into(), PREPASS_GROUP),
+            ShaderDefVal::UInt("INDIRECT_ARGS_GROUP".into(), INDIRECT_ARGS_GROUP),
+            ShaderDefVal::UInt("INDIRECT_ARGS".into(), INDIRECT_ARGS),
             // Queues
             ShaderDefVal::UInt("PREPASS_QUEUE".into(), PREPASS_QUEUE),
             ShaderDefVal::UInt("BINNING_QUEUE".into(), BINNING_QUEUE),
@@ -61,7 +64,6 @@ pub mod prepass {
             ShaderDefVal::UInt("VISIBLE_FLAGS".into(), VISIBLE_FLAGS),
             ShaderDefVal::UInt("VISIBLE_GEO".into(), VISIBLE_GEO),
             ShaderDefVal::UInt("GEO_PREFIX".into(), GEO_PREFIX),
-            ShaderDefVal::UInt("INDIRECT_BUFFER".into(), INDIRECT_BUFFER),
             ShaderDefVal::UInt("FRUSTUM_TABLE".into(), FRUSTUM_TABLE),
             ShaderDefVal::UInt("FROXEL_BUCKET_HEADS".into(), FROXEL_BUCKET_HEADS),
             ShaderDefVal::UInt("CHUNK_POOL".into(), CHUNK_POOL),

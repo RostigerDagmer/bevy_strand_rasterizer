@@ -6,9 +6,9 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
-            ImageSubresourceRange, PipelineCache, PushConstantRange, ShaderStages, ShaderType,
-            StorageTextureAccess, Texture, TextureAspect, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+            ImageSubresourceRange, PipelineCache, ShaderStages, ShaderType, StorageTextureAccess,
+            Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+            TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::{ViewUniform, ViewUniformOffset},
@@ -279,10 +279,7 @@ pub fn update_strand_shading_pipeline(
             layout,
             shader,
             shader_defs: cdefs,
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<PushConstants>() as u32,
-            }],
+            immediate_size: std::mem::size_of::<PushConstants>() as u32,
             entry_point: Some("shade_strands".into()),
             zero_initialize_workgroup_memory: false,
         },
@@ -537,7 +534,7 @@ pub fn run_shading_pass(
         scan_save_base: 0,
         ..Default::default()
     };
-    pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+    pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     resources
         .shadow_history_index

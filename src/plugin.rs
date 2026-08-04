@@ -1,5 +1,9 @@
 use bevy::{
-    core_pipeline::core_3d::graph::Core3d,
+    core_pipeline::{
+        core_3d::main_opaque_pass_3d,
+        schedule::{Core3d, Core3dSystems},
+        tonemapping::tonemapping,
+    },
     math::bounding::Aabb3d,
     pbr::ExtractedDirectionalLight,
     platform::collections::HashMap,
@@ -9,7 +13,6 @@ use bevy::{
         extract_component::ExtractComponentPlugin,
         extract_resource::ExtractResourcePlugin,
         render_asset::RenderAssets,
-        render_graph::RenderGraphExt,
         render_resource::Buffer,
         renderer::{RenderDevice, RenderQueue},
         view::ExtractedView,
@@ -230,76 +233,27 @@ impl Plugin for StrandRasterizerPlugin {
                 .chain()
                 .after(RenderSystems::PrepareBindGroups),
         );
-        render_app
-            .add_render_graph_node::<nodes::prepass::WorkPreparationNode>(
-                Core3d,
-                nodes::prepass::WorkPreparationLabel,
-            )
-            .add_render_graph_node::<nodes::raster::StrandRasterizerNode>(
-                Core3d,
-                nodes::raster::StrandRasterizerLabel,
-            )
-            .add_render_graph_node::<nodes::shading::StrandShadingNode>(
-                Core3d,
-                nodes::shading::StrandShadingLabel,
-            )
-            .add_render_graph_node::<nodes::shadows::StrandShadowRasterizerNode>(
-                Core3d,
-                nodes::shadows::StrandShadowRasterizerLabel,
-            )
-            .add_render_graph_node::<nodes::composite::CompositionNode>(
-                Core3d,
-                nodes::composite::CompositionLabel,
-            )
-            .add_render_graph_node::<nodes::debug::TileDebugNode>(
-                Core3d,
-                nodes::debug::TileDebugLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass,
-                nodes::prepass::WorkPreparationLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::prepass::WorkPreparationLabel,
-                nodes::shadows::StrandShadowRasterizerLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::shadows::StrandShadowRasterizerLabel,
-                bevy::core_pipeline::core_3d::graph::Node3d::MainOpaquePass,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::shadows::StrandShadowRasterizerLabel,
-                nodes::shading::StrandShadingLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::shading::StrandShadingLabel,
-                nodes::raster::StrandRasterizerLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::raster::StrandRasterizerLabel,
-                nodes::composite::CompositionLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                bevy::core_pipeline::core_3d::graph::Node3d::EndMainPass,
-                nodes::composite::CompositionLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::composite::CompositionLabel,
-                nodes::debug::TileDebugLabel,
-            )
-            .add_render_graph_edge(
-                Core3d,
-                nodes::debug::TileDebugLabel,
-                bevy::core_pipeline::core_3d::graph::Node3d::PostProcessing,
-            );
+        render_app.add_systems(
+            Core3d,
+            (
+                (
+                    nodes::prepass::work_preparation_pass,
+                    nodes::shadows::strand_shadow_rasterizer_pass,
+                    nodes::shading::strand_shading_pass,
+                    nodes::raster::strand_rasterizer_pass,
+                )
+                    .chain()
+                    .before(main_opaque_pass_3d)
+                    .in_set(Core3dSystems::MainPass),
+                (
+                    nodes::composite::composition_pass,
+                    nodes::debug::tile_debug_pass,
+                )
+                    .chain()
+                    .before(tonemapping)
+                    .in_set(Core3dSystems::PostProcess),
+            ),
+        );
     }
 }
 
@@ -409,7 +363,7 @@ fn use_prepass_buffers(
         let cascade_index =
             select_authoritative_shadow_cascade(main_view, &strand_world_centers, light);
         shadow_cascade_by_entity.insert(entity, cascade_index);
-        if light.shadows_enabled {
+        if light.shadow_maps_enabled {
             shadow_texture_base_by_entity.insert(entity, next_shadow_texture_layer);
             let cascade_count = light
                 .cascade_shadow_config

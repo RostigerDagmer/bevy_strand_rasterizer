@@ -7,9 +7,9 @@ use bevy::{
             BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
             ComputePipelineDescriptor, Extent3d, ImageSubresourceRange, PipelineCache,
-            PushConstantRange, ShaderStages, StorageTextureAccess, Texture, TextureAspect,
-            TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-            TextureView, TextureViewDescriptor, TextureViewDimension,
+            ShaderStages, StorageTextureAccess, Texture, TextureAspect, TextureDescriptor,
+            TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+            TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         view::ViewUniformOffset,
@@ -351,10 +351,7 @@ pub fn update_strand_raster_pipeline(
         layout,
         shader: rasterize_shader,
         shader_defs: cdefs,
-        push_constant_ranges: vec![PushConstantRange {
-            stages: ShaderStages::COMPUTE,
-            range: 0..std::mem::size_of::<PushConstants>() as u32,
-        }],
+        immediate_size: std::mem::size_of::<PushConstants>() as u32,
         entry_point: Some("rasterize_strands".into()),
         zero_initialize_workgroup_memory: false,
     });
@@ -607,7 +604,7 @@ pub fn run_raster_pass(
         };
 
         pass.set_pipeline(raster_pipeline);
-        pass.set_push_constants(0, bytemuck::bytes_of(&pushconstants));
+        pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
         pass.dispatch_workgroups_indirect(raster_tile_run_dispatch_args, 0);
     }
 

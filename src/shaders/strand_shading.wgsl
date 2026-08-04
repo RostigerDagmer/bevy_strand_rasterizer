@@ -64,7 +64,7 @@ const INVALID_PTR: u32 = 0xFFFFFFFFu;
 const VSMS_OPACITY_POOL_TEXTURE_COUNT: u32 = #{VSMS_OPACITY_POOL_TEXTURE_COUNT};
 const VSMS_DEPTH_POOL_TEXTURE_COUNT: u32 = #{VSMS_DEPTH_POOL_TEXTURE_COUNT};
 
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 struct FrustumDesc {
     screen_width: u32,
     screen_height: u32,

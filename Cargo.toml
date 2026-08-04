@@ -7,7 +7,7 @@ edition = "2024"
 shaders = { type = "WgslShader" }
 
 [dependencies]
-bevy = { version = "0.18", features=["experimental_pbr_pcss"] }
+bevy = { version = "0.19", features=["experimental_pbr_pcss"] }
 bytemuck = "1.22.0"
 encase = "0.12.0"
 serde = "1.0.219"
@@ -18,12 +18,12 @@ nonmax = "0.5.5"
 offset-allocator = "0.2"
 phf = {version="0.13.1", features=["macros"]}
 range-alloc = "0.1.4"
-wgpu = "27.0.1"
+wgpu = "29.0.4"
 bevy_gpu_paging_allocator={ path="../bevy_gpu_paging_allocator" }
 bevy_vsms = { path = "../bevy_vsms" }
 
 [dev-dependencies]
 bevy_dson = { path = "../bevy_dson" }
-bevy_egui = "0.39.1"
-bevy_panorbit_camera = "0.34.0"
+bevy_egui = "0.41.1"
+bevy_panorbit_camera = "0.35.0"
 default_material = { path = "../../../default_material" }

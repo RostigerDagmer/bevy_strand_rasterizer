@@ -1,23 +1,18 @@
 use bevy::{
-    core_pipeline::{FullscreenShader, prepass::ViewPrepassTextures},
+    core_pipeline::FullscreenShader,
     prelude::*,
     render::{
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{
-            BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-            BindingResource, BindingType, BlendState, BufferBindingType, CachedRenderPipelineId,
-            ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp, MultisampleState,
-            Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
-            RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-            SamplerDescriptor, ShaderStages, ShaderType, StoreOp, TextureFormat, TextureSampleType,
-            TextureViewDimension,
+            BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+            BlendState, BufferBindingType, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            FilterMode, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
+            RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
+            ShaderType, TextureFormat, TextureSampleType, TextureViewDimension,
         },
-        renderer::{RenderContext, RenderDevice},
-        view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+        renderer::RenderDevice,
+        view::ViewUniform,
     },
 };
-
-use super::raster::StrandRasterizerResources;
 
 #[derive(Resource)]
 pub struct CompositionPipeline {
@@ -123,7 +118,7 @@ impl FromWorld for CompositionPipeline {
                 targets: vec![Some(ColorTargetState {
                     // IMPORTANT: This format must match the ViewTarget format
                     // Usually HDR first, then tonemapped. Let's assume HDR for now.
-                    format: TextureFormat::bevy_default(), // Use bevy's default HDR format
+                    format: TextureFormat::Rgba8UnormSrgb,
                     blend: Some(BlendState::ALPHA_BLENDING), // Use alpha blending
                     write_mask: ColorWrites::ALL,
                 })],
@@ -131,7 +126,7 @@ impl FromWorld for CompositionPipeline {
             primitive: PrimitiveState::default(), // Triangle list covering screen
             depth_stencil: None,
             multisample: MultisampleState::default(),
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             zero_initialize_workgroup_memory: false,
         });
 

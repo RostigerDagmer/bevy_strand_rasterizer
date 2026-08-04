@@ -40,7 +40,7 @@ const POOL_CHUNK_SIZE: u32 = #POOL_CHUNK_SIZE;
 const COARSE_FINE_TILE_EXTENT: u32 = #COARSE_FINE_TILE_EXTENT;
 const CHUNK_WORD_STRIDE: u32 = 2u + POOL_CHUNK_SIZE;
 const DEBUG_FORCE_SINGLE_LIGHT: bool = false;
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 
 struct FrustumDesc {
     screen_width: u32,

@@ -1,35 +1,25 @@
 use bevy::{
     ecs::world::World,
+    prelude::Entity,
     render::{
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::PipelineCache,
-        renderer::{RenderContext, RenderDevice},
+        renderer::{RenderContext, RenderDevice, ViewQuery},
     },
 };
 
 use crate::pipelines::sim::StrandSimulatorResources;
 
-#[derive(Debug, Clone, Default)]
-pub struct StrandSimulationNode;
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, RenderLabel)]
-pub struct StrandSimulationLabel;
-
-impl Node for StrandSimulationNode {
-    fn run(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        // Check if we have resources
-        if !world.contains_resource::<StrandSimulatorResources>() {
-            return Ok(());
-        }
-        let view_entity = graph.view_entity(); // Get the entity this node instance is running for
-
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let render_device = world.resource::<RenderDevice>();
-        Ok(())
+pub fn strand_simulation_pass(
+    world: &World,
+    view: ViewQuery<Entity>,
+    mut _render_context: RenderContext,
+) {
+    // Check if we have resources
+    if !world.contains_resource::<StrandSimulatorResources>() {
+        return;
     }
+    let _view_entity = view.entity(); // Get the entity this pass instance is running for
+
+    let _pipeline_cache = world.resource::<PipelineCache>();
+    let _render_device = world.resource::<RenderDevice>();
 }

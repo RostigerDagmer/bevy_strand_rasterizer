@@ -5,7 +5,7 @@ use bevy::{
             BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
             BindingType, Buffer, BufferBindingType, BufferInitDescriptor, BufferUsages,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            PipelineCache, PushConstantRange, ShaderStages, TextureView,
+            PipelineCache, ShaderStages, TextureView,
         },
         renderer::{RenderContext, RenderDevice},
     },
@@ -82,7 +82,7 @@ impl FromWorld for StrandSimulatorPipeline {
             layout: vec![Self::bind_group_layout_descriptor()],
             shader: shading_shader,
             shader_defs: cdefs,
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             entry_point: Some("xpbd_solve".into()),
             zero_initialize_workgroup_memory: false,
         });

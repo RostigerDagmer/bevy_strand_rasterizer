@@ -1,3 +1,4 @@
+mod perf;
 use bevy::{
     light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
     prelude::*,
@@ -11,17 +12,18 @@ use bevy_gpu_paging_allocator::{GpuPagingAllocatorPlugin, GpuPagingAllocatorSett
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vsms::prelude::BevyVsmsPlugin;
 use default_material::{DefaultMaterial, DefaultMaterialPlugin, make_default_material};
+use perf::FpsDisplayPlugin;
 use strand_software_rasterizer::prelude::*;
 use wgpu::Backends;
 
 pub fn add_example_plugins(app: &mut App) -> &mut App {
     app.add_plugins(DefaultPlugins.set(RenderPlugin {
-        render_creation: RenderCreation::Automatic(WgpuSettings {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
             backends: Some(Backends::VULKAN),
             features: WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
                 | WgpuFeatures::CLEAR_TEXTURE,
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     }));
     app.insert_resource(DirectionalLightShadowMap { size: 4096 })
@@ -32,6 +34,7 @@ pub fn add_example_plugins(app: &mut App) -> &mut App {
         .add_plugins(EguiPlugin::default())
         .add_plugins(StrandRasterizerPlugin)
         .add_plugins(PanOrbitCameraPlugin)
+        .add_plugins(FpsDisplayPlugin)
         .add_systems(EguiPrimaryContextPass, strand_material_ui_system);
     let render_app = app.get_sub_app_mut(RenderApp).unwrap();
     render_app.insert_resource(GpuPagingAllocatorSettings {
@@ -92,7 +95,8 @@ pub fn spawn_floor_and_light(
     commands.spawn((
         DirectionalLight {
             illuminance: 10000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: true,
             ..default()
         },
         Transform {

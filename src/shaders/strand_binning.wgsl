@@ -32,7 +32,7 @@ const MODE: u32 = 0u; // 0 = linear, 1 = adaptive tesselation, 3 = analytical sp
     PushConstants,
 }
 
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 
 // --- Common Helper Functions ---
 
