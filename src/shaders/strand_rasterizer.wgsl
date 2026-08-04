@@ -341,10 +341,16 @@ fn get_segment_vertices_from_index(world_from_local: mat4x4<f32>, vertex_id: u32
 const DOM_SLICES: u32 = #{NUM_DOM_SLICES};
 const SHADOW_PIXEL_SLOTS: u32 = 64u;
 const SHADOW_DEPTH_WORKERS: u32 = 4u;
+const SHADOW_SEGMENT_BATCH_SIZE: u32 = 256u;
 const SHADOW_ALPHA_PARTIAL_COUNT: u32 = SHADOW_PIXEL_SLOTS * SHADOW_DEPTH_WORKERS * DOM_SLICES;
 var<workgroup> shadow_z0: array<f32, SHADOW_PIXEL_SLOTS>;
 var<workgroup> shadow_pixel_ready: array<u32, SHADOW_PIXEL_SLOTS>;
 var<workgroup> shadow_alpha_partials: array<f32, SHADOW_ALPHA_PARTIAL_COUNT>;
+var<workgroup> shadow_batch_valid: array<u32, SHADOW_SEGMENT_BATCH_SIZE>;
+var<workgroup> shadow_batch_p0: array<vec3<f32>, SHADOW_SEGMENT_BATCH_SIZE>;
+var<workgroup> shadow_batch_p1: array<vec3<f32>, SHADOW_SEGMENT_BATCH_SIZE>;
+var<workgroup> shadow_batch_radius: array<vec2<f32>, SHADOW_SEGMENT_BATCH_SIZE>;
+var<workgroup> shadow_batch_absorption: array<f32, SHADOW_SEGMENT_BATCH_SIZE>;
 
 @group(#{VSMS_OPACITY_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps: binding_array<texture_storage_3d<r32float, write> >;
 @group(#{VSMS_DEPTH_WRITE_GROUP}) @binding(#{VSMS_STORAGE_BINDING}) var deep_opacity_maps_depth: binding_array<texture_storage_2d_array<r32float, write> >;
@@ -550,35 +556,55 @@ fn rasterize_strands(
         );
     }
 
-    if depth_worker == 0u && page_valid {
-        // Pass 1: determine nearest depth at this pixel (z0). Bevy directional
-        // light projections use reverse-Z, where larger values are closer.
-        var z0 = -1.0;
-        var found_z0 = false;
-        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
-            let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
-                continue;
-            }
-            var work_item_hit = false;
-            let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
-            for (var ref_idx = work_item.seg_ref_base; ref_idx < ref_end; ref_idx = ref_idx + 1u) {
+    // Pass 1: determine nearest depth at each pixel. Segment projection and
+    // material loads are staged once per workgroup instead of once per pixel.
+    var z0 = -1.0;
+    var found_z0 = false;
+    var z0_done = depth_worker != 0u || !page_valid;
+    for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+        let work_item = raster_work_queue.items[work_idx];
+        let valid_work_item = work_item.frustum_id == active_frustum_id
+            && work_item.screen_tile_id == run.screen_tile_id;
+        let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
+        var work_item_hit = false;
+
+        for (var batch_base = work_item.seg_ref_base; batch_base < ref_end; batch_base = batch_base + SHADOW_SEGMENT_BATCH_SIZE) {
+            let batch_lane = local_id.x;
+            if batch_lane < SHADOW_SEGMENT_BATCH_SIZE {
+                shadow_batch_valid[batch_lane] = 0u;
+                let ref_idx = batch_base + batch_lane;
+                if valid_work_item && ref_idx < ref_end {
                     let seg_ref = fine_seg_refs.refs[ref_idx];
                     let inst_id = seg_ref.inst_id;
-                    if inst_id >= arrayLength(&strand_instances) {
+                    if inst_id < arrayLength(&strand_instances) {
+                        let instance = strand_instances[inst_id];
+                        let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
+                        let v0 = V[0];
+                        let v1 = V[1];
+                        if !(all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0))) {
+                            let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
+                            let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
+                            let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
+                            shadow_batch_p0[batch_lane] = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
+                            shadow_batch_p1[batch_lane] = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
+                            let min_radius = max(mat.min_radius_pixels, 1e-4);
+                            shadow_batch_radius[batch_lane] = vec2<f32>(min_radius, max(mat.max_radius_pixels, min_radius));
+                            shadow_batch_absorption[batch_lane] = mat.absorption_color.w;
+                            shadow_batch_valid[batch_lane] = 1u;
+                        }
+                    }
+                }
+            }
+            workgroupBarrier();
+
+            if depth_worker == 0u && !z0_done {
+                let batch_count = min(SHADOW_SEGMENT_BATCH_SIZE, ref_end - batch_base);
+                for (var batch_i = 0u; batch_i < batch_count; batch_i = batch_i + 1u) {
+                    if shadow_batch_valid[batch_i] == 0u {
                         continue;
                     }
-                    let instance = strand_instances[inst_id];
-                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
-                    let v0 = V[0];
-                    let v1 = V[1];
-                    if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
-                        continue;
-                    }
-                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
-                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
-                    let p0 = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
-                    let p1 = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
+                    let p0 = shadow_batch_p0[batch_i];
+                    let p1 = shadow_batch_p1[batch_i];
                     let t = fragment_position_line_relative(px_f, p0.xy, p1.xy);
                     if t < 0.0 || t > 1.0 {
                         continue;
@@ -587,23 +613,27 @@ fn rasterize_strands(
                     if !in_front_of_opaque_shadow_depth(p.z, opaque_shadow_depth) {
                         continue;
                     }
-                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
-                    let r = strand_radius_pixels(mat, p.z);
+                    let radii = shadow_batch_radius[batch_i];
+                    let r = mix(radii.x, radii.y, clamp(p.z, 0.0, 1.0));
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
-                    if cov <= 0.0 {
-                        continue;
+                    if cov > 0.0 {
+                        z0 = max(z0, p.z);
+                        work_item_hit = true;
                     }
-                    z0 = max(z0, p.z);
-                    work_item_hit = true;
-            }
-            if work_item_hit {
-                found_z0 = true;
-                if !DEBUG_EXHAUSTIVE_SHADOW_Z0_SEARCH {
-                    break;
                 }
             }
+            workgroupBarrier();
         }
 
+        if depth_worker == 0u && work_item_hit {
+            found_z0 = true;
+            if !DEBUG_EXHAUSTIVE_SHADOW_Z0_SEARCH {
+                z0_done = true;
+            }
+        }
+    }
+
+    if depth_worker == 0u && page_valid {
         if !found_z0 && opaque_shadow_depth <= 0.0 {
             textureStore(deep_opacity_maps_depth[i32(depth_physical_index)], depth_px, 0, vec4<f32>(0.0, 0.0, 0.0, 0.0));
             for (var i = 0u; i < DOM_SLICES; i = i + 1u) {
@@ -622,34 +652,51 @@ fn rasterize_strands(
     workgroupBarrier();
 
     let partial_base = (pixel_slot * SHADOW_DEPTH_WORKERS + depth_worker) * DOM_SLICES;
-    if active_pixel && page_valid && shadow_pixel_ready[pixel_slot] != 0u {
-        let z0 = shadow_z0[pixel_slot];
-        let span = max(1e-6, z0);
-        let inv_span = 1.0 / span;
+    let alpha_active = active_pixel && page_valid && shadow_pixel_ready[pixel_slot] != 0u;
+    let alpha_z0 = select(1.0, shadow_z0[pixel_slot], alpha_active);
+    let inv_span = 1.0 / max(1e-6, alpha_z0);
 
-        for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
+    for (var work_idx = work_base; work_idx < work_end; work_idx = work_idx + 1u) {
             let work_item = raster_work_queue.items[work_idx];
-            if work_item.frustum_id != active_frustum_id || work_item.screen_tile_id != run.screen_tile_id {
-                continue;
-            }
+            let valid_work_item = work_item.frustum_id == active_frustum_id
+                && work_item.screen_tile_id == run.screen_tile_id;
             let ref_end = min(work_item.seg_ref_base + work_item.seg_ref_count, arrayLength(&fine_seg_refs.refs));
-            for (var ref_idx = work_item.seg_ref_base + depth_worker; ref_idx < ref_end; ref_idx = ref_idx + SHADOW_DEPTH_WORKERS) {
-                    let seg_ref = fine_seg_refs.refs[ref_idx];
-                    let inst_id = seg_ref.inst_id;
-                    if inst_id >= arrayLength(&strand_instances) {
+            for (var batch_base = work_item.seg_ref_base; batch_base < ref_end; batch_base = batch_base + SHADOW_SEGMENT_BATCH_SIZE) {
+                let batch_lane = local_id.x;
+                if batch_lane < SHADOW_SEGMENT_BATCH_SIZE {
+                    shadow_batch_valid[batch_lane] = 0u;
+                    let ref_idx = batch_base + batch_lane;
+                    if valid_work_item && ref_idx < ref_end {
+                        let seg_ref = fine_seg_refs.refs[ref_idx];
+                        let inst_id = seg_ref.inst_id;
+                        if inst_id < arrayLength(&strand_instances) {
+                            let instance = strand_instances[inst_id];
+                            let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
+                            let v0 = V[0];
+                            let v1 = V[1];
+                            if !(all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0))) {
+                                let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
+                                let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
+                                let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
+                                shadow_batch_p0[batch_lane] = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
+                                shadow_batch_p1[batch_lane] = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
+                                let min_radius = max(mat.min_radius_pixels, 1e-4);
+                                shadow_batch_radius[batch_lane] = vec2<f32>(min_radius, max(mat.max_radius_pixels, min_radius));
+                                shadow_batch_absorption[batch_lane] = mat.absorption_color.w;
+                                shadow_batch_valid[batch_lane] = 1u;
+                            }
+                        }
+                    }
+                }
+                workgroupBarrier();
+
+                let batch_count = min(SHADOW_SEGMENT_BATCH_SIZE, ref_end - batch_base);
+                for (var batch_i = depth_worker; alpha_active && batch_i < batch_count; batch_i = batch_i + SHADOW_DEPTH_WORKERS) {
+                    if shadow_batch_valid[batch_i] == 0u {
                         continue;
                     }
-                    let instance = strand_instances[inst_id];
-                    let V = get_segment_vertices_from_index(instance.world_from_local, instance.vertex_id, instance.index_id, seg_ref.seg_id);
-                    let v0 = V[0];
-                    let v1 = V[1];
-                    if all(v0 == vec4<f32>(0.0)) && all(v1 == vec4<f32>(0.0)) {
-                        continue;
-                    }
-                    let p0_raw = world_to_screen_raw(v0, light_clip_from_world, light_viewport);
-                    let p1_raw = world_to_screen_raw(v1, light_clip_from_world, light_viewport);
-                    let p0 = vec3<f32>(p0_raw.xy, normalize_depth01(p0_raw.z));
-                    let p1 = vec3<f32>(p1_raw.xy, normalize_depth01(p1_raw.z));
+                    let p0 = shadow_batch_p0[batch_i];
+                    let p1 = shadow_batch_p1[batch_i];
                     let t = fragment_position_line_relative(px_f, p0.xy, p1.xy);
                     if t < 0.0 || t > 1.0 {
                         continue;
@@ -658,19 +705,19 @@ fn rasterize_strands(
                     if !in_front_of_opaque_shadow_depth(p.z, opaque_shadow_depth) {
                         continue;
                     }
-                    let mat = get_material_by_index(instance.material_id, fine_seg_ref_material_idx(seg_ref));
-                    let r = strand_radius_pixels(mat, p.z);
+                    let radii = shadow_batch_radius[batch_i];
+                    let r = mix(radii.x, radii.y, clamp(p.z, 0.0, 1.0));
                     let cov = clamp(1.0 - distance(px_f, p.xy) / r, 0.0, 1.0);
                     if cov <= 0.0 {
                         continue;
                     }
 
-                    let dzp = max(0.0, z0 - p.z) * inv_span;
+                    let dzp = max(0.0, alpha_z0 - p.z) * inv_span;
                     let u = pow(clamp(dzp, 0.0, 1.0), DOM_GAMMA);
                     let tL = u * f32(DOM_SLICES);
                     let si = min(u32(floor(tL)), DOM_SLICES - 1u);
                     let w = fract(tL);
-                    let a = cov * mat.absorption_color.w * 0.5;
+                    let a = cov * shadow_batch_absorption[batch_i] * 0.5;
 
                     let a0_idx = partial_base + si;
                     let a0 = shadow_alpha_partials[a0_idx];
@@ -680,9 +727,10 @@ fn rasterize_strands(
                         let a1 = shadow_alpha_partials[a1_idx];
                         shadow_alpha_partials[a1_idx] = clamp(a1 + (1.0 - a1) * w * a, 0.0, 1.0);
                     }
+                }
+                workgroupBarrier();
             }
         }
-    }
     workgroupBarrier();
 
     if depth_worker == 0u && active_pixel && page_valid && shadow_pixel_ready[pixel_slot] != 0u {
@@ -846,8 +894,7 @@ var<workgroup> color_batch_min_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_max_xy: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_shaded0: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
 var<workgroup> color_batch_shaded1: array<vec4<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_shadow_visibility0: array<vec2<f32>, COLOR_SEGMENT_BATCH_SIZE>;
-var<workgroup> color_batch_shadow_visibility1: array<f32, COLOR_SEGMENT_BATCH_SIZE>;
+var<workgroup> color_batch_shadow_visibility: array<f32, COLOR_SEGMENT_BATCH_SIZE>;
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn rasterize_strands(
@@ -939,6 +986,7 @@ fn rasterize_strands(
                                 color_batch_radius[batch_lane] = vec2<f32>(min_radius, max_radius);
                                 color_batch_min_xy[batch_lane] = min(p0_screen.xy, p1_screen.xy) - vec2<f32>(max_radius);
                                 color_batch_max_xy[batch_lane] = max(p0_screen.xy, p1_screen.xy) + vec2<f32>(max_radius);
+                                color_batch_shadow_visibility[batch_lane] = 1.0;
                                 if shade_idx0 < shading_capacity {
                                     color_batch_shaded0[batch_lane] = textureLoad(
                                         shading_buffer,
@@ -958,8 +1006,7 @@ fn rasterize_strands(
                                         i32(layer),
                                         0,
                                     ).x;
-                                    color_batch_shadow_visibility0[batch_lane] = vec2<f32>(stable_shadow_visibility);
-                                    color_batch_shadow_visibility1[batch_lane] = stable_shadow_visibility;
+                                    color_batch_shadow_visibility[batch_lane] = stable_shadow_visibility;
                                 } else {
                                     color_batch_shaded0[batch_lane] = mat.absorption_color;
                                     color_batch_shaded1[batch_lane] = mat.absorption_color;
@@ -997,11 +1044,7 @@ fn rasterize_strands(
                                 let clip_w = color_batch_clip_w[batch_i];
                                 let t_world = perspective_correct_line_t(t, clip_w.x, clip_w.y);
                                 let shaded = mix(color_batch_shaded0[batch_i], color_batch_shaded1[batch_i], t_world);
-                                let shadow_visibility = select(
-                                    mix(color_batch_shadow_visibility0[batch_i].x, color_batch_shadow_visibility1[batch_i], t_world * 2.0),
-                                    mix(color_batch_shadow_visibility1[batch_i], color_batch_shadow_visibility0[batch_i].y, (t_world - 0.5) * 2.0),
-                                    t_world >= 0.5,
-                                );
+                                let shadow_visibility = color_batch_shadow_visibility[batch_i];
                                 partial_color = vec4<f32>(shaded.rgb * shadow_visibility, shaded.a * coverage);
                                 partial_depth = p_frag_z;
                             }
@@ -1033,7 +1076,7 @@ fn rasterize_strands(
                     g_min_depth = max(g_min_depth, max(pair_depth, second_pair_depth));
                 }
             }
-            // The first 16 lanes overwrite the shared batch on the next
+            // The loader lanes overwrite the shared batch on the next
             // iteration, so all readers must finish before advancing.
             workgroupBarrier();
         }
