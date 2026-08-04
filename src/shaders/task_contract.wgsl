@@ -47,6 +47,12 @@ struct BinningTask {
     packed_field: u32,
 };
 
+struct ProjectedSegment {
+    p0_xy: u32,
+    p1_xy: u32,
+    depths: u32,
+};
+
 fn pack_binning_field(level: u32, is_shadow: u32, frustum_index: u32) -> u32 {
     return (level & BINNING_LEVEL_MASK) | ((is_shadow & 1u) << BINNING_LEVEL_BITS) | (frustum_index << BINNING_FRUSTUM_SHIFT);
 }

@@ -9,6 +9,9 @@ target/release/examples/strand_bench \
   --warmup 120 --samples 100 --output <result.json>
 ```
 
+Prepass telemetry is enabled by default in the benchmark harness. Add `--no-telemetry` when the
+goal is to measure the production path without counter atomics, aggregation, or readback.
+
 | Revision | Mean (ms) | Median (ms) | p95 (ms) | p99 (ms) | Median vs. baseline |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Baseline | 8.763 | 8.394 | 10.611 | 11.087 | - |
@@ -60,6 +63,51 @@ The two-run average combined median improved from 0.185 ms to 0.027 ms (-85.2%).
 kernel itself improved by 87.3%. This saves only about 0.158 ms on squirrel because its dense
 table was cheap, but it removes the sparse page-table probe that dominated the DSON trace.
 
+## Sparse-page telemetry
+
+Optional GPU counters now report allocated pages, generated binning tasks, segment/page
+candidates, accepted fine-cell references, the number of active pages, maximum candidates per
+page, and a 32-bin log2 candidate-count histogram. On the canonical squirrel frame they report:
+
+| Metric | Median |
+| --- | ---: |
+| Allocated/active pages | 12,695 |
+| Binning tasks | 8,627,013 |
+| Segment/page candidates | 11,481,492 |
+| Fine-cell references | 25,230,333 |
+| Candidates per active page, mean | 904.4 |
+| Candidate-count p50 upper bound | 127 |
+| Candidate-count p90/p95 upper bound | 4,095 |
+| Candidate-count p99 upper bound | 16,383 |
+| Maximum candidates on one page | 77,165 |
+
+This confirms a strongly skewed page distribution: most pages are comparatively light, while a
+small dense tail dominates candidate processing. The log2 percentiles are bounds, not exact
+quantiles.
+
+## Cached projected segments
+
+The fine pass now transforms, projects, clips, and quantizes each visible segment once per
+frustum. It stores a 12-byte projected-segment record which the mark, count, and fill traversals
+reuse. Those three passes no longer repeat index/vertex reads, world transforms, projection, or
+viewport clipping.
+
+| Revision | Fine (ms) | Mark (ms) | Count/bin (ms) | Fill (ms) | Combined (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Instrumented baseline | 0.401 | 0.751 | 1.434 | 2.456 | 5.041 |
+| Cached, run 1 | 0.404 | 0.527 | 1.057 | 1.919 | 3.908 |
+| Cached, run 2 | 0.404 | 0.527 | 1.057 | 1.912 | 3.900 |
+| Cached, telemetry off | 0.404 | 0.532 | 0.980 | 1.921 | 3.836 |
+
+Against the telemetry-free allocated-page confirmation, the production combined median falls
+from 4.900 ms to 3.836 ms (-21.7%, 1.064 ms). The cache adds about 0.008 ms to the fine pass but
+saves about 1.072 ms from the three repeated traversals.
+
+The packed viewport coordinates resolve to about 0.059 pixels at 3840 pixels wide, with depth
+stored at 16-bit normalized precision. Boundary quantization changed the accepted fine-reference
+count by 1,502 out of roughly 25.23 million (+0.006%); this should receive a visual regression
+check before treating the representation as final.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -80,6 +128,11 @@ table was cheap, but it removes the sparse page-table probe that dominated the D
 - `09-fine-seg-ref-12b-confirmation.json`: independent compact-reference confirmation.
 - `10-allocated-page-prefix.json`: prefixes only allocated count pages via indirect dispatch.
 - `11-allocated-page-prefix-confirmation.json`: independent allocated-page confirmation.
+- `12-prepass-telemetry-baseline.json`: canonical sparse-page counters before projected-segment
+  caching.
+- `13-cached-projected-segments.json`: first canonical cache measurement with telemetry enabled.
+- `14-cached-projected-segments-confirmation.json`: independent instrumented confirmation.
+- `15-cached-projected-segments-production.json`: cache measurement with telemetry disabled.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
 reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are

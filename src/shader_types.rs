@@ -17,6 +17,7 @@ pub struct PushConstants {
     pub target_strands_per_pixel: f32,
     pub min_keep_probability: f32,
     pub shadow_keep_probability: f32,
+    pub telemetry_enabled: u32,
 }
 
 #[derive(Debug, Clone, ShaderType)]

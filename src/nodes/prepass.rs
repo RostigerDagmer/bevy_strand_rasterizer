@@ -19,7 +19,7 @@ use crate::{
         create_prepass_bind_groups, run_depth_reduce, run_prepass,
     },
     pipelines::raster::StrandRasterizerResources,
-    resources::{ComputeInvocationDims, StochasticCullSettings},
+    resources::{ComputeInvocationDims, PrepassTelemetrySettings, StochasticCullSettings},
 };
 
 pub fn work_preparation_pass(
@@ -38,6 +38,7 @@ pub fn work_preparation_pass(
     let request_runtime = world.resource::<VirtualSurfaceRequestBitmapRuntime>();
     let invocation_dims = world.resource::<ComputeInvocationDims>();
     let cull_settings = world.resource::<StochasticCullSettings>();
+    let telemetry_settings = world.resource::<PrepassTelemetrySettings>();
     let view_uniforms = world.resource::<ViewUniforms>();
     let light_meta = world.resource::<LightMeta>();
     let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -141,6 +142,9 @@ pub fn work_preparation_pass(
     let Some(prefix_indirect_args) = prepass_resources.prefix_indirect_args.as_ref() else {
         return;
     };
+    let Some(telemetry) = prepass_resources.telemetry.as_ref() else {
+        return;
+    };
     let Some(coarse_depth_lut) = prepass_resources.coarse_depth_lut.as_ref() else {
         return;
     };
@@ -170,6 +174,8 @@ pub fn work_preparation_pass(
         &dynamic_offsets,
         indirect_args,
         prefix_indirect_args,
+        telemetry,
+        telemetry_settings.enabled,
         coarse_depth_lut,
         coarse_count_page_table,
         coarse_count_pages,

@@ -74,6 +74,17 @@ pub struct BinningTask {
     pub packed_field: u32,
 }
 
+/// Quantized screen-space endpoints cached alongside a binning task.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProjectedSegment {
+    pub p0_xy: u32,
+    pub p1_xy: u32,
+    pub depths: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<ProjectedSegment>() == 12);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RasterWorkItem {

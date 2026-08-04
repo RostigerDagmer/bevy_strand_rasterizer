@@ -49,6 +49,7 @@ struct BenchConfig {
     height: u32,
     warmup_frames: usize,
     sample_frames: usize,
+    telemetry: bool,
     output: PathBuf,
     asset: Option<String>,
     clusters: u32,
@@ -67,6 +68,7 @@ impl Default for BenchConfig {
             height: 1080,
             warmup_frames: 120,
             sample_frames: 300,
+            telemetry: true,
             output: PathBuf::from("strand-bench.json"),
             asset: None,
             clusters: 125,
@@ -102,6 +104,7 @@ impl BenchConfig {
                 "--height" => config.height = parse_u32(&arg, &value()?)?,
                 "--warmup" => config.warmup_frames = parse_usize(&arg, &value()?)?,
                 "--samples" => config.sample_frames = parse_usize(&arg, &value()?)?,
+                "--no-telemetry" => config.telemetry = false,
                 "--output" => config.output = PathBuf::from(value()?),
                 "--clusters" => config.clusters = parse_u32(&arg, &value()?)?,
                 "--strands-per-cluster" => config.strands_per_cluster = parse_u32(&arg, &value()?)?,
@@ -167,6 +170,7 @@ fn print_help() {
            --asset PATH                 cache path relative to assets/ for case asset\n\
            --width N --height N         render resolution (default 1920x1080)\n\
            --warmup N --samples N       warmup and measured GPU frames\n\
+           --no-telemetry               disable prepass counters/readbacks\n\
            --output PATH                JSON result path (default strand-bench.json)\n\
            --clusters N                 clustered-grid entity count (default 125)\n\
            --strands-per-cluster N      synthetic strand count (default 128)\n\
@@ -220,6 +224,7 @@ fn main() {
         eprintln!("error: {error}\n\nRun with --help for usage.");
         std::process::exit(2);
     });
+    let telemetry_enabled = config.telemetry;
     let mut app = App::new();
 
     let render_plugin = RenderPlugin {
@@ -280,6 +285,9 @@ fn main() {
     }
 
     app.insert_resource(config)
+        .insert_resource(PrepassTelemetrySettings {
+            enabled: telemetry_enabled,
+        })
         .insert_resource(DirectionalLightShadowMap { size: 2048 })
         .insert_resource(ClearColor(Color::srgb(0.025, 0.025, 0.03)))
         .add_plugins((
@@ -662,6 +670,14 @@ fn collect_benchmark_samples(
     let Some(raster_measurement) = diagnostics.get_measurement(&raster_path) else {
         return;
     };
+    if config.telemetry {
+        let telemetry_path = bevy::diagnostic::DiagnosticPath::new(
+            "render/strand_prepass/telemetry/allocated_pages",
+        );
+        if diagnostics.get_measurement(&telemetry_path).is_none() {
+            return;
+        }
+    }
     if state.last_raster_sample == Some(raster_measurement.time) {
         return;
     }
@@ -677,6 +693,9 @@ fn collect_benchmark_samples(
         return;
     }
 
+    let mut telemetry_histogram = [0_u64; 32];
+    let mut page_candidates = None;
+    let mut active_candidate_pages = None;
     for diagnostic in diagnostics.iter() {
         let path = diagnostic.path().as_str();
         if (path.starts_with("render/strand_prepass/")
@@ -689,6 +708,45 @@ fn collect_benchmark_samples(
                 .entry(path.to_owned())
                 .or_default()
                 .push(value);
+        } else if path.starts_with("render/strand_prepass/telemetry/")
+            && let Some(value) = diagnostic.value()
+        {
+            state
+                .samples
+                .entry(path.to_owned())
+                .or_default()
+                .push(value);
+            if let Some(bin) = path
+                .strip_prefix("render/strand_prepass/telemetry/candidate_histogram/")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|&bin| bin < telemetry_histogram.len())
+            {
+                telemetry_histogram[bin] = value as u64;
+            } else if path.ends_with("/page_candidates") {
+                page_candidates = Some(value);
+            } else if path.ends_with("/active_candidate_pages") {
+                active_candidate_pages = Some(value);
+            }
+        }
+    }
+    if let (Some(candidates), Some(pages)) = (page_candidates, active_candidate_pages)
+        && pages > 0.0
+    {
+        state
+            .samples
+            .entry("derived/candidates_per_active_page/mean".into())
+            .or_default()
+            .push(candidates / pages);
+    }
+    for (name, fraction) in [("p50", 0.50), ("p90", 0.90), ("p95", 0.95), ("p99", 0.99)] {
+        if let Some(upper_bound) = histogram_percentile_upper(&telemetry_histogram, fraction) {
+            state
+                .samples
+                .entry(format!(
+                    "derived/candidates_per_active_page/{name}_upper_bound"
+                ))
+                .or_default()
+                .push(upper_bound as f64);
         }
     }
     state.measured += 1;
@@ -770,8 +828,15 @@ fn make_report(
     vertex_count: u64,
 ) -> Value {
     let mut timings = Map::new();
+    let mut telemetry = Map::new();
     for (name, values) in samples {
-        timings.insert(name.clone(), summarize(values));
+        if name.ends_with("/elapsed_gpu") {
+            timings.insert(name.clone(), summarize(values));
+        } else if let Some(name) = name.strip_prefix("render/strand_prepass/telemetry/") {
+            telemetry.insert(name.to_owned(), summarize(values));
+        } else if let Some(name) = name.strip_prefix("derived/") {
+            telemetry.insert(name.to_owned(), summarize(values));
+        }
     }
     json!({
         "schema_version": 1,
@@ -780,6 +845,7 @@ fn make_report(
         "resolution": { "width": config.width, "height": config.height },
         "warmup_frames": config.warmup_frames,
         "sample_frames": config.sample_frames,
+        "telemetry_enabled": config.telemetry,
         "seed": config.seed,
         "workload": {
             "geometry_count": geometry_count,
@@ -797,7 +863,28 @@ fn make_report(
             "driver_info": adapter.driver_info,
         },
         "timings_ms": timings,
+        "telemetry": telemetry,
     })
+}
+
+fn histogram_percentile_upper(histogram: &[u64; 32], fraction: f64) -> Option<u64> {
+    let total: u64 = histogram.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let target = ((total as f64 * fraction).ceil() as u64).max(1);
+    let mut cumulative = 0_u64;
+    for (bin, &count) in histogram.iter().enumerate() {
+        cumulative += count;
+        if cumulative >= target {
+            return Some(if bin == 31 {
+                u32::MAX as u64
+            } else {
+                (1_u64 << (bin + 1)) - 1
+            });
+        }
+    }
+    None
 }
 
 fn summarize(values: &[f64]) -> Value {

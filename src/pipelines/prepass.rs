@@ -26,6 +26,11 @@ use bevy::{
 use bevy_gpu_paging_allocator::BindGroupBuilder;
 use bevy_vsms::request::VirtualSurfaceRequestBitmapRuntime;
 
+pub const TELEMETRY_HISTOGRAM_BINS: u32 = 32;
+pub const TELEMETRY_HISTOGRAM_OFFSET_WORDS: u32 = 8;
+pub const TELEMETRY_PAGE_COUNTS_OFFSET_WORDS: u32 =
+    TELEMETRY_HISTOGRAM_OFFSET_WORDS + TELEMETRY_HISTOGRAM_BINS;
+
 #[derive(Resource, Default)]
 pub struct StrandPrepassResources {
     // inputs
@@ -38,6 +43,8 @@ pub struct StrandPrepassResources {
     // products
     pub indirect_args: Option<Buffer>,
     pub prefix_indirect_args: Option<Buffer>,
+    pub telemetry: Option<Buffer>,
+    pub projected_segments: Option<Buffer>,
     // queue-binning allocator buffers
     pub chunk_pool: Option<Buffer>,
     pub free_heads: Option<Buffer>,
@@ -95,6 +102,7 @@ pub struct StrandPrepassPipeline {
     pub finalize_prefix_dispatch_pipeline: Option<CachedComputePipelineId>,
     pub binning_pipeline: Option<CachedComputePipelineId>,
     pub prefix_fine_pages_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_telemetry_pipeline: Option<CachedComputePipelineId>,
     pub fill_fine_seg_refs_pipeline: Option<CachedComputePipelineId>,
     pub emit_raster_work_pipeline: Option<CachedComputePipelineId>,
     pub finalize_raster_dispatch_pipeline: Option<CachedComputePipelineId>,
@@ -167,6 +175,8 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::SHADOW_DOM_SURFACE_IDS, true),
                 Self::storage_entry(layouts::prepass::BROAD_INSTANCE_META, false),
                 Self::storage_entry(layouts::prepass::OPAQUE_FINE_DEPTH_TILES, true),
+                Self::storage_entry(layouts::prepass::TELEMETRY, false),
+                Self::storage_entry(layouts::prepass::PROJECTED_SEGMENTS, false),
             ],
         )
     }
@@ -351,6 +361,7 @@ impl FromWorld for StrandPrepassPipeline {
             finalize_prefix_dispatch_pipeline: None,
             binning_pipeline: None,
             prefix_fine_pages_pipeline: None,
+            finalize_telemetry_pipeline: None,
             fill_fine_seg_refs_pipeline: None,
             emit_raster_work_pipeline: None,
             finalize_raster_dispatch_pipeline: None,
@@ -381,6 +392,8 @@ pub fn create_prepass_bind_groups(
     let geos_prefix_buffer = resources.geos_prefix_buffer.as_ref().ok_or(())?;
     let dispatch_args = resources.indirect_args.as_ref().ok_or(())?;
     let prefix_dispatch_args = resources.prefix_indirect_args.as_ref().ok_or(())?;
+    let telemetry = resources.telemetry.as_ref().ok_or(())?;
+    let projected_segments = resources.projected_segments.as_ref().ok_or(())?;
     let frustum_table = resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
@@ -551,6 +564,14 @@ pub fn create_prepass_bind_groups(
                         .ok_or(())?
                         .as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::TELEMETRY,
+                    resource: telemetry.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::PROJECTED_SEGMENTS,
+                    resource: projected_segments.as_entire_binding(),
+                },
             ],
         ),
         device.create_bind_group(
@@ -654,6 +675,8 @@ pub fn run_prepass(
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
     prefix_indirect_args: &Buffer,
+    telemetry: &Buffer,
+    telemetry_enabled: bool,
     coarse_depth_lut: &Buffer,
     coarse_count_page_table: &Buffer,
     coarse_count_pages: &Buffer,
@@ -680,6 +703,9 @@ pub fn run_prepass(
     encoder.clear_buffer(coarse_depth_lut, 0, None);
     encoder.clear_buffer(coarse_count_page_table, 0, None);
     encoder.clear_buffer(coarse_count_pages, 0, None);
+    if telemetry_enabled {
+        encoder.clear_buffer(telemetry, 0, None);
+    }
     let _ = fine_cell_write_cursors;
     encoder.clear_buffer(fine_seg_refs, 0, Some(4));
 
@@ -737,6 +763,10 @@ pub fn run_prepass(
     };
     let Some(fill_fine_seg_refs_pipeline_id) = pipeline.fill_fine_seg_refs_pipeline else {
         warn!("Fill fine seg refs pipeline id not ready yet");
+        return;
+    };
+    let Some(finalize_telemetry_pipeline_id) = pipeline.finalize_telemetry_pipeline else {
+        warn!("Finalize telemetry pipeline id not ready yet");
         return;
     };
     let Some(emit_raster_work_pipeline_id) = pipeline.emit_raster_work_pipeline else {
@@ -817,6 +847,12 @@ pub fn run_prepass(
         warn!("Fill fine seg refs pipeline not found");
         return;
     };
+    let Some(finalize_telemetry_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_telemetry_pipeline_id)
+    else {
+        warn!("Finalize telemetry pipeline not found");
+        return;
+    };
     let Some(emit_raster_work_pipeline) =
         pipeline_cache.get_compute_pipeline(emit_raster_work_pipeline_id)
     else {
@@ -840,6 +876,7 @@ pub fn run_prepass(
         target_strands_per_pixel: cull_settings.target_strands_per_pixel,
         min_keep_probability: cull_settings.min_keep_probability,
         shadow_keep_probability: cull_settings.shadow_keep_probability,
+        telemetry_enabled: u32::from(telemetry_enabled),
         ..Default::default()
     };
     pass.set_pipeline(broad_pipeline);
@@ -968,6 +1005,15 @@ pub fn run_prepass(
     let span = diagnostics.time_span(&mut pass, "strand_prepass/prefix_fine_pages");
     pass.dispatch_workgroups_indirect(prefix_indirect_args, 0);
     span.end(&mut pass);
+    if telemetry_enabled {
+        pass.set_pipeline(finalize_telemetry_pipeline);
+        pass.set_immediates(0, bytemuck::bytes_of(&allocate_count_pages_pushconstants));
+        pass.dispatch_workgroups(
+            coarse_count_page_table_capacity.div_ceil(settings.threads_per_workgroup),
+            1,
+            1,
+        );
+    }
     pass.set_pipeline(fill_fine_seg_refs_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&fine_indirect_pushconstants));
     let span = diagnostics.time_span(&mut pass, "strand_prepass/fill_segment_refs");
@@ -997,6 +1043,33 @@ pub fn run_prepass(
     let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_raster_dispatch");
     pass.dispatch_workgroups(1, 1, 1);
     span.end(&mut pass);
+    drop(pass);
+
+    if telemetry_enabled {
+        const FIELDS: [(&str, u64); 6] = [
+            ("allocated_pages", 0),
+            ("binning_tasks", 1),
+            ("page_candidates", 2),
+            ("fine_cell_hits", 3),
+            ("active_candidate_pages", 4),
+            ("max_candidates_per_page", 5),
+        ];
+        for (name, word) in FIELDS {
+            diagnostics.record_u32(
+                encoder,
+                &telemetry.slice(word * 4..word * 4 + 4),
+                format!("strand_prepass/telemetry/{name}"),
+            );
+        }
+        for bin in 0..TELEMETRY_HISTOGRAM_BINS {
+            let word = u64::from(TELEMETRY_HISTOGRAM_OFFSET_WORDS + bin);
+            diagnostics.record_u32(
+                encoder,
+                &telemetry.slice(word * 4..word * 4 + 4),
+                format!("strand_prepass/telemetry/candidate_histogram/{bin}"),
+            );
+        }
+    }
 }
 
 pub fn update_strand_prepass_pipeline(
@@ -1033,6 +1106,7 @@ pub fn update_strand_prepass_pipeline(
     let finalize_prefix_dispatch_shader = shader_loader.load(prepass_shader_path.clone());
     let binning_shader = shader_loader.load(prepass_shader_path.clone());
     let prefix_fine_pages_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_telemetry_shader = shader_loader.load(prepass_shader_path.clone());
     let fill_fine_seg_refs_shader = shader_loader.load(prepass_shader_path.clone());
     let emit_raster_work_shader = shader_loader.load(prepass_shader_path.clone());
     let finalize_raster_dispatch_shader = shader_loader.load(prepass_shader_path);
@@ -1162,6 +1236,16 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(finalize_telemetry_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_telemetry_shader,
+        &allocator,
+        &dims,
+        "finalize_telemetry",
+        false,
+    ) else {
+        return;
+    };
     let Some(fill_fine_seg_refs_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         fill_fine_seg_refs_shader,
@@ -1215,6 +1299,7 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.finalize_prefix_dispatch_pipeline = Some(finalize_prefix_dispatch_pipeline_id);
     pipeline_res.binning_pipeline = Some(binning_pipeline_id);
     pipeline_res.prefix_fine_pages_pipeline = Some(prefix_fine_pages_pipeline_id);
+    pipeline_res.finalize_telemetry_pipeline = Some(finalize_telemetry_pipeline_id);
     pipeline_res.fill_fine_seg_refs_pipeline = Some(fill_fine_seg_refs_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
     pipeline_res.finalize_raster_dispatch_pipeline = Some(finalize_raster_dispatch_pipeline_id);

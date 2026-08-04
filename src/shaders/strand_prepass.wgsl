@@ -27,6 +27,7 @@
 #import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     FinePrepassTask,
     BinningTask,
+    ProjectedSegment,
     RasterWorkItem,
     RasterTileRun,
     FineSegRef,
@@ -66,6 +67,9 @@ const INVALID_PTR: u32 = 0xFFFFFFFFu;
 const MARKED_COUNT_PAGE: u32 = 0xFFFFFFFEu;
 const DEBUG_DISABLE_OPAQUE_FINE_CULL: bool = false;
 const DEBUG_DISABLE_DEPTH_WARP_LUT: bool = false;
+const TELEMETRY_HISTOGRAM_BINS: u32 = 32u;
+const TELEMETRY_HISTOGRAM_OFFSET: u32 = 8u;
+const TELEMETRY_PAGE_COUNTS_OFFSET: u32 = TELEMETRY_HISTOGRAM_OFFSET + TELEMETRY_HISTOGRAM_BINS;
 
 var<workgroup> page_scan_values: array<u32, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> page_scan_counts: array<u32, COARSE_COUNT_PAGE_SIZE>;
@@ -219,6 +223,8 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{BROAD_INSTANCE_META}) var<storage, read_write> broad_instance_meta: array<BroadInstanceMeta>;
 @group(#{PREPASS_GROUP}) @binding(#{OPAQUE_FINE_DEPTH_TILES}) var<storage, read> opaque_fine_depth_tiles: array<vec2<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{TELEMETRY}) var<storage, read_write> prepass_telemetry: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{PROJECTED_SEGMENTS}) var<storage, read_write> projected_segments: array<ProjectedSegment>;
 
 fn aabb_projected_screen_area(frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
     if frustum_id >= arrayLength(&frustum_table) {
@@ -927,14 +933,15 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let instance = strand_instances[task.inst_id];
-    if instance.meta_id >= arrayLength(&t_strand_metadata) || instance.index_id >= arrayLength(&t_indices) {
+    if instance.meta_id >= arrayLength(&t_strand_metadata) || instance.index_id >= arrayLength(&t_indices) || instance.vertex_id >= arrayLength(&t_vertices) {
         return;
     }
 
     let meta_ptr = t_strand_metadata[instance.meta_id];
     let index_ptr = t_indices[instance.index_id];
+    let vertex_ptr = t_vertices[instance.vertex_id];
 
-    if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) {
+    if !is_valid_ptr(meta_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(vertex_ptr) {
         return;
     }
 
@@ -950,6 +957,9 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let segment_count = strand_meta.count - 1u;
+    let index_count = index_ptr.size / 4u;
+    let index_base = index_ptr.offset / 4u;
+    let vertex_base = vertex_ptr.offset / 16u;
     let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
     let broad = broad_instance_meta[task.inst_id];
     let strand_hash = wang_hash((task.inst_id * 16777619u) ^ task.strand_local);
@@ -968,17 +978,52 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
         if strand_random > keep_probability {
             continue;
         }
+        if frustum.kind == 1u && light_layer_from_frustum(fi) == INVALID_PTR {
+            continue;
+        }
         let is_shadow = select(0u, 1u, frustum.kind == 1u);
         let packed_field = pack_binning_field(0u, is_shadow, fi);
+        let clip_from_world = clip_from_world_for_frustum(fi);
+        let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
+        let screen_max = vec2<f32>(
+            max(0.0, f32(frustum.screen_width) - 1e-3),
+            max(0.0, f32(frustum.screen_height) - 1e-3),
+        );
         for (var i = 0u; i < segment_count; i = i + 1u) {
             let seg_index = strand_meta.offset + i;
+            if seg_index + 1u >= index_count {
+                continue;
+            }
+            let vi0 = indices[index_ptr.slab].is[index_base + seg_index];
+            let vi1 = indices[index_ptr.slab].is[index_base + seg_index + 1u];
+            let p0_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi0], 1.0);
+            let p1_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi1], 1.0);
+            let p0_raw = world_to_screen_raw(p0_world, clip_from_world, viewport);
+            let p1_raw = world_to_screen_raw(p1_world, clip_from_world, viewport);
+            let p0 = vec3<f32>(p0_raw.xy, depth_key_for_frustum(p0_raw.z, frustum));
+            let p1 = vec3<f32>(p1_raw.xy, depth_key_for_frustum(p1_raw.z, frustum));
+            let clipped = clip_segment_to_box(
+                p0,
+                p1,
+                vec3<f32>(0.0, 0.0, 0.0),
+                vec3<f32>(screen_max, 1.0),
+            );
+            if clipped.ok == 0u {
+                continue;
+            }
             let write_idx = atomicAdd(&binning_queue.tail, 1u);
-            if write_idx < arrayLength(&binning_queue.tasks) {
+            if write_idx < arrayLength(&binning_queue.tasks) && write_idx < arrayLength(&projected_segments) {
                 binning_queue.tasks[write_idx] = BinningTask(
                     task.inst_id,
                     task.strand_local,
                     seg_index,
                     packed_field,
+                );
+                let screen_size = max(vec2<f32>(1.0), vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height)));
+                projected_segments[write_idx] = ProjectedSegment(
+                    pack2x16unorm(clamp(clipped.p0.xy / screen_size, vec2<f32>(0.0), vec2<f32>(1.0))),
+                    pack2x16unorm(clamp(clipped.p1.xy / screen_size, vec2<f32>(0.0), vec2<f32>(1.0))),
+                    pack2x16unorm(clamp(vec2<f32>(clipped.p0.z, clipped.p1.z), vec2<f32>(0.0), vec2<f32>(1.0))),
                 );
             }
         }
@@ -1325,6 +1370,12 @@ fn trace_segment_into_coarse_count_page(
         if page_idx == INVALID_PTR {
             continue;
         }
+        if pc.telemetry_enabled != 0u && !fill_refs {
+            let telemetry_idx = TELEMETRY_PAGE_COUNTS_OFFSET + page_idx;
+            if telemetry_idx < arrayLength(&prepass_telemetry) {
+                atomicAdd(&prepass_telemetry[telemetry_idx], 1u);
+            }
+        }
 
         let z_span = max(z_max - z_min, 1.0 / f32(DEPTH_QUANT_MAX));
         let p0_local = vec3<f32>(
@@ -1544,55 +1595,20 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
         return;
     }
     let frustum = frustum_table[frustum_id];
-    let frustum_cfg = frustum_to_config(frustum);
     let inst_id = task.id_info;
-    if inst_id >= arrayLength(&strand_instances) {
+    if inst_id >= arrayLength(&strand_instances) || task_idx >= arrayLength(&projected_segments) {
         return;
     }
 
     let instance = strand_instances[inst_id];
-    if instance.vertex_id >= arrayLength(&t_vertices) || instance.index_id >= arrayLength(&t_indices) {
-        return;
-    }
-
-    let vertex_ptr = t_vertices[instance.vertex_id];
-    let index_ptr = t_indices[instance.index_id];
-    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) {
-        return;
-    }
-
-    let index_count = index_ptr.size / 4u;
-    if task.seg_idx + 1u >= index_count {
-        return;
-    }
-
-    let vertex_base = vertex_ptr.offset / 16u;
-    let index_base = index_ptr.offset / 4u;
-    if frustum.kind == 1u {
-        let light_layer = light_layer_from_frustum(frustum_id);
-        if light_layer == INVALID_PTR {
-            return;
-        }
-    }
-    let clip_from_world = clip_from_world_for_frustum(frustum_id);
-    let viewport = vec4<f32>(0.0, 0.0, f32(frustum_cfg.screen_width), f32(frustum_cfg.screen_height));
-
-    let vi0 = indices[index_ptr.slab].is[index_base + task.seg_idx];
-    let vi1 = indices[index_ptr.slab].is[index_base + task.seg_idx + 1u];
-    let p0_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi0], 1.0);
-    let p1_world = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + vi1], 1.0);
-    let p0_raw = world_to_screen_raw(
-        p0_world,
-        clip_from_world,
-        viewport,
-    );
-    let p1_raw = world_to_screen_raw(
-        p1_world,
-        clip_from_world,
-        viewport,
-    );
-    let p0 = vec3<f32>(p0_raw.xy, depth_key_for_frustum(p0_raw.z, frustum));
-    let p1 = vec3<f32>(p1_raw.xy, depth_key_for_frustum(p1_raw.z, frustum));
+    let projected = projected_segments[task_idx];
+    let p0_xy = unpack2x16unorm(projected.p0_xy)
+        * vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height));
+    let p1_xy = unpack2x16unorm(projected.p1_xy)
+        * vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height));
+    let depths = unpack2x16unorm(projected.depths);
+    let p0 = vec3<f32>(p0_xy, depths.x);
+    let p1 = vec3<f32>(p1_xy, depths.y);
     var seg_ref = FineSegRef(task.id_info, task.seg_idx, 0u);
     if fill_refs {
         seg_ref = make_fine_seg_ref(task, instance.meta_id);
@@ -1736,6 +1752,38 @@ fn prefix_fine_pages(
             flags,
         );
     }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn finalize_telemetry(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let page_count = min(atomicLoad(&coarse_count_pages.tail), arrayLength(&fine_page_meta));
+    let page_idx = gid.x;
+    if page_idx == 0u {
+        atomicStore(&prepass_telemetry[0], page_count);
+        atomicStore(&prepass_telemetry[1], atomicLoad(&binning_queue.tail));
+        atomicStore(&prepass_telemetry[3], atomicLoad(&fine_seg_refs.tail));
+    }
+    if page_idx >= page_count {
+        return;
+    }
+    let telemetry_idx = TELEMETRY_PAGE_COUNTS_OFFSET + page_idx;
+    if telemetry_idx >= arrayLength(&prepass_telemetry) {
+        return;
+    }
+    let candidate_count = atomicLoad(&prepass_telemetry[telemetry_idx]);
+    if candidate_count == 0u {
+        return;
+    }
+    atomicAdd(&prepass_telemetry[2], candidate_count);
+    atomicAdd(&prepass_telemetry[4], 1u);
+    atomicMax(&prepass_telemetry[5], candidate_count);
+    var histogram_bin = 0u;
+    var remaining = candidate_count;
+    while remaining > 1u && histogram_bin + 1u < TELEMETRY_HISTOGRAM_BINS {
+        remaining = remaining >> 1u;
+        histogram_bin = histogram_bin + 1u;
+    }
+    atomicAdd(&prepass_telemetry[TELEMETRY_HISTOGRAM_OFFSET + histogram_bin], 1u);
 }
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)

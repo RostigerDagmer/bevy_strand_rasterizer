@@ -16,7 +16,7 @@ pub mod prelude {
             StrandMaterial, TieFroxelsToView,
         },
         plugin::{BIND_MAP, LABEL_MAP, StrandRasterizerPlugin},
-        resources::{StochasticCullSettings, TileDebugSettings},
+        resources::{PrepassTelemetrySettings, StochasticCullSettings, TileDebugSettings},
         strand_cache::{StrandCacheAsset, StrandCacheAssetLoader},
     };
 }

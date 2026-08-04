@@ -98,4 +98,5 @@ struct PushConstants {
     target_strands_per_pixel: f32,
     min_keep_probability: f32,
     shadow_keep_probability: f32,
+    telemetry_enabled: u32,
 }

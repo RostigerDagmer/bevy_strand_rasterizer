@@ -42,6 +42,8 @@ pub mod prepass {
     pub const OPAQUE_FINE_DEPTH_TILES: u32 = 45;
     pub const RASTER_TILE_RUN_QUEUE: u32 = 46;
     pub const RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 47;
+    pub const TELEMETRY: u32 = 48;
+    pub const PROJECTED_SEGMENTS: u32 = 49;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -91,6 +93,8 @@ pub mod prepass {
                 "RASTER_TILE_RUN_DISPATCH_ARGS".into(),
                 RASTER_TILE_RUN_DISPATCH_ARGS,
             ),
+            ShaderDefVal::UInt("TELEMETRY".into(), TELEMETRY),
+            ShaderDefVal::UInt("PROJECTED_SEGMENTS".into(), PROJECTED_SEGMENTS),
         ]
     }
 }

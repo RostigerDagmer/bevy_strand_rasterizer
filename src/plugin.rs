@@ -171,9 +171,11 @@ impl Plugin for StrandRasterizerPlugin {
             ExtractComponentPlugin::<StrandMaterial>::default(),
             ExtractResourcePlugin::<TileDebugSettings>::default(),
             ExtractResourcePlugin::<StochasticCullSettings>::default(),
+            ExtractResourcePlugin::<PrepassTelemetrySettings>::default(),
         ));
         app.init_resource::<TileDebugSettings>();
         app.init_resource::<StochasticCullSettings>();
+        app.init_resource::<PrepassTelemetrySettings>();
         app.init_resource::<StrandAssetResources>();
         app.init_asset::<StrandCacheAsset>();
         app.init_asset_loader::<StrandCacheAssetLoader>();
@@ -284,10 +286,8 @@ fn use_prepass_buffers(
             continue;
         };
         total_strands = total_strands.saturating_add(geom.strand_count);
-        total_segment_budget = total_segment_budget.saturating_add(
-            geom.strand_count
-                .saturating_mul(geom.max_segments_in_strand),
-        );
+        total_segment_budget =
+            total_segment_budget.saturating_add(geom.index_count.saturating_sub(geom.strand_count));
         max_strands_in_instance = max_strands_in_instance.max(geom.strand_count);
         max_segments_in_strand = max_segments_in_strand.max(geom.max_segments_in_strand);
         max_shading_texels_in_instance = max_shading_texels_in_instance.max(geom.index_count);
@@ -562,6 +562,8 @@ fn use_prepass_buffers(
         || prepass_resources.geos_prefix_buffer.is_none()
         || prepass_resources.indirect_args.is_none()
         || prepass_resources.prefix_indirect_args.is_none()
+        || prepass_resources.telemetry.is_none()
+        || prepass_resources.projected_segments.is_none()
         || prepass_resources.chunk_pool.is_none()
         || prepass_resources.free_heads.is_none()
         || prepass_resources.frustum_table.is_none()
@@ -658,6 +660,8 @@ fn use_prepass_buffers(
             + (prepass_capacity as u64) * (std::mem::size_of::<FinePrepassTask>() as u64);
         let binning_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
+        let projected_segments_bytes = (binning_capacity as u64)
+            * std::mem::size_of::<crate::pipelines::task_contract::ProjectedSegment>() as u64;
         let instance_id_bytes = (instance_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let instance_prefix_bytes =
             ((instance_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
@@ -710,6 +714,9 @@ fn use_prepass_buffers(
             + (fine_seg_ref_capacity as u64) * std::mem::size_of::<FineSegRef>() as u64;
         let opaque_fine_depth_tiles_bytes =
             (opaque_fine_depth_tile_capacity as u64) * (2 * std::mem::size_of::<u32>() as u64);
+        let telemetry_bytes = ((crate::pipelines::prepass::TELEMETRY_PAGE_COUNTS_OFFSET_WORDS
+            + coarse_count_page_capacity) as u64)
+            * std::mem::size_of::<u32>() as u64;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prepass_queue"),
@@ -720,6 +727,12 @@ fn use_prepass_buffers(
         prepass_resources.binning_queue = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_binning_queue"),
             size: binning_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.projected_segments = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_projected_segments"),
+            size: projected_segments_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -757,6 +770,12 @@ fn use_prepass_buffers(
             label: Some("strand_prefix_indirect_args"),
             size: (3 * std::mem::size_of::<u32>()) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.telemetry = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_prepass_telemetry"),
+            size: telemetry_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         prepass_resources.chunk_pool = Some(device.create_buffer(&BufferDescriptor {

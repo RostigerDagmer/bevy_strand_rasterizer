@@ -74,6 +74,14 @@ pub struct StochasticCullSettings {
     pub shadow_keep_probability: f32,
 }
 
+/// Enables GPU workload counters for profiling the strand prepass.
+///
+/// The counters add atomics to the binning pass and are therefore disabled by default.
+#[derive(Clone, Copy, Debug, Default, Resource, Reflect, ExtractResource)]
+pub struct PrepassTelemetrySettings {
+    pub enabled: bool,
+}
+
 impl Default for StochasticCullSettings {
     fn default() -> Self {
         Self {
