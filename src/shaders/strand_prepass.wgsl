@@ -1156,7 +1156,27 @@ fn fine_cell_idx(local_x: u32, local_y: u32, local_z: u32) -> u32 {
     return (local_z * COARSE_FINE_TILE_EXTENT + local_y) * COARSE_FINE_TILE_EXTENT + local_x;
 }
 
-fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, task: BinningTask) {
+fn make_fine_seg_ref(task: BinningTask, meta_id: u32) -> FineSegRef {
+    var packed_segment = 0u;
+    if meta_id < arrayLength(&t_strand_metadata) {
+        let meta_ptr = t_strand_metadata[meta_id];
+        if is_valid_ptr(meta_ptr) {
+            let meta_base = meta_ptr.offset / SIZEOF_METADATA;
+            let meta_count = meta_ptr.size / SIZEOF_METADATA;
+            if task.chunk_id < meta_count {
+                let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + task.chunk_id];
+                if task.seg_idx >= strand_meta.offset {
+                    let seg_local = min(task.seg_idx - strand_meta.offset, 0xFFFFu);
+                    let material_idx = min(strand_meta.material_idx, 0xFFFFu);
+                    packed_segment = seg_local | (material_idx << 16u);
+                }
+            }
+        }
+    }
+    return FineSegRef(task.id_info, task.chunk_id, task.seg_idx, packed_segment);
+}
+
+fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, seg_ref: FineSegRef) {
     if local_x >= COARSE_FINE_TILE_EXTENT || local_y >= COARSE_FINE_TILE_EXTENT || local_z >= COARSE_DEPTH_SLICES {
         return;
     }
@@ -1172,43 +1192,15 @@ fn write_fine_seg_ref(page_idx: u32, local_x: u32, local_y: u32, local_z: u32, t
     if page_meta.seg_ref_count == 0u {
         return;
     }
-    let count_idx = page_idx * COARSE_COUNT_PAGE_SIZE + cell_idx;
-    if count_idx >= arrayLength(&coarse_count_pages.counts) {
-        return;
-    }
-    let cell_count = atomicLoad(&coarse_count_pages.counts[count_idx]);
-    if cell_count == 0u {
-        return;
-    }
+    // The count and fill passes execute the same deterministic traversal.
+    // Prefixing clears this cursor and reserves exactly the counted range, so
+    // reloading the atomic cell count for every emitted reference is redundant.
     let local_write = atomicAdd(&fine_cell_write_cursors[global_cell_idx], 1u);
-    if local_write >= cell_count {
-        return;
-    }
     let dst = page_meta.seg_ref_base + fine_cell_offsets[global_cell_idx] + local_write;
     if dst >= arrayLength(&fine_seg_refs.refs) {
         return;
     }
-    var packed_segment = 0u;
-    let inst_id = task.id_info;
-    if inst_id < arrayLength(&strand_instances) {
-        let meta_id = strand_instances[inst_id].meta_id;
-        if meta_id < arrayLength(&t_strand_metadata) {
-            let meta_ptr = t_strand_metadata[meta_id];
-            if is_valid_ptr(meta_ptr) {
-                let meta_base = meta_ptr.offset / SIZEOF_METADATA;
-                let meta_count = meta_ptr.size / SIZEOF_METADATA;
-                if task.chunk_id < meta_count {
-                    let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + task.chunk_id];
-                    if task.seg_idx >= strand_meta.offset {
-                        let seg_local = min(task.seg_idx - strand_meta.offset, 0xFFFFu);
-                        let material_idx = min(strand_meta.material_idx, 0xFFFFu);
-                        packed_segment = seg_local | (material_idx << 16u);
-                    }
-                }
-            }
-        }
-    }
-    fine_seg_refs.refs[dst] = FineSegRef(task.id_info, task.chunk_id, task.seg_idx, packed_segment);
+    fine_seg_refs.refs[dst] = seg_ref;
 }
 
 fn clip_axis_to_range(p: f32, d: f32, min_v: f32, max_v: f32, t_min: f32, t_max: f32) -> ClipRange {
@@ -1275,7 +1267,7 @@ fn trace_segment_into_coarse_count_page(
     local_coarse_tile: u32,
     mark_only: bool,
     fill_refs: bool,
-    task: BinningTask,
+    seg_ref: FineSegRef,
 ) {
     let coarse_x = local_coarse_tile % frustum.coarse_tiles_x;
     let coarse_y = local_coarse_tile / frustum.coarse_tiles_x;
@@ -1403,7 +1395,7 @@ fn trace_segment_into_coarse_count_page(
                 continue;
             }
             if fill_refs {
-                write_fine_seg_ref(page_idx, u32(f.x), u32(f.y), u32(f.z), task);
+                write_fine_seg_ref(page_idx, u32(f.x), u32(f.y), u32(f.z), seg_ref);
             } else {
                 increment_coarse_count_page_cell(page_idx, u32(f.x), u32(f.y), u32(f.z));
             }
@@ -1437,7 +1429,7 @@ fn find_coarse_asset_range(inst_id: u32, frustum_id: u32) -> u32 {
     return INVALID_PTR;
 }
 
-fn visit_segment_asset_coarse_tiles(p0: vec3<f32>, p1: vec3<f32>, frustum: FrustumDesc, frustum_id: u32, inst_id: u32, mark_only: bool, fill_refs: bool, task: BinningTask) {
+fn visit_segment_asset_coarse_tiles(p0: vec3<f32>, p1: vec3<f32>, frustum: FrustumDesc, frustum_id: u32, inst_id: u32, mark_only: bool, fill_refs: bool, seg_ref: FineSegRef) {
     let range_idx = find_coarse_asset_range(inst_id, frustum_id);
     if range_idx == INVALID_PTR || range_idx >= arrayLength(&coarse_range_queue.ranges) {
         return;
@@ -1526,7 +1518,7 @@ fn visit_segment_asset_coarse_tiles(p0: vec3<f32>, p1: vec3<f32>, frustum: Frust
         let local_tile = cy * frustum.coarse_tiles_x + cx;
         if local_tile < frustum.coarse_depth_tile_count {
             let tile_idx = frustum.coarse_depth_tile_base + local_tile;
-            trace_segment_into_coarse_count_page(p0, p1, frustum, tile_idx, local_tile, mark_only, fill_refs, task);
+            trace_segment_into_coarse_count_page(p0, p1, frustum, tile_idx, local_tile, mark_only, fill_refs, seg_ref);
         }
 
         if all(f == f1) {
@@ -1605,8 +1597,12 @@ fn process_binning_task(task_idx: u32, mark_only: bool, fill_refs: bool) {
     );
     let p0 = vec3<f32>(p0_raw.xy, depth_key_for_frustum(p0_raw.z, frustum));
     let p1 = vec3<f32>(p1_raw.xy, depth_key_for_frustum(p1_raw.z, frustum));
+    var seg_ref = FineSegRef(task.id_info, task.chunk_id, task.seg_idx, 0u);
+    if fill_refs {
+        seg_ref = make_fine_seg_ref(task, instance.meta_id);
+    }
 
-    visit_segment_asset_coarse_tiles(p0, p1, frustum, frustum_id, inst_id, mark_only, fill_refs, task);
+    visit_segment_asset_coarse_tiles(p0, p1, frustum, frustum_id, inst_id, mark_only, fill_refs, seg_ref);
 }
 
 @compute @workgroup_size(FINE_WORKGROUP_SIZE, 1, 1)
