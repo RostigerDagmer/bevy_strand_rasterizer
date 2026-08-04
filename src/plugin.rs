@@ -574,6 +574,9 @@ fn use_prepass_buffers(
         || prepass_resources.page_candidate_cursors.is_none()
         || prepass_resources.page_candidates.is_none()
         || prepass_resources.virtual_page_candidate_counts.is_none()
+        || prepass_resources
+            .frustum_instance_keep_probabilities
+            .is_none()
         || prepass_resources.chunk_pool.is_none()
         || prepass_resources.free_heads.is_none()
         || prepass_resources.frustum_table.is_none()
@@ -681,6 +684,9 @@ fn use_prepass_buffers(
             (page_candidate_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let virtual_page_candidate_counts_bytes =
             (coarse_count_page_table_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let frustum_instance_keep_probabilities_bytes = (instance_capacity as u64)
+            * (frustum_capacity as u64)
+            * std::mem::size_of::<f32>() as u64;
         let instance_id_bytes = (instance_capacity as u64) * (std::mem::size_of::<u32>() as u64);
         let instance_prefix_bytes =
             ((instance_capacity as u64) + 1) * (std::mem::size_of::<u32>() as u64);
@@ -734,7 +740,9 @@ fn use_prepass_buffers(
         let opaque_fine_depth_tiles_bytes =
             (opaque_fine_depth_tile_capacity as u64) * (2 * std::mem::size_of::<u32>() as u64);
         let telemetry_bytes = ((crate::pipelines::prepass::TELEMETRY_PAGE_COUNTS_OFFSET_WORDS
-            + coarse_count_page_capacity) as u64)
+            + coarse_count_page_capacity
+            + frustum_capacity * crate::pipelines::prepass::FRUSTUM_TELEMETRY_STRIDE_WORDS)
+            as u64)
             * std::mem::size_of::<u32>() as u64;
 
         prepass_resources.prepass_queue = Some(device.create_buffer(&BufferDescriptor {
@@ -783,6 +791,13 @@ fn use_prepass_buffers(
             Some(device.create_buffer(&BufferDescriptor {
                 label: Some("strand_virtual_page_candidate_counts"),
                 size: virtual_page_candidate_counts_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.frustum_instance_keep_probabilities =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_frustum_instance_keep_probabilities"),
+                size: frustum_instance_keep_probabilities_bytes,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));

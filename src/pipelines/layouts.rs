@@ -49,6 +49,7 @@ pub mod prepass {
     pub const PAGE_CANDIDATE_CURSORS: u32 = 52;
     pub const PAGE_CANDIDATES: u32 = 53;
     pub const VIRTUAL_PAGE_CANDIDATE_COUNTS: u32 = 54;
+    pub const FRUSTUM_INSTANCE_KEEP_PROBABILITIES: u32 = 55;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -107,6 +108,10 @@ pub mod prepass {
             ShaderDefVal::UInt(
                 "VIRTUAL_PAGE_CANDIDATE_COUNTS".into(),
                 VIRTUAL_PAGE_CANDIDATE_COUNTS,
+            ),
+            ShaderDefVal::UInt(
+                "FRUSTUM_INSTANCE_KEEP_PROBABILITIES".into(),
+                FRUSTUM_INSTANCE_KEEP_PROBABILITIES,
             ),
         ]
     }

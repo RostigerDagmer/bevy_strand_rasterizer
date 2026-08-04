@@ -70,6 +70,18 @@ const DEBUG_DISABLE_DEPTH_WARP_LUT: bool = false;
 const TELEMETRY_HISTOGRAM_BINS: u32 = 32u;
 const TELEMETRY_HISTOGRAM_OFFSET: u32 = 8u;
 const TELEMETRY_PAGE_COUNTS_OFFSET: u32 = TELEMETRY_HISTOGRAM_OFFSET + TELEMETRY_HISTOGRAM_BINS;
+const FRUSTUM_TELEMETRY_STRIDE: u32 = 11u;
+const FRUSTUM_TELEMETRY_VISIBLE_INSTANCES: u32 = 0u;
+const FRUSTUM_TELEMETRY_VISIBLE_STRANDS: u32 = 1u;
+const FRUSTUM_TELEMETRY_RETAINED_STRANDS: u32 = 2u;
+const FRUSTUM_TELEMETRY_EMITTED_SEGMENTS: u32 = 3u;
+const FRUSTUM_TELEMETRY_ALLOCATED_PAGES: u32 = 4u;
+const FRUSTUM_TELEMETRY_PAGE_CANDIDATES: u32 = 5u;
+const FRUSTUM_TELEMETRY_FINE_REFS: u32 = 6u;
+const FRUSTUM_TELEMETRY_RASTER_RUNS: u32 = 7u;
+const FRUSTUM_TELEMETRY_RASTER_LOAD: u32 = 8u;
+const FRUSTUM_TELEMETRY_MAX_PAGE_CANDIDATES: u32 = 9u;
+const FRUSTUM_TELEMETRY_MAX_RASTER_LOAD: u32 = 10u;
 
 var<workgroup> page_scan_values: array<u32, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> page_scan_counts: array<u32, COARSE_COUNT_PAGE_SIZE>;
@@ -230,6 +242,7 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATE_CURSORS}) var<storage, read_write> page_candidate_cursors: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATES}) var<storage, read_write> page_candidates: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{VIRTUAL_PAGE_CANDIDATE_COUNTS}) var<storage, read_write> virtual_page_candidate_counts: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{FRUSTUM_INSTANCE_KEEP_PROBABILITIES}) var<storage, read_write> frustum_instance_keep_probabilities: array<f32>;
 
 var<workgroup> candidate_scan_base: u32;
 var<workgroup> candidate_scan_block_base: u32;
@@ -238,6 +251,30 @@ var<workgroup> csr_cell_counts: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> csr_cell_cursors: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> csr_page_ref_base: u32;
 var<workgroup> csr_page_valid: u32;
+
+fn frustum_telemetry_idx(frustum_id: u32, field: u32) -> u32 {
+    return pc.scan_save_base + frustum_id * FRUSTUM_TELEMETRY_STRIDE + field;
+}
+
+fn frustum_telemetry_add(frustum_id: u32, field: u32, value: u32) {
+    if pc.telemetry_enabled == 0u || frustum_id >= pc.frustum_count {
+        return;
+    }
+    let idx = frustum_telemetry_idx(frustum_id, field);
+    if idx < arrayLength(&prepass_telemetry) {
+        atomicAdd(&prepass_telemetry[idx], value);
+    }
+}
+
+fn frustum_telemetry_max(frustum_id: u32, field: u32, value: u32) {
+    if pc.telemetry_enabled == 0u || frustum_id >= pc.frustum_count {
+        return;
+    }
+    let idx = frustum_telemetry_idx(frustum_id, field);
+    if idx < arrayLength(&prepass_telemetry) {
+        atomicMax(&prepass_telemetry[idx], value);
+    }
+}
 
 fn aabb_projected_screen_area(frustum_id: u32, aabb: Aabb, world_from_local: mat4x4<f32>) -> f32 {
     if frustum_id >= arrayLength(&frustum_table) {
@@ -665,16 +702,27 @@ fn broad_prepass(
         let frustum_count = min(pc.frustum_count, arrayLength(&frustum_table));
         for (var fi = 0u; fi < frustum_count; fi = fi + 1u) {
             let frustum = frustum_table[fi];
+            let keep_idx = inst_idx * frustum_count + fi;
+            var frustum_keep_probability = 0.0;
             if frustum.kind <= 1u {
                 let visible_in_frustum = emit_coarse_asset_range_for_aabb(inst_idx, fi, geo.aabb, instance.world_from_local);
                 geo_visible = visible_in_frustum || geo_visible;
                 if visible_in_frustum && frustum.kind == 0u {
                     let area = aabb_projected_screen_area(fi, geo.aabb, instance.world_from_local);
-                    camera_keep_probability = max(camera_keep_probability, stochastic_camera_keep_probability(strand_count, area));
+                    frustum_keep_probability = stochastic_camera_keep_probability(strand_count, area);
+                    camera_keep_probability = max(camera_keep_probability, frustum_keep_probability);
                 } else if visible_in_frustum && frustum.kind == 1u {
                     let area = aabb_projected_screen_area(fi, geo.aabb, instance.world_from_local);
-                    shadow_keep_probability = max(shadow_keep_probability, stochastic_shadow_keep_probability(strand_count, area, frustum));
+                    frustum_keep_probability = stochastic_shadow_keep_probability(strand_count, area, frustum);
+                    shadow_keep_probability = max(shadow_keep_probability, frustum_keep_probability);
                 }
+                if visible_in_frustum {
+                    frustum_telemetry_add(fi, FRUSTUM_TELEMETRY_VISIBLE_INSTANCES, 1u);
+                    frustum_telemetry_add(fi, FRUSTUM_TELEMETRY_VISIBLE_STRANDS, strand_count);
+                }
+            }
+            if keep_idx < arrayLength(&frustum_instance_keep_probabilities) {
+                frustum_instance_keep_probabilities[keep_idx] = frustum_keep_probability;
             }
         }
 
@@ -983,11 +1031,15 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
         if frustum.kind > 1u {
             continue;
         }
-        let keep_probability = select(
+        var keep_probability = select(
             broad.camera_keep_probability,
             broad.shadow_keep_probability,
             frustum.kind == 1u,
         );
+        let keep_idx = task.inst_id * frustum_count + fi;
+        if keep_idx < arrayLength(&frustum_instance_keep_probabilities) {
+            keep_probability = frustum_instance_keep_probabilities[keep_idx];
+        }
         if strand_random > keep_probability {
             continue;
         }
@@ -995,6 +1047,7 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
         let is_shadow = select(0u, 1u, frustum.kind == 1u);
+        frustum_telemetry_add(fi, FRUSTUM_TELEMETRY_RETAINED_STRANDS, 1u);
         let packed_field = pack_binning_field(0u, is_shadow, fi);
         let clip_from_world = clip_from_world_for_frustum(fi);
         let viewport = vec4<f32>(0.0, 0.0, f32(frustum.screen_width), f32(frustum.screen_height));
@@ -1038,6 +1091,7 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
                     pack2x16unorm(clamp(clipped.p1.xy / screen_size, vec2<f32>(0.0), vec2<f32>(1.0))),
                     pack2x16unorm(clamp(vec2<f32>(clipped.p0.z, clipped.p1.z), vec2<f32>(0.0), vec2<f32>(1.0))),
                 );
+                frustum_telemetry_add(fi, FRUSTUM_TELEMETRY_EMITTED_SEGMENTS, 1u);
             }
         }
     }
@@ -2043,6 +2097,11 @@ fn finalize_telemetry(@builtin(global_invocation_id) gid: vec3<u32>) {
     if page_idx >= page_count {
         return;
     }
+    let page_desc = fine_page_meta[page_idx];
+    let frustum_id = frustum_for_coarse_tile(page_desc.coarse_tile_id);
+    if frustum_id != INVALID_PTR {
+        frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_ALLOCATED_PAGES, 1u);
+    }
     let telemetry_idx = TELEMETRY_PAGE_COUNTS_OFFSET + page_idx;
     if telemetry_idx >= arrayLength(&prepass_telemetry) {
         return;
@@ -2057,6 +2116,11 @@ fn finalize_telemetry(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicAdd(&prepass_telemetry[2], candidate_count);
     atomicAdd(&prepass_telemetry[4], 1u);
     atomicMax(&prepass_telemetry[5], candidate_count);
+    if frustum_id != INVALID_PTR {
+        frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_PAGE_CANDIDATES, candidate_count);
+        frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_FINE_REFS, page_desc.seg_ref_count);
+        frustum_telemetry_max(frustum_id, FRUSTUM_TELEMETRY_MAX_PAGE_CANDIDATES, candidate_count);
+    }
     var histogram_bin = 0u;
     var remaining = candidate_count;
     while remaining > 1u && histogram_bin + 1u < TELEMETRY_HISTOGRAM_BINS {
@@ -2548,6 +2612,9 @@ fn emit_raster_work(
             0u,
             0u,
         );
+        frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_RASTER_RUNS, 1u);
+        frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_RASTER_LOAD, tile_run_load_score);
+        frustum_telemetry_max(frustum_id, FRUSTUM_TELEMETRY_MAX_RASTER_LOAD, tile_run_load_score);
     }
 }
 

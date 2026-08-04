@@ -30,6 +30,7 @@ pub const TELEMETRY_HISTOGRAM_BINS: u32 = 32;
 pub const TELEMETRY_HISTOGRAM_OFFSET_WORDS: u32 = 8;
 pub const TELEMETRY_PAGE_COUNTS_OFFSET_WORDS: u32 =
     TELEMETRY_HISTOGRAM_OFFSET_WORDS + TELEMETRY_HISTOGRAM_BINS;
+pub const FRUSTUM_TELEMETRY_STRIDE_WORDS: u32 = 11;
 
 #[derive(Resource, Default)]
 pub struct StrandPrepassResources {
@@ -50,6 +51,7 @@ pub struct StrandPrepassResources {
     pub page_candidate_cursors: Option<Buffer>,
     pub page_candidates: Option<Buffer>,
     pub virtual_page_candidate_counts: Option<Buffer>,
+    pub frustum_instance_keep_probabilities: Option<Buffer>,
     // queue-binning allocator buffers
     pub chunk_pool: Option<Buffer>,
     pub free_heads: Option<Buffer>,
@@ -201,6 +203,7 @@ impl StrandPrepassPipeline {
                 Self::storage_entry(layouts::prepass::PAGE_CANDIDATE_CURSORS, false),
                 Self::storage_entry(layouts::prepass::PAGE_CANDIDATES, false),
                 Self::storage_entry(layouts::prepass::VIRTUAL_PAGE_CANDIDATE_COUNTS, false),
+                Self::storage_entry(layouts::prepass::FRUSTUM_INSTANCE_KEEP_PROBABILITIES, false),
             ],
         )
     }
@@ -423,6 +426,10 @@ pub fn create_prepass_bind_groups(
     let page_candidates = resources.page_candidates.as_ref().ok_or(())?;
     let virtual_page_candidate_counts =
         resources.virtual_page_candidate_counts.as_ref().ok_or(())?;
+    let frustum_instance_keep_probabilities = resources
+        .frustum_instance_keep_probabilities
+        .as_ref()
+        .ok_or(())?;
     let frustum_table = resources.frustum_table.as_ref().ok_or(())?;
     let froxel_bucket_heads = resources.froxel_bucket_heads.as_ref().ok_or(())?;
     let chunk_pool = resources.chunk_pool.as_ref().ok_or(())?;
@@ -621,6 +628,10 @@ pub fn create_prepass_bind_groups(
                     binding: layouts::prepass::VIRTUAL_PAGE_CANDIDATE_COUNTS,
                     resource: virtual_page_candidate_counts.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::FRUSTUM_INSTANCE_KEEP_PROBABILITIES,
+                    resource: frustum_instance_keep_probabilities.as_entire_binding(),
+                },
             ],
         ),
         device.create_bind_group(
@@ -739,6 +750,7 @@ pub fn run_prepass(
     instance_count: u32,
     max_strands_in_instance: u32,
     coarse_depth_tile_capacity: u32,
+    coarse_count_page_capacity: u32,
     coarse_range_capacity: u32,
 ) {
     let diagnostics = render_context.diagnostic_recorder();
@@ -960,6 +972,7 @@ pub fn run_prepass(
     let pushconstants = PushConstants {
         num_elements: instance_count,
         frustum_count,
+        scan_save_base: TELEMETRY_PAGE_COUNTS_OFFSET_WORDS + coarse_count_page_capacity,
         stochastic_cull_enabled: u32::from(cull_settings.enabled),
         target_strands_per_pixel: cull_settings.target_strands_per_pixel,
         min_keep_probability: cull_settings.min_keep_probability,
@@ -1183,6 +1196,33 @@ pub fn run_prepass(
                 &telemetry.slice(word * 4..word * 4 + 4),
                 format!("strand_prepass/telemetry/candidate_histogram/{bin}"),
             );
+        }
+        const FRUSTUM_FIELDS: [(&str, u64); FRUSTUM_TELEMETRY_STRIDE_WORDS as usize] = [
+            ("visible_instances", 0),
+            ("visible_strands", 1),
+            ("retained_strands", 2),
+            ("emitted_segments", 3),
+            ("allocated_pages", 4),
+            ("page_candidates", 5),
+            ("fine_refs", 6),
+            ("raster_runs", 7),
+            ("raster_load", 8),
+            ("max_page_candidates", 9),
+            ("max_raster_load", 10),
+        ];
+        let frustum_base =
+            u64::from(TELEMETRY_PAGE_COUNTS_OFFSET_WORDS + coarse_count_page_capacity);
+        for frustum_id in 0..frustum_count {
+            for (name, field) in FRUSTUM_FIELDS {
+                let word = frustum_base
+                    + u64::from(frustum_id) * u64::from(FRUSTUM_TELEMETRY_STRIDE_WORDS)
+                    + field;
+                diagnostics.record_u32(
+                    encoder,
+                    &telemetry.slice(word * 4..word * 4 + 4),
+                    format!("strand_prepass/telemetry/frustum/{frustum_id}/{name}"),
+                );
+            }
         }
     }
 }

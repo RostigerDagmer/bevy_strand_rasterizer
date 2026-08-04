@@ -203,6 +203,7 @@ pub fn work_preparation_pass(
         prepass_resources.instance_count,
         prepass_resources.max_strands_in_instance,
         prepass_resources.coarse_depth_tile_capacity,
+        prepass_resources.coarse_count_page_capacity,
         prepass_resources.coarse_range_capacity,
     );
     info!("Finished prepass");

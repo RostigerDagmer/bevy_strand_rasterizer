@@ -712,6 +712,7 @@ fn collect_benchmark_samples(
     let mut telemetry_histogram = [0_u64; 32];
     let mut page_candidates = None;
     let mut active_candidate_pages = None;
+    let mut frustum_retention = BTreeMap::<usize, (Option<f64>, Option<f64>)>::new();
     for diagnostic in diagnostics.iter() {
         let path = diagnostic.path().as_str();
         if (path.starts_with("render/strand_prepass/")
@@ -742,6 +743,16 @@ fn collect_benchmark_samples(
                 page_candidates = Some(value);
             } else if path.ends_with("/active_candidate_pages") {
                 active_candidate_pages = Some(value);
+            } else if let Some(rest) = path.strip_prefix("render/strand_prepass/telemetry/frustum/")
+                && let Some((frustum_id, field)) = rest.split_once('/')
+                && let Ok(frustum_id) = frustum_id.parse::<usize>()
+            {
+                let entry = frustum_retention.entry(frustum_id).or_default();
+                match field {
+                    "visible_strands" => entry.0 = Some(value),
+                    "retained_strands" => entry.1 = Some(value),
+                    _ => {}
+                }
             }
         }
     }
@@ -763,6 +774,17 @@ fn collect_benchmark_samples(
                 ))
                 .or_default()
                 .push(upper_bound as f64);
+        }
+    }
+    for (frustum_id, (visible, retained)) in frustum_retention {
+        if let (Some(visible), Some(retained)) = (visible, retained)
+            && visible > 0.0
+        {
+            state
+                .samples
+                .entry(format!("derived/frustum/{frustum_id}/retention_ratio"))
+                .or_default()
+                .push(retained / visible);
         }
     }
     state.measured += 1;
