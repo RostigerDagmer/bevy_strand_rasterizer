@@ -177,6 +177,12 @@ struct RasterTileRunQueue {
     items: array<RasterTileRun>,
 }
 
+struct ActiveFineTileQueue {
+    head: atomic<u32>,
+    tail: atomic<u32>,
+    items: array<u32>,
+}
+
 struct FineSegRefBuffer {
     tail: atomic<u32>,
     refs: array<FineSegRef>,
@@ -245,6 +251,10 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{PAGE_CANDIDATES}) var<storage, read_write> page_candidates: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{VIRTUAL_PAGE_CANDIDATE_COUNTS}) var<storage, read_write> virtual_page_candidate_counts: array<atomic<u32>>;
 @group(#{PREPASS_GROUP}) @binding(#{FRUSTUM_INSTANCE_KEEP_PROBABILITIES}) var<storage, read_write> frustum_instance_keep_probabilities: array<f32>;
+@group(#{PREPASS_GROUP}) @binding(#{ACTIVE_FINE_TILE_QUEUE}) var<storage, read_write> active_fine_tile_queue: ActiveFineTileQueue;
+@group(#{PREPASS_GROUP}) @binding(#{ACTIVE_FINE_TILE_FLAGS}) var<storage, read_write> active_fine_tile_flags: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{ACTIVE_FINE_TILE_BLOCK_COUNTS}) var<storage, read_write> active_fine_tile_block_counts: array<atomic<u32>>;
+@group(#{PREPASS_GROUP}) @binding(#{ACTIVE_FINE_TILE_BLOCK_OFFSETS}) var<storage, read_write> active_fine_tile_block_offsets: array<u32>;
 
 var<workgroup> candidate_scan_base: u32;
 var<workgroup> candidate_scan_block_base: u32;
@@ -253,6 +263,7 @@ var<workgroup> csr_cell_counts: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> csr_cell_cursors: array<atomic<u32>, COARSE_COUNT_PAGE_SIZE>;
 var<workgroup> csr_page_ref_base: u32;
 var<workgroup> csr_page_valid: u32;
+var<workgroup> active_page_frustum_id: u32;
 
 fn frustum_telemetry_idx(frustum_id: u32, field: u32) -> u32 {
     return pc.scan_save_base + frustum_id * FRUSTUM_TELEMETRY_STRIDE + field;
@@ -2084,6 +2095,21 @@ fn prefix_fine_pages(
             0u,
             flags,
         );
+        active_page_frustum_id = frustum_for_coarse_tile(page_desc.coarse_tile_id);
+    }
+    workgroupBarrier();
+
+    if cell_idx < COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT
+        && fine_page_meta[page_idx].flags == 0u
+        && active_page_frustum_id != INVALID_PTR
+    {
+        var tile_has_work = false;
+        for (var z = 0u; z < COARSE_DEPTH_SLICES; z += 1u) {
+            tile_has_work = tile_has_work || page_scan_counts[z * COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT + cell_idx] > 0u;
+        }
+        if tile_has_work {
+            append_active_fine_tile(active_page_frustum_id, page_desc.coarse_tile_id, cell_idx);
+        }
     }
 }
 
@@ -2147,6 +2173,39 @@ fn frustum_for_coarse_tile(tile_idx: u32) -> u32 {
         }
     }
     return INVALID_PTR;
+}
+
+fn append_active_fine_tile(frustum_id: u32, coarse_tile_id: u32, local_fine_tile: u32) {
+    if frustum_id >= arrayLength(&frustum_table) {
+        return;
+    }
+    let frustum = frustum_table[frustum_id];
+    let local_coarse_tile = coarse_tile_id - frustum.coarse_depth_tile_base;
+    let coarse_x = local_coarse_tile % frustum.coarse_tiles_x;
+    let coarse_y = local_coarse_tile / frustum.coarse_tiles_x;
+    let local_x = local_fine_tile % COARSE_FINE_TILE_EXTENT;
+    let local_y = local_fine_tile / COARSE_FINE_TILE_EXTENT;
+    let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + local_x;
+    let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + local_y;
+    let fine_tiles_x = ceil_div_u32(frustum.screen_width, frustum.froxel_size_x);
+    let fine_tiles_y = ceil_div_u32(frustum.screen_height, frustum.froxel_size_y);
+    if fine_x >= fine_tiles_x || fine_y >= fine_tiles_y {
+        return;
+    }
+    // Match the former dense emitter's coarse-tile-major traversal so the
+    // compact queue retains its established cache and raster work ordering.
+    let flag_idx = coarse_tile_id * (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT)
+        + local_fine_tile;
+    if flag_idx >= arrayLength(&active_fine_tile_flags) {
+        return;
+    }
+    if atomicExchange(&active_fine_tile_flags[flag_idx], 1u) != 0u {
+        return;
+    }
+    let block_idx = flag_idx / COARSE_COUNT_PAGE_SIZE;
+    if block_idx < arrayLength(&active_fine_tile_block_counts) {
+        atomicAdd(&active_fine_tile_block_counts[block_idx], 1u);
+    }
 }
 
 fn trace_candidate_inside_page(
@@ -2390,8 +2449,19 @@ fn build_fine_pages_csr(
             0u,
             flags,
         );
+        active_page_frustum_id = frustum_id;
     }
     workgroupBarrier();
+
+    if lane < COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT && csr_page_valid != 0u {
+        var tile_has_work = false;
+        for (var z = 0u; z < COARSE_DEPTH_SLICES; z += 1u) {
+            tile_has_work = tile_has_work || atomicLoad(&csr_cell_counts[z * COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT + lane]) > 0u;
+        }
+        if tile_has_work {
+            append_active_fine_tile(active_page_frustum_id, page_desc.coarse_tile_id, lane);
+        }
+    }
 
     if csr_page_valid != 0u {
         for (var candidate_local = lane; candidate_local < candidate_count; candidate_local += COARSE_COUNT_PAGE_SIZE) {
@@ -2480,6 +2550,103 @@ fn request_shadow_dom_pages(frustum_id: u32, frustum: FrustumDesc, fine_x: u32, 
 }
 
 @compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
+fn prefix_active_tile_blocks(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+) {
+    let lane = local_id.x;
+    if lane == 0u {
+        candidate_scan_base = 0u;
+    }
+    workgroupBarrier();
+
+    let block_count = arrayLength(&active_fine_tile_block_counts);
+    let chunk_count = ceil_div_u32(block_count, COARSE_COUNT_PAGE_SIZE);
+    for (var chunk = 0u; chunk < chunk_count; chunk += 1u) {
+        let block_idx = chunk * COARSE_COUNT_PAGE_SIZE + lane;
+        var count = 0u;
+        if block_idx < block_count {
+            count = atomicLoad(&active_fine_tile_block_counts[block_idx]);
+        }
+        let subgroup_exclusive = subgroupExclusiveAdd(count);
+        let subgroup_inclusive = subgroupInclusiveAdd(count);
+        if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+            page_scan_values[subgroup_id] = subgroup_inclusive;
+        }
+        workgroupBarrier();
+        if lane == 0u {
+            var chunk_total = 0u;
+            for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i += 1u) {
+                let subtotal = page_scan_values[i];
+                page_scan_values[i] = chunk_total;
+                chunk_total += subtotal;
+            }
+            candidate_scan_block_base = candidate_scan_base;
+            candidate_scan_block_total = chunk_total;
+        }
+        workgroupBarrier();
+        if block_idx < block_count {
+            active_fine_tile_block_offsets[block_idx] = candidate_scan_block_base
+                + page_scan_values[subgroup_id]
+                + subgroup_exclusive;
+        }
+        workgroupBarrier();
+        if lane == 0u {
+            candidate_scan_base += candidate_scan_block_total;
+        }
+        workgroupBarrier();
+    }
+    if lane == 0u {
+        atomicStore(&active_fine_tile_queue.tail, candidate_scan_base);
+    }
+}
+
+@compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
+fn compact_active_tiles(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) subgroup_local_id: u32,
+) {
+    let block_idx = workgroup_id.x;
+    if block_idx >= arrayLength(&active_fine_tile_block_counts) {
+        return;
+    }
+    let lane = local_id.x;
+    let dense_tile_idx = block_idx * COARSE_COUNT_PAGE_SIZE + lane;
+    var active_flag = 0u;
+    if dense_tile_idx < arrayLength(&active_fine_tile_flags) {
+        active_flag = atomicLoad(&active_fine_tile_flags[dense_tile_idx]);
+    }
+    let subgroup_exclusive = subgroupExclusiveAdd(active_flag);
+    let subgroup_inclusive = subgroupInclusiveAdd(active_flag);
+    if subgroup_local_id == SCAN_SUBGROUP_THREADS - 1u {
+        page_scan_values[subgroup_id] = subgroup_inclusive;
+    }
+    workgroupBarrier();
+    if lane == 0u {
+        var accumulator = 0u;
+        for (var i = 0u; i < PAGE_SCAN_SUBGROUPS; i += 1u) {
+            let subtotal = page_scan_values[i];
+            page_scan_values[i] = accumulator;
+            accumulator += subtotal;
+        }
+    }
+    workgroupBarrier();
+
+    if active_flag == 0u {
+        return;
+    }
+    let queue_idx = active_fine_tile_block_offsets[block_idx]
+        + page_scan_values[subgroup_id]
+        + subgroup_exclusive;
+    if queue_idx < arrayLength(&active_fine_tile_queue.items) {
+        active_fine_tile_queue.items[queue_idx] = dense_tile_idx;
+    }
+}
+
+@compute @workgroup_size(COARSE_COUNT_PAGE_SIZE, 1, 1)
 fn emit_raster_work(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -2487,13 +2654,20 @@ fn emit_raster_work(
     @builtin(subgroup_invocation_id) subgroup_local_id: u32,
     @builtin(num_workgroups) num_workgroups: vec3<u32>,
 ) {
-    let fine_stack_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
-    let local_fine_tile = fine_stack_idx % (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
-    let tile_idx = fine_stack_idx / (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
-    if tile_idx >= pc.num_elements {
+    let active_tile_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    let active_tile_count = min(
+        atomicLoad(&active_fine_tile_queue.tail),
+        arrayLength(&active_fine_tile_queue.items),
+    );
+    if active_tile_idx >= active_tile_count {
         return;
     }
 
+    let fine_stack_idx = active_fine_tile_queue.items[active_tile_idx];
+    let local_fine_tile = fine_stack_idx
+        % (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
+    let tile_idx = fine_stack_idx
+        / (COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
     let frustum_id = frustum_for_coarse_tile(tile_idx);
     if frustum_id == INVALID_PTR {
         return;
@@ -2503,14 +2677,10 @@ fn emit_raster_work(
     let coarse_x = local_coarse_tile % frustum.coarse_tiles_x;
     let coarse_y = local_coarse_tile / frustum.coarse_tiles_x;
     let fine_tiles_x = ceil_div_u32(frustum.screen_width, frustum.froxel_size_x);
-    let fine_tiles_y = ceil_div_u32(frustum.screen_height, frustum.froxel_size_y);
     let local_x = local_fine_tile % COARSE_FINE_TILE_EXTENT;
     let local_y = local_fine_tile / COARSE_FINE_TILE_EXTENT;
     let fine_x = coarse_x * COARSE_FINE_TILE_EXTENT + local_x;
     let fine_y = coarse_y * COARSE_FINE_TILE_EXTENT + local_y;
-    if fine_x >= fine_tiles_x || fine_y >= fine_tiles_y {
-        return;
-    }
     let screen_tile_id = fine_y * fine_tiles_x + fine_x;
 
     let cell_lane = local_id.x;
@@ -2632,6 +2802,24 @@ fn emit_raster_work(
         frustum_telemetry_add(frustum_id, FRUSTUM_TELEMETRY_RASTER_LOAD, tile_run_load_score);
         frustum_telemetry_max(frustum_id, FRUSTUM_TELEMETRY_MAX_RASTER_LOAD, tile_run_load_score);
     }
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn finalize_active_tile_dispatch() {
+    let active_tile_count = min(
+        atomicLoad(&active_fine_tile_queue.tail),
+        arrayLength(&active_fine_tile_queue.items),
+    );
+    if active_tile_count == 0u {
+        dispatch_args[0] = 0u;
+        dispatch_args[1] = 0u;
+        dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(active_tile_count, MAX_DISPATCH_WORKGROUPS_PER_DIMENSION);
+    dispatch_args[0] = x;
+    dispatch_args[1] = ceil_div_u32(active_tile_count, x);
+    dispatch_args[2] = 1u;
 }
 
 @compute @workgroup_size(1, 1, 1)

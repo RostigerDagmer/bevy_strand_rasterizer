@@ -62,6 +62,10 @@ pub struct StrandPrepassResources {
     pub camera_raster_tile_run_dispatch_args: Option<Buffer>,
     pub shadow_raster_tile_run_queue: Option<Buffer>,
     pub shadow_raster_tile_run_dispatch_args: Option<Buffer>,
+    pub active_fine_tile_queue: Option<Buffer>,
+    pub active_fine_tile_flags: Option<Buffer>,
+    pub active_fine_tile_block_counts: Option<Buffer>,
+    pub active_fine_tile_block_offsets: Option<Buffer>,
     pub coarse_depth_lut: Option<Buffer>,
     pub coarse_range_queue: Option<Buffer>,
     pub coarse_interval_heads: Option<Buffer>,
@@ -114,6 +118,9 @@ pub struct StrandPrepassPipeline {
     pub segment_scatter: SegmentScatterPipelines,
     pub page_csr: PageCsrPipelines,
     pub finalize_telemetry_pipeline: Option<CachedComputePipelineId>,
+    pub prefix_active_tile_blocks_pipeline: Option<CachedComputePipelineId>,
+    pub compact_active_tiles_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_active_tile_dispatch_pipeline: Option<CachedComputePipelineId>,
     pub emit_raster_work_pipeline: Option<CachedComputePipelineId>,
     pub finalize_raster_dispatch_pipeline: Option<CachedComputePipelineId>,
     pub depth_reduce_bind_group_layout: BindGroupLayout,
@@ -215,6 +222,10 @@ impl StrandPrepassPipeline {
                     layouts::prepass::SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS,
                     false,
                 ),
+                Self::storage_entry(layouts::prepass::ACTIVE_FINE_TILE_QUEUE, false),
+                Self::storage_entry(layouts::prepass::ACTIVE_FINE_TILE_FLAGS, false),
+                Self::storage_entry(layouts::prepass::ACTIVE_FINE_TILE_BLOCK_COUNTS, false),
+                Self::storage_entry(layouts::prepass::ACTIVE_FINE_TILE_BLOCK_OFFSETS, false),
             ],
         )
     }
@@ -400,6 +411,9 @@ impl FromWorld for StrandPrepassPipeline {
             segment_scatter: SegmentScatterPipelines::default(),
             page_csr: PageCsrPipelines::default(),
             finalize_telemetry_pipeline: None,
+            prefix_active_tile_blocks_pipeline: None,
+            compact_active_tiles_pipeline: None,
+            finalize_active_tile_dispatch_pipeline: None,
             emit_raster_work_pipeline: None,
             finalize_raster_dispatch_pipeline: None,
             depth_reduce_bind_group_layout,
@@ -454,6 +468,14 @@ pub fn create_prepass_bind_groups(
     let shadow_raster_tile_run_queue = resources.shadow_raster_tile_run_queue.as_ref().ok_or(())?;
     let shadow_raster_tile_run_dispatch_args = resources
         .shadow_raster_tile_run_dispatch_args
+        .as_ref()
+        .ok_or(())?;
+    let active_fine_tile_queue = resources.active_fine_tile_queue.as_ref().ok_or(())?;
+    let active_fine_tile_flags = resources.active_fine_tile_flags.as_ref().ok_or(())?;
+    let active_fine_tile_block_counts =
+        resources.active_fine_tile_block_counts.as_ref().ok_or(())?;
+    let active_fine_tile_block_offsets = resources
+        .active_fine_tile_block_offsets
         .as_ref()
         .ok_or(())?;
     let coarse_depth_lut = resources.coarse_depth_lut.as_ref().ok_or(())?;
@@ -658,6 +680,22 @@ pub fn create_prepass_bind_groups(
                     binding: layouts::prepass::FRUSTUM_INSTANCE_KEEP_PROBABILITIES,
                     resource: frustum_instance_keep_probabilities.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: layouts::prepass::ACTIVE_FINE_TILE_QUEUE,
+                    resource: active_fine_tile_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::ACTIVE_FINE_TILE_FLAGS,
+                    resource: active_fine_tile_flags.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::ACTIVE_FINE_TILE_BLOCK_COUNTS,
+                    resource: active_fine_tile_block_counts.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::ACTIVE_FINE_TILE_BLOCK_OFFSETS,
+                    resource: active_fine_tile_block_offsets.as_entire_binding(),
+                },
             ],
         ),
         device.create_bind_group(
@@ -772,6 +810,9 @@ pub fn run_prepass(
     page_candidate_cursors: &Buffer,
     virtual_page_candidate_counts: &Buffer,
     fine_seg_refs: &Buffer,
+    active_fine_tile_queue: &Buffer,
+    active_fine_tile_flags: &Buffer,
+    active_fine_tile_block_counts: &Buffer,
     frustum_count: u32,
     instance_count: u32,
     max_strands_in_instance: u32,
@@ -794,6 +835,9 @@ pub fn run_prepass(
     encoder.clear_buffer(coarse_depth_lut, 0, None);
     encoder.clear_buffer(coarse_count_page_table, 0, None);
     encoder.clear_buffer(coarse_count_pages, 0, None);
+    encoder.clear_buffer(active_fine_tile_queue, 0, Some(8));
+    encoder.clear_buffer(active_fine_tile_flags, 0, None);
+    encoder.clear_buffer(active_fine_tile_block_counts, 0, None);
     if fine_binning_backend == FineBinningBackend::PageCsr {
         encoder.clear_buffer(page_candidate_counts, 0, None);
         encoder.clear_buffer(page_candidate_cursors, 0, None);
@@ -875,6 +919,21 @@ pub fn run_prepass(
     };
     let Some(finalize_telemetry_pipeline_id) = pipeline.finalize_telemetry_pipeline else {
         warn!("Finalize telemetry pipeline id not ready yet");
+        return;
+    };
+    let Some(finalize_active_tile_dispatch_pipeline_id) =
+        pipeline.finalize_active_tile_dispatch_pipeline
+    else {
+        warn!("Finalize active tile dispatch pipeline id not ready yet");
+        return;
+    };
+    let Some(prefix_active_tile_blocks_pipeline_id) = pipeline.prefix_active_tile_blocks_pipeline
+    else {
+        warn!("Prefix active tile blocks pipeline id not ready yet");
+        return;
+    };
+    let Some(compact_active_tiles_pipeline_id) = pipeline.compact_active_tiles_pipeline else {
+        warn!("Compact active tiles pipeline id not ready yet");
         return;
     };
     let Some(emit_raster_work_pipeline_id) = pipeline.emit_raster_work_pipeline else {
@@ -977,6 +1036,24 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(finalize_telemetry_pipeline_id)
     else {
         warn!("Finalize telemetry pipeline not found");
+        return;
+    };
+    let Some(finalize_active_tile_dispatch_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_active_tile_dispatch_pipeline_id)
+    else {
+        warn!("Finalize active tile dispatch pipeline not found");
+        return;
+    };
+    let Some(prefix_active_tile_blocks_pipeline) =
+        pipeline_cache.get_compute_pipeline(prefix_active_tile_blocks_pipeline_id)
+    else {
+        warn!("Prefix active tile blocks pipeline not found");
+        return;
+    };
+    let Some(compact_active_tiles_pipeline) =
+        pipeline_cache.get_compute_pipeline(compact_active_tiles_pipeline_id)
+    else {
+        warn!("Compact active tiles pipeline not found");
         return;
     };
     let Some(emit_raster_work_pipeline) =
@@ -1173,25 +1250,38 @@ pub fn run_prepass(
             1,
         );
     }
-    let fine_tile_stack_pushconstants = PushConstants {
-        num_elements: coarse_depth_tile_capacity
-            .saturating_mul(crate::plugin::COARSE_FINE_TILE_EXTENT)
-            .saturating_mul(crate::plugin::COARSE_FINE_TILE_EXTENT),
-        ..pushconstants
-    };
-    let fine_tile_stack_count = fine_tile_stack_pushconstants.num_elements.max(1);
-    let fine_tile_stack_workgroups_x = fine_tile_stack_count.min(65_535).max(1);
-    let fine_tile_stack_workgroups_y = fine_tile_stack_count
-        .div_ceil(fine_tile_stack_workgroups_x)
-        .max(1);
-    pass.set_pipeline(emit_raster_work_pipeline);
-    pass.set_immediates(0, bytemuck::bytes_of(&fine_tile_stack_pushconstants));
-    let span = diagnostics.time_span(&mut pass, "strand_prepass/emit_raster_work");
-    pass.dispatch_workgroups(
-        fine_tile_stack_workgroups_x,
-        fine_tile_stack_workgroups_y,
-        1,
+    pass.set_pipeline(prefix_active_tile_blocks_pipeline);
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/prefix_active_tile_blocks");
+    pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
+
+    let active_tile_block_count =
+        (active_fine_tile_block_counts.size() / std::mem::size_of::<u32>() as u64) as u32;
+    pass.set_pipeline(compact_active_tiles_pipeline);
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/compact_active_tiles");
+    pass.dispatch_workgroups(active_tile_block_count.max(1), 1, 1);
+    span.end(&mut pass);
+
+    pass.set_pipeline(finalize_active_tile_dispatch_pipeline);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        prefix_indirect_args_bind_group,
+        &[],
     );
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_active_tile_dispatch");
+    pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
+    // Do not leave the active dispatch buffer bound as storage while consuming
+    // it as indirect arguments in the following dispatch.
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        indirect_args_bind_group,
+        &[],
+    );
+    pass.set_pipeline(emit_raster_work_pipeline);
+    pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/emit_raster_work");
+    pass.dispatch_workgroups_indirect(prefix_indirect_args, 0);
     span.end(&mut pass);
     pass.set_pipeline(finalize_raster_dispatch_pipeline);
     let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_raster_dispatch");
@@ -1292,6 +1382,9 @@ pub fn update_strand_prepass_pipeline(
     let build_fine_pages_csr_shader = shader_loader.load(prepass_shader_path.clone());
     let finalize_telemetry_shader = shader_loader.load(prepass_shader_path.clone());
     let fill_fine_seg_refs_shader = shader_loader.load(prepass_shader_path.clone());
+    let prefix_active_tile_blocks_shader = shader_loader.load(prepass_shader_path.clone());
+    let compact_active_tiles_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_active_tile_dispatch_shader = shader_loader.load(prepass_shader_path.clone());
     let emit_raster_work_shader = shader_loader.load(prepass_shader_path.clone());
     let finalize_raster_dispatch_shader = shader_loader.load(prepass_shader_path);
     let depth_reduce_shader = shader_loader.load(crate::plugin::embedded_shader_path(
@@ -1470,6 +1563,36 @@ pub fn update_strand_prepass_pipeline(
     ) else {
         return;
     };
+    let Some(finalize_active_tile_dispatch_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_active_tile_dispatch_shader,
+        &allocator,
+        &dims,
+        "finalize_active_tile_dispatch",
+        true,
+    ) else {
+        return;
+    };
+    let Some(prefix_active_tile_blocks_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        prefix_active_tile_blocks_shader,
+        &allocator,
+        &dims,
+        "prefix_active_tile_blocks",
+        false,
+    ) else {
+        return;
+    };
+    let Some(compact_active_tiles_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        compact_active_tiles_shader,
+        &allocator,
+        &dims,
+        "compact_active_tiles",
+        false,
+    ) else {
+        return;
+    };
     let Some(emit_raster_work_pipeline_id) = queue_prepass_pipeline(
         &pipeline_cache,
         emit_raster_work_shader,
@@ -1518,6 +1641,10 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.page_csr.build_pages = Some(build_fine_pages_csr_pipeline_id);
     pipeline_res.finalize_telemetry_pipeline = Some(finalize_telemetry_pipeline_id);
     pipeline_res.segment_scatter.fill = Some(fill_fine_seg_refs_pipeline_id);
+    pipeline_res.prefix_active_tile_blocks_pipeline = Some(prefix_active_tile_blocks_pipeline_id);
+    pipeline_res.compact_active_tiles_pipeline = Some(compact_active_tiles_pipeline_id);
+    pipeline_res.finalize_active_tile_dispatch_pipeline =
+        Some(finalize_active_tile_dispatch_pipeline_id);
     pipeline_res.emit_raster_work_pipeline = Some(emit_raster_work_pipeline_id);
     pipeline_res.finalize_raster_dispatch_pipeline = Some(finalize_raster_dispatch_pipeline_id);
     pipeline_res.depth_reduce_pipeline = Some(depth_reduce_pipeline_id);

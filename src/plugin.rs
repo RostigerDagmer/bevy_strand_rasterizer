@@ -605,6 +605,10 @@ fn use_prepass_buffers(
         || prepass_resources
             .shadow_raster_tile_run_dispatch_args
             .is_none()
+        || prepass_resources.active_fine_tile_queue.is_none()
+        || prepass_resources.active_fine_tile_flags.is_none()
+        || prepass_resources.active_fine_tile_block_counts.is_none()
+        || prepass_resources.active_fine_tile_block_offsets.is_none()
         || prepass_resources.coarse_depth_lut.is_none()
         || prepass_resources.coarse_range_queue.is_none()
         || prepass_resources.coarse_interval_heads.is_none()
@@ -745,6 +749,19 @@ fn use_prepass_buffers(
             + (shadow_raster_tile_run_capacity as u64)
                 * (std::mem::size_of::<RasterTileRun>() as u64);
         let raster_tile_run_dispatch_args_bytes = (3 * std::mem::size_of::<u32>()) as u64;
+        // Keep active tiles ordered exactly like the former dense emit domain:
+        // coarse tile first, then its 4x4 fine children. Preserving that order is
+        // important for cache locality in both work emission and rasterization.
+        let active_fine_tile_capacity = coarse_depth_tile_capacity
+            .saturating_mul(COARSE_FINE_TILE_EXTENT * COARSE_FINE_TILE_EXTENT);
+        let active_fine_tile_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (active_fine_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let active_fine_tile_flags_bytes =
+            (active_fine_tile_capacity as u64) * std::mem::size_of::<u32>() as u64;
+        let active_fine_tile_block_capacity =
+            active_fine_tile_capacity.div_ceil(COARSE_COUNT_PAGE_SIZE);
+        let active_fine_tile_blocks_bytes =
+            (active_fine_tile_block_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let coarse_depth_lut_bytes = (coarse_depth_tile_capacity as u64)
             * (COARSE_DEPTH_SLICES as u64)
             * (std::mem::size_of::<GpuCoarseDepthLutEntry>() as u64);
@@ -945,6 +962,32 @@ fn use_prepass_buffers(
                 label: Some("strand_shadow_raster_tile_run_dispatch_args"),
                 size: raster_tile_run_dispatch_args_bytes,
                 usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.active_fine_tile_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_active_fine_tile_queue"),
+            size: active_fine_tile_queue_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.active_fine_tile_flags = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_active_fine_tile_flags"),
+            size: active_fine_tile_flags_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.active_fine_tile_block_counts =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_active_fine_tile_block_counts"),
+                size: active_fine_tile_blocks_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        prepass_resources.active_fine_tile_block_offsets =
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some("strand_active_fine_tile_block_offsets"),
+                size: active_fine_tile_blocks_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
         prepass_resources.coarse_depth_lut = Some(device.create_buffer(&BufferDescriptor {

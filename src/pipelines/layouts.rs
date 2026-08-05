@@ -52,6 +52,10 @@ pub mod prepass {
     pub const FRUSTUM_INSTANCE_KEEP_PROBABILITIES: u32 = 55;
     pub const SHADOW_RASTER_TILE_RUN_QUEUE: u32 = 56;
     pub const SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS: u32 = 57;
+    pub const ACTIVE_FINE_TILE_QUEUE: u32 = 58;
+    pub const ACTIVE_FINE_TILE_FLAGS: u32 = 59;
+    pub const ACTIVE_FINE_TILE_BLOCK_COUNTS: u32 = 60;
+    pub const ACTIVE_FINE_TILE_BLOCK_OFFSETS: u32 = 61;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -125,6 +129,16 @@ pub mod prepass {
             ShaderDefVal::UInt(
                 "SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS".into(),
                 SHADOW_RASTER_TILE_RUN_DISPATCH_ARGS,
+            ),
+            ShaderDefVal::UInt("ACTIVE_FINE_TILE_QUEUE".into(), ACTIVE_FINE_TILE_QUEUE),
+            ShaderDefVal::UInt("ACTIVE_FINE_TILE_FLAGS".into(), ACTIVE_FINE_TILE_FLAGS),
+            ShaderDefVal::UInt(
+                "ACTIVE_FINE_TILE_BLOCK_COUNTS".into(),
+                ACTIVE_FINE_TILE_BLOCK_COUNTS,
+            ),
+            ShaderDefVal::UInt(
+                "ACTIVE_FINE_TILE_BLOCK_OFFSETS".into(),
+                ACTIVE_FINE_TILE_BLOCK_OFFSETS,
             ),
         ]
     }

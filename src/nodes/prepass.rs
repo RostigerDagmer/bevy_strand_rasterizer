@@ -174,6 +174,17 @@ pub fn work_preparation_pass(
     let Some(fine_seg_refs) = prepass_resources.fine_seg_refs.as_ref() else {
         return;
     };
+    let Some(active_fine_tile_queue) = prepass_resources.active_fine_tile_queue.as_ref() else {
+        return;
+    };
+    let Some(active_fine_tile_flags) = prepass_resources.active_fine_tile_flags.as_ref() else {
+        return;
+    };
+    let Some(active_fine_tile_block_counts) =
+        prepass_resources.active_fine_tile_block_counts.as_ref()
+    else {
+        return;
+    };
     info!("Running prepass");
     run_prepass(
         &mut render_context,
@@ -199,6 +210,9 @@ pub fn work_preparation_pass(
         page_candidate_cursors,
         virtual_page_candidate_counts,
         fine_seg_refs,
+        active_fine_tile_queue,
+        active_fine_tile_flags,
+        active_fine_tile_block_counts,
         prepass_resources.frustum_count,
         prepass_resources.instance_count,
         prepass_resources.max_strands_in_instance,

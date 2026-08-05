@@ -164,6 +164,28 @@ The math/register change saves 0.690 ms at the median. Removing malformed-input 
 further 0.446 ms, for a combined 1.136 ms median reduction. Mean time falls by 18.7% across both
 changes. These results use the telemetry-free page-CSR path.
 
+## Sparse active-tile work emission
+
+The raster-work emitter no longer dispatches one workgroup for every fine XY tile in the padded
+coarse domain. Fine-page construction marks non-empty XY tiles, a small block scan compacts those
+marks in the original coarse-tile-major order, and an indirect dispatch visits only the compacted
+tile indices. Queue entries are the original dense fine-stack index packed into one `u32`; the
+emitter reconstructs the coarse tile and 4x4 child exactly as before.
+
+| Revision | Emit (ms) | Scan (ms) | Compact (ms) | Setup (ms) | Combined emission (ms) | Camera raster (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dense tile domain | 0.428 | - | - | - | 0.428 | 5.687 |
+| Unordered atomic append | 0.168 | - | - | 0.005 | 0.173 | 7.055 |
+| Ordered 12-byte descriptor | 0.180 | 0.007 | 0.006 | 0.005 | 0.197 | 5.687 |
+| Ordered packed index | 0.179 | 0.007 | 0.005 | 0.005 | 0.196 | 5.696 |
+
+The unordered prototype demonstrates why queue order is part of the performance contract: it made
+emission cheap but regressed camera rasterization by 24.1% at the median. Stable compaction restores
+the old coarse-major order and leaves both raster medians unchanged within run-to-run noise. The
+final packed implementation cuts combined emission from 0.428 ms to 0.196 ms (-54.2%, 0.232 ms) on
+squirrel. Its new storage scales with padded fine XY tiles, not fine depth cells: one word each for
+the queue and mark bitset plus two words per 256-tile scan block.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -195,6 +217,12 @@ changes. These results use the telemetry-free page-CSR path.
 - `35-color-premult-precomputed-line.json`: premultiplied direct accumulation and staged projected
   line math.
 - `36-color-unchecked-asset-access.json`: removes asset-validity fallbacks from raster staging.
+- `37-sparse-active-tile-emission.json`: unordered atomic active-tile append experiment. Emission
+  improved, but loss of coarse-major locality substantially regressed rasterization.
+- `38-ordered-sparse-active-tile-emission.json`: deterministic active-tile compaction using the
+  original traversal order and a 12-byte explicit descriptor.
+- `39-packed-active-tile-index.json`: final active queue representation, packing the existing dense
+  fine-stack index into one word.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
 reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are
