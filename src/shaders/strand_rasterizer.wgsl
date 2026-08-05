@@ -107,11 +107,8 @@ struct FineSegRefBuffer {
 @group(#{RASTER_GROUP}) @binding(#{RASTER_TILE_RUN_QUEUE}) var<storage, read> raster_tile_run_queue: RasterTileRunQueue;
 @group(#{RASTER_GROUP}) @binding(#{FINE_SEG_REFS}) var<storage, read> fine_seg_refs: FineSegRefBuffer;
 @group(#{RASTER_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
-#ifdef LINEAR
 @group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
-#endif
 #ifdef SHADOWS
-@group(#{RASTER_GROUP}) @binding(#{SHADOW_DOM_SURFACE_IDS}) var<storage, read> shadow_dom_surface_ids: array<vec2<u32>>;
 @group(#{RASTER_GROUP}) @binding(#{DIRECTIONAL_LIGHT_DEPTH_TEXTURE}) var directional_shadow_textures: texture_depth_2d_array;
 #endif
 

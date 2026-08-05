@@ -29,7 +29,7 @@ use bevy::{
     window::{ExitCondition, PresentMode, WindowCloseRequested, WindowResolution},
     winit::WinitPlugin,
 };
-use bevy_gpu_paging_allocator::{GpuPagingAllocatorPlugin, GpuPagingAllocatorSettings};
+use bevy_gpu_paging_allocator::GpuPagingAllocatorPlugin;
 use bevy_vsms::prelude::BevyVsmsPlugin;
 use serde_json::{Map, Value, json};
 use strand_software_rasterizer::prelude::*;
@@ -318,14 +318,6 @@ fn main() {
             Update,
             (collect_benchmark_samples, hard_exit_display_on_close),
         );
-    app.get_sub_app_mut(RenderApp)
-        .expect("RenderApp must exist")
-        .insert_resource(GpuPagingAllocatorSettings {
-            label_map: LABEL_MAP.clone(),
-            bind_map: BIND_MAP.clone(),
-            buffer_group_idx: 0,
-            table_group_idx: 1,
-        });
     app.run();
 }
 

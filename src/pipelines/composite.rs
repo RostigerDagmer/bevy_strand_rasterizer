@@ -118,7 +118,7 @@ impl FromWorld for CompositionPipeline {
                 targets: vec![Some(ColorTargetState {
                     // IMPORTANT: This format must match the ViewTarget format
                     // Usually HDR first, then tonemapped. Let's assume HDR for now.
-                    format: TextureFormat::Rgba8UnormSrgb,
+                    format: TextureFormat::Rgba16Float, // UnormSrgb,
                     blend: Some(BlendState::ALPHA_BLENDING), // Use alpha blending
                     write_mask: ColorWrites::ALL,
                 })],

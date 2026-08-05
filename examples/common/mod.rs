@@ -3,12 +3,12 @@ use bevy::{
     light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
     prelude::*,
     render::{
-        RenderApp, RenderPlugin,
+        RenderPlugin,
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
     },
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-use bevy_gpu_paging_allocator::{GpuPagingAllocatorPlugin, GpuPagingAllocatorSettings};
+use bevy_gpu_paging_allocator::GpuPagingAllocatorPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_vsms::prelude::BevyVsmsPlugin;
 use default_material::{DefaultMaterial, DefaultMaterialPlugin, make_default_material};
@@ -36,13 +36,6 @@ pub fn add_example_plugins(app: &mut App) -> &mut App {
         .add_plugins(PanOrbitCameraPlugin)
         .add_plugins(FpsDisplayPlugin)
         .add_systems(EguiPrimaryContextPass, strand_material_ui_system);
-    let render_app = app.get_sub_app_mut(RenderApp).unwrap();
-    render_app.insert_resource(GpuPagingAllocatorSettings {
-        label_map: LABEL_MAP.clone(),
-        bind_map: BIND_MAP.clone(),
-        buffer_group_idx: 0,
-        table_group_idx: 1,
-    });
     app
 }
 

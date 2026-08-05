@@ -19,7 +19,10 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use bevy_gpu_paging_allocator::{BindGroupBuilder, GpuPagingAllocator};
+use bevy_gpu_paging_allocator::{
+    BindGroupBuilder, GpuPagingAllocator, PAGING_BUFFER_GROUP, PAGING_TABLE_GROUP,
+    compose_pipeline_layout,
+};
 use bevy_vsms::allocator::{VirtualSurfacePool, VirtualSurfaceRuntime};
 use std::collections::HashMap;
 
@@ -379,24 +382,46 @@ pub fn update_strand_shadow_pipeline(
     ]
     .concat();
 
-    let max_group = allocator
-        .buffer_group_idx
-        .max(allocator.table_group_idx)
-        .max(layouts::rasterizer::RASTER_GROUP)
-        .max(layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP)
-        .max(layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP)
-        .max(layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP)
-        .max(layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP);
     let shadow_layout = StrandShadowPipeline::bind_group_layout_descriptor();
     let vsms_table_layout = StrandShadowPipeline::vsms_table_bind_group_layout_descriptor();
-    let mut layout = vec![shadow_layout.clone(); (max_group + 1) as usize];
-    layout[allocator.buffer_group_idx as usize] = buffer_layout;
-    layout[allocator.table_group_idx as usize] = table_layout;
-    layout[layouts::rasterizer::RASTER_GROUP as usize] = shadow_layout;
-    layout[layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP as usize] = opacity_storage_layout;
-    layout[layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP as usize] = depth_storage_layout.clone();
-    layout[layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP as usize] = vsms_table_layout.clone();
-    layout[layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP as usize] = vsms_table_layout.clone();
+    let layout = match compose_pipeline_layout(
+        "strand_shadow_rasterize_pipeline",
+        [
+            (PAGING_BUFFER_GROUP, "paging buffers", buffer_layout),
+            (PAGING_TABLE_GROUP, "paging tables", table_layout),
+            (
+                layouts::rasterizer::RASTER_GROUP,
+                "strand shadow rasterizer",
+                shadow_layout,
+            ),
+            (
+                layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP,
+                "VSMS opacity storage",
+                opacity_storage_layout,
+            ),
+            (
+                layouts::rasterizer::VSMS_DEPTH_WRITE_GROUP,
+                "VSMS depth storage",
+                depth_storage_layout.clone(),
+            ),
+            (
+                layouts::rasterizer::VSMS_OPACITY_TABLE_GROUP,
+                "VSMS opacity table",
+                vsms_table_layout.clone(),
+            ),
+            (
+                layouts::rasterizer::VSMS_DEPTH_TABLE_GROUP,
+                "VSMS depth table",
+                vsms_table_layout.clone(),
+            ),
+        ],
+    ) {
+        Ok(layout) => layout,
+        Err(error) => {
+            error!("{error}");
+            return;
+        }
+    };
 
     let rasterize_shader = shader_loader.load(crate::plugin::embedded_shader_path(
         "strand_rasterizer.wgsl",
@@ -685,12 +710,8 @@ pub fn run_shadow_pass(
         ..default()
     });
     pass.set_pipeline(shadow_pipeline);
-    pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
-    pass.set_bind_group(
-        allocator.table_group_idx,
-        allocator_pagetable_bind_group,
-        &[],
-    );
+    pass.set_bind_group(PAGING_BUFFER_GROUP, allocator_buffer_bind_group, &[]);
+    pass.set_bind_group(PAGING_TABLE_GROUP, allocator_pagetable_bind_group, &[]);
     pass.set_bind_group(layouts::rasterizer::RASTER_GROUP, bind_group, offsets);
     pass.set_bind_group(
         layouts::rasterizer::VSMS_OPACITY_WRITE_GROUP,

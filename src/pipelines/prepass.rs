@@ -23,7 +23,9 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use bevy_gpu_paging_allocator::BindGroupBuilder;
+use bevy_gpu_paging_allocator::{
+    BindGroupBuilder, PAGING_BUFFER_GROUP, PAGING_TABLE_GROUP, compose_pipeline_layout,
+};
 use bevy_vsms::request::VirtualSurfaceRequestBitmapRuntime;
 
 pub const TELEMETRY_HISTOGRAM_BINS: u32 = 32;
@@ -365,21 +367,25 @@ fn queue_prepass_pipeline(
         ),
     ]);
 
-    let mut max_group = allocator
-        .buffer_group_idx
-        .max(allocator.table_group_idx)
-        .max(layouts::prepass::PREPASS_GROUP);
+    let mut layout_claims = vec![
+        (PAGING_BUFFER_GROUP, "paging buffers", buffer_layout),
+        (PAGING_TABLE_GROUP, "paging tables", table_layout),
+        (
+            layouts::prepass::PREPASS_GROUP,
+            "strand prepass",
+            bind_group_layout,
+        ),
+    ];
     if uses_indirect_args_storage {
-        max_group = max_group.max(layouts::prepass::INDIRECT_ARGS_GROUP);
+        layout_claims.push((
+            layouts::prepass::INDIRECT_ARGS_GROUP,
+            "indirect arguments",
+            StrandPrepassPipeline::indirect_args_bind_group_layout_descriptor(),
+        ));
     }
-    let mut layout = vec![bind_group_layout.clone(); (max_group + 1) as usize];
-    layout[allocator.buffer_group_idx as usize] = buffer_layout;
-    layout[allocator.table_group_idx as usize] = table_layout;
-    layout[layouts::prepass::PREPASS_GROUP as usize] = bind_group_layout;
-    if uses_indirect_args_storage {
-        layout[layouts::prepass::INDIRECT_ARGS_GROUP as usize] =
-            StrandPrepassPipeline::indirect_args_bind_group_layout_descriptor();
-    }
+    let layout = compose_pipeline_layout("strand_prepass_pipeline", layout_claims)
+        .map_err(|error| error!("{error}"))
+        .ok()?;
 
     Some(
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -1126,12 +1132,8 @@ pub fn run_prepass(
     };
     pass.set_pipeline(broad_pipeline);
     pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
-    pass.set_bind_group(allocator.buffer_group_idx, allocator_buffer_bind_group, &[]);
-    pass.set_bind_group(
-        allocator.table_group_idx,
-        allocator_pagetable_bind_group,
-        &[],
-    );
+    pass.set_bind_group(PAGING_BUFFER_GROUP, allocator_buffer_bind_group, &[]);
+    pass.set_bind_group(PAGING_TABLE_GROUP, allocator_pagetable_bind_group, &[]);
     pass.set_bind_group(layouts::prepass::PREPASS_GROUP, bind_group, uniform_offsets);
     let span = diagnostics.time_span(&mut pass, "strand_prepass/broad_instances");
     pass.dispatch_workgroups(
