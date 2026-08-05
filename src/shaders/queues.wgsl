@@ -15,3 +15,9 @@ struct BinningQueue {
     tail: atomic<u32>,
     tasks: array<BinningTask>,
 };
+
+struct ShadingQueue {
+    head: atomic<u32>,
+    tail: atomic<u32>,
+    task_indices: array<u32>,
+};

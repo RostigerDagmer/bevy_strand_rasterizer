@@ -686,6 +686,11 @@ fn collect_benchmark_samples(
     let Some(raster_measurement) = diagnostics.get_measurement(&raster_path) else {
         return;
     };
+    let shading_path =
+        bevy::diagnostic::DiagnosticPath::new("render/strand_shading/shade/elapsed_gpu");
+    if diagnostics.get_measurement(&shading_path).is_none() {
+        return;
+    }
     if config.telemetry {
         let telemetry_path = bevy::diagnostic::DiagnosticPath::new(
             "render/strand_prepass/telemetry/allocated_pages",
@@ -717,7 +722,8 @@ fn collect_benchmark_samples(
         let path = diagnostic.path().as_str();
         if (path.starts_with("render/strand_prepass/")
             || path.starts_with("render/strand_rasterizer/")
-            || path.starts_with("render/strand_shadow_rasterizer/"))
+            || path.starts_with("render/strand_shadow_rasterizer/")
+            || path.starts_with("render/strand_shading/"))
             && path.ends_with("/elapsed_gpu")
             && let Some(value) = diagnostic.value()
         {

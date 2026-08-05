@@ -86,6 +86,7 @@ pub fn work_preparation_pass(
         prepass_bind_group,
         indirect_args_bind_group,
         prefix_indirect_args_bind_group,
+        shading_indirect_args_bind_group,
         dynamic_offsets,
     )) = create_prepass_bind_groups(
         render_device,
@@ -145,6 +146,9 @@ pub fn work_preparation_pass(
     let Some(prefix_indirect_args) = prepass_resources.prefix_indirect_args.as_ref() else {
         return;
     };
+    let Some(shading_queue) = prepass_resources.shading_queue.as_ref() else {
+        return;
+    };
     let Some(telemetry) = prepass_resources.telemetry.as_ref() else {
         return;
     };
@@ -196,9 +200,11 @@ pub fn work_preparation_pass(
         &prepass_bind_group,
         &indirect_args_bind_group,
         &prefix_indirect_args_bind_group,
+        &shading_indirect_args_bind_group,
         &dynamic_offsets,
         indirect_args,
         prefix_indirect_args,
+        shading_queue,
         telemetry,
         telemetry_settings.enabled,
         fine_binning_backend,

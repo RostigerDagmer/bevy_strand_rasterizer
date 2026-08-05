@@ -40,10 +40,12 @@ pub struct StrandPrepassResources {
     pub geos_prefix_buffer: Option<Buffer>,
     pub prepass_queue: Option<Buffer>,
     pub binning_queue: Option<Buffer>,
+    pub shading_queue: Option<Buffer>,
     pub strand_instances: Option<Buffer>,
     // products
     pub indirect_args: Option<Buffer>,
     pub prefix_indirect_args: Option<Buffer>,
+    pub shading_indirect_args: Option<Buffer>,
     pub telemetry: Option<Buffer>,
     pub projected_segments: Option<Buffer>,
     pub page_candidate_counts: Option<Buffer>,
@@ -112,6 +114,7 @@ pub struct StrandPrepassPipeline {
     pub coarse_interval_pipeline: Option<CachedComputePipelineId>,
     pub build_depth_warp_pipeline: Option<CachedComputePipelineId>,
     pub finalize_binning_pipeline: Option<CachedComputePipelineId>,
+    pub finalize_shading_dispatch_pipeline: Option<CachedComputePipelineId>,
     pub mark_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
     pub allocate_coarse_count_pages_pipeline: Option<CachedComputePipelineId>,
     pub finalize_prefix_dispatch_pipeline: Option<CachedComputePipelineId>,
@@ -174,6 +177,7 @@ impl StrandPrepassPipeline {
             &[
                 Self::storage_entry(layouts::prepass::PREPASS_QUEUE, false),
                 Self::storage_entry(layouts::prepass::BINNING_QUEUE, false),
+                Self::storage_entry(layouts::prepass::SHADING_QUEUE, false),
                 Self::uniform_entry(layouts::prepass::LIGHT_UNIFORM, true),
                 Self::storage_entry(layouts::prepass::CLUSTER_INDICES, true),
                 Self::storage_entry(layouts::prepass::CLUSTER_OFFSETS_AND_COUNTS, true),
@@ -316,6 +320,10 @@ fn queue_prepass_pipeline(
             invocation_dims.threads_per_workgroup,
         ),
         ShaderDefVal::UInt(
+            "SHADING_WORKGROUP_SIZE".into(),
+            crate::pipelines::shading::SHADING_WORKGROUP_SIZE,
+        ),
+        ShaderDefVal::UInt(
             "SIZEOF_METADATA".into(),
             std::mem::size_of::<StrandMeta>() as u32,
         ),
@@ -405,6 +413,7 @@ impl FromWorld for StrandPrepassPipeline {
             coarse_interval_pipeline: None,
             build_depth_warp_pipeline: None,
             finalize_binning_pipeline: None,
+            finalize_shading_dispatch_pipeline: None,
             mark_coarse_count_pages_pipeline: None,
             allocate_coarse_count_pages_pipeline: None,
             finalize_prefix_dispatch_pipeline: None,
@@ -434,15 +443,17 @@ pub fn create_prepass_bind_groups(
     cluster_offsets_and_counts: &BindingResource,
     clusterable_objects: &BindingResource,
     request_runtime: &VirtualSurfaceRequestBitmapRuntime,
-) -> Result<(BindGroup, BindGroup, BindGroup, Vec<u32>), ()> {
+) -> Result<(BindGroup, BindGroup, BindGroup, BindGroup, Vec<u32>), ()> {
     let layout = &pipeline.bind_group_layout;
     let prepass_queue = resources.prepass_queue.as_ref().ok_or(())?;
     let binning_queue = resources.binning_queue.as_ref().ok_or(())?;
+    let shading_queue = resources.shading_queue.as_ref().ok_or(())?;
     let visibility_flags_buffer = resources.visibility_flags_buffer.as_ref().ok_or(())?;
     let visible_geos_buffer = resources.visible_geos_buffer.as_ref().ok_or(())?;
     let geos_prefix_buffer = resources.geos_prefix_buffer.as_ref().ok_or(())?;
     let dispatch_args = resources.indirect_args.as_ref().ok_or(())?;
     let prefix_dispatch_args = resources.prefix_indirect_args.as_ref().ok_or(())?;
+    let shading_dispatch_args = resources.shading_indirect_args.as_ref().ok_or(())?;
     let telemetry = resources.telemetry.as_ref().ok_or(())?;
     let projected_segments = resources.projected_segments.as_ref().ok_or(())?;
     let page_candidate_counts = resources.page_candidate_counts.as_ref().ok_or(())?;
@@ -507,6 +518,10 @@ pub fn create_prepass_bind_groups(
                 BindGroupEntry {
                     binding: layouts::prepass::BINNING_QUEUE,
                     resource: binning_queue.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: layouts::prepass::SHADING_QUEUE,
+                    resource: shading_queue.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: layouts::prepass::LIGHT_UNIFORM,
@@ -714,6 +729,14 @@ pub fn create_prepass_bind_groups(
                 resource: prefix_dispatch_args.as_entire_binding(),
             }],
         ),
+        device.create_bind_group(
+            Some("strand_shading_indirect_args_bind_group"),
+            &pipeline.indirect_args_bind_group_layout,
+            &[BindGroupEntry {
+                binding: layouts::prepass::INDIRECT_ARGS,
+                resource: shading_dispatch_args.as_entire_binding(),
+            }],
+        ),
         // Dynamic offsets order follows bind-group layout declaration order.
         vec![view_light_uniform_offset.offset, view_offsets.offset],
     ))
@@ -796,9 +819,11 @@ pub fn run_prepass(
     bind_group: &BindGroup,
     indirect_args_bind_group: &BindGroup,
     prefix_indirect_args_bind_group: &BindGroup,
+    shading_indirect_args_bind_group: &BindGroup,
     uniform_offsets: &[u32],
     indirect_args: &Buffer,
     prefix_indirect_args: &Buffer,
+    shading_queue: &Buffer,
     telemetry: &Buffer,
     telemetry_enabled: bool,
     fine_binning_backend: FineBinningBackend,
@@ -838,6 +863,7 @@ pub fn run_prepass(
     encoder.clear_buffer(active_fine_tile_queue, 0, Some(8));
     encoder.clear_buffer(active_fine_tile_flags, 0, None);
     encoder.clear_buffer(active_fine_tile_block_counts, 0, None);
+    encoder.clear_buffer(shading_queue, 0, Some(8));
     if fine_binning_backend == FineBinningBackend::PageCsr {
         encoder.clear_buffer(page_candidate_counts, 0, None);
         encoder.clear_buffer(page_candidate_cursors, 0, None);
@@ -875,6 +901,11 @@ pub fn run_prepass(
     };
     let Some(finalize_binning_pipeline_id) = pipeline.finalize_binning_pipeline else {
         warn!("Finalize binning pipeline id not ready yet");
+        return;
+    };
+    let Some(finalize_shading_dispatch_pipeline_id) = pipeline.finalize_shading_dispatch_pipeline
+    else {
+        warn!("Finalize shading dispatch pipeline id not ready yet");
         return;
     };
     let Some(mark_coarse_count_pages_pipeline_id) = pipeline.mark_coarse_count_pages_pipeline
@@ -978,6 +1009,12 @@ pub fn run_prepass(
         pipeline_cache.get_compute_pipeline(finalize_binning_pipeline_id)
     else {
         warn!("Finalize binning pipeline not found");
+        return;
+    };
+    let Some(finalize_shading_dispatch_pipeline) =
+        pipeline_cache.get_compute_pipeline(finalize_shading_dispatch_pipeline_id)
+    else {
+        warn!("Finalize shading dispatch pipeline not found");
         return;
     };
     let Some(mark_coarse_count_pages_pipeline) =
@@ -1138,6 +1175,20 @@ pub fn run_prepass(
     let span = diagnostics.time_span(&mut pass, "strand_prepass/fine");
     pass.dispatch_workgroups_indirect(indirect_args, 0);
     span.end(&mut pass);
+    pass.set_pipeline(finalize_shading_dispatch_pipeline);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        shading_indirect_args_bind_group,
+        &[],
+    );
+    let span = diagnostics.time_span(&mut pass, "strand_prepass/finalize_shading_dispatch");
+    pass.dispatch_workgroups(1, 1, 1);
+    span.end(&mut pass);
+    pass.set_bind_group(
+        layouts::prepass::INDIRECT_ARGS_GROUP,
+        indirect_args_bind_group,
+        &[],
+    );
     let coarse_interval_pushconstants = PushConstants {
         num_elements: coarse_range_capacity,
         ..pushconstants
@@ -1372,6 +1423,7 @@ pub fn update_strand_prepass_pipeline(
     let coarse_interval_shader = shader_loader.load(prepass_shader_path.clone());
     let build_depth_warp_shader = shader_loader.load(prepass_shader_path.clone());
     let finalize_binning_shader = shader_loader.load(prepass_shader_path.clone());
+    let finalize_shading_dispatch_shader = shader_loader.load(prepass_shader_path.clone());
     let mark_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
     let allocate_coarse_count_pages_shader = shader_loader.load(prepass_shader_path.clone());
     let finalize_prefix_dispatch_shader = shader_loader.load(prepass_shader_path.clone());
@@ -1459,6 +1511,16 @@ pub fn update_strand_prepass_pipeline(
         &allocator,
         &dims,
         "finalize_binning",
+        true,
+    ) else {
+        return;
+    };
+    let Some(finalize_shading_dispatch_pipeline_id) = queue_prepass_pipeline(
+        &pipeline_cache,
+        finalize_shading_dispatch_shader,
+        &allocator,
+        &dims,
+        "finalize_shading_dispatch",
         true,
     ) else {
         return;
@@ -1630,6 +1692,7 @@ pub fn update_strand_prepass_pipeline(
     pipeline_res.coarse_interval_pipeline = Some(coarse_interval_pipeline_id);
     pipeline_res.build_depth_warp_pipeline = Some(build_depth_warp_pipeline_id);
     pipeline_res.finalize_binning_pipeline = Some(finalize_binning_pipeline_id);
+    pipeline_res.finalize_shading_dispatch_pipeline = Some(finalize_shading_dispatch_pipeline_id);
     pipeline_res.mark_coarse_count_pages_pipeline = Some(mark_coarse_count_pages_pipeline_id);
     pipeline_res.allocate_coarse_count_pages_pipeline =
         Some(allocate_coarse_count_pages_pipeline_id);

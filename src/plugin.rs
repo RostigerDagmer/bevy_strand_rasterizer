@@ -577,11 +577,13 @@ fn use_prepass_buffers(
 
     let needs_realloc = prepass_resources.prepass_queue.is_none()
         || prepass_resources.binning_queue.is_none()
+        || prepass_resources.shading_queue.is_none()
         || prepass_resources.visibility_flags_buffer.is_none()
         || prepass_resources.visible_geos_buffer.is_none()
         || prepass_resources.geos_prefix_buffer.is_none()
         || prepass_resources.indirect_args.is_none()
         || prepass_resources.prefix_indirect_args.is_none()
+        || prepass_resources.shading_indirect_args.is_none()
         || prepass_resources.telemetry.is_none()
         || prepass_resources.projected_segments.is_none()
         || prepass_resources.page_candidate_counts.is_none()
@@ -706,6 +708,8 @@ fn use_prepass_buffers(
             + (prepass_capacity as u64) * (std::mem::size_of::<FinePrepassTask>() as u64);
         let binning_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
             + (binning_capacity as u64) * (std::mem::size_of::<BinningTask>() as u64);
+        let shading_queue_bytes = (QUEUE_HEADER_WORDS * std::mem::size_of::<u32>()) as u64
+            + (binning_capacity as u64) * std::mem::size_of::<u32>() as u64;
         let projected_segments_bytes = (binning_capacity as u64)
             * std::mem::size_of::<crate::pipelines::task_contract::ProjectedSegment>() as u64;
         let page_candidate_counts_bytes =
@@ -808,6 +812,12 @@ fn use_prepass_buffers(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        prepass_resources.shading_queue = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_shading_queue"),
+            size: shading_queue_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
         prepass_resources.projected_segments = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_projected_segments"),
             size: projected_segments_bytes,
@@ -884,6 +894,12 @@ fn use_prepass_buffers(
         }));
         prepass_resources.prefix_indirect_args = Some(device.create_buffer(&BufferDescriptor {
             label: Some("strand_prefix_indirect_args"),
+            size: (3 * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        prepass_resources.shading_indirect_args = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("strand_shading_indirect_args"),
             size: (3 * std::mem::size_of::<u32>()) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -1135,6 +1151,9 @@ fn use_prepass_buffers(
     if let Some(queue_buf) = &prepass_resources.binning_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
+    if let Some(queue_buf) = &prepass_resources.shading_queue {
+        render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
+    }
     if let Some(queue_buf) = &prepass_resources.raster_work_queue {
         render_queue.write_buffer(queue_buf, 0, bytemuck::cast_slice(&zero_queue_hdr));
     }
@@ -1157,6 +1176,9 @@ fn use_prepass_buffers(
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
     }
     if let Some(indirect) = &prepass_resources.prefix_indirect_args {
+        render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
+    }
+    if let Some(indirect) = &prepass_resources.shading_indirect_args {
         render_queue.write_buffer(indirect, 0, bytemuck::cast_slice(&zero_dispatch));
     }
     if let Some(free_heads) = &prepass_resources.free_heads {

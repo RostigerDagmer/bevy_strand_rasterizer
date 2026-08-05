@@ -56,6 +56,7 @@ pub mod prepass {
     pub const ACTIVE_FINE_TILE_FLAGS: u32 = 59;
     pub const ACTIVE_FINE_TILE_BLOCK_COUNTS: u32 = 60;
     pub const ACTIVE_FINE_TILE_BLOCK_OFFSETS: u32 = 61;
+    pub const SHADING_QUEUE: u32 = 62;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -140,6 +141,7 @@ pub mod prepass {
                 "ACTIVE_FINE_TILE_BLOCK_OFFSETS".into(),
                 ACTIVE_FINE_TILE_BLOCK_OFFSETS,
             ),
+            ShaderDefVal::UInt("SHADING_QUEUE".into(), SHADING_QUEUE),
         ]
     }
 }
@@ -407,6 +409,7 @@ pub mod shading {
     pub const SHADOW_DOM_SURFACE_IDS: u32 = 6;
     pub const SHADOW_HISTORY_PREV: u32 = 7;
     pub const SHADOW_HISTORY_NEXT: u32 = 8;
+    pub const SHADING_QUEUE: u32 = 9;
 
     pub fn shader_defs() -> Vec<ShaderDefVal> {
         vec![
@@ -444,6 +447,7 @@ pub mod shading {
             ShaderDefVal::UInt("SHADOW_DOM_SURFACE_IDS".into(), SHADOW_DOM_SURFACE_IDS),
             ShaderDefVal::UInt("SHADOW_HISTORY_PREV".into(), SHADOW_HISTORY_PREV),
             ShaderDefVal::UInt("SHADOW_HISTORY_NEXT".into(), SHADOW_HISTORY_NEXT),
+            ShaderDefVal::UInt("SHADING_QUEUE".into(), SHADING_QUEUE),
         ]
     }
 }

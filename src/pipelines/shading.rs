@@ -2,6 +2,7 @@ use bevy::{
     pbr::ViewLightsUniformOffset,
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
             BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType,
@@ -25,11 +26,11 @@ use crate::{
         prepass::StrandPrepassResources,
         shadows::{NUM_DOM_SLICES, StrandShadowPipeline},
     },
-    plugin::MAX_TEXTURE_EXTENT,
+    plugin::{MAX_COMPUTE_WORKGROUPS_PER_DIMENSION, MAX_TEXTURE_EXTENT},
     shader_types::PushConstants,
 };
 
-const SHADING_WORKGROUP_SIZE: u32 = 128;
+pub const SHADING_WORKGROUP_SIZE: u32 = 128;
 
 #[derive(Resource, Default)]
 pub struct StrandShadingResources {
@@ -147,6 +148,16 @@ impl StrandShadingPipeline {
                         access: StorageTextureAccess::WriteOnly,
                         format: TextureFormat::Rgba16Float,
                         view_dimension: TextureViewDimension::D2Array,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: layouts::shading::SHADING_QUEUE,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -312,6 +323,7 @@ pub fn create_strand_shading_bind_group(
         .as_ref()
         .ok_or(())?;
     let binning_queue = prepass_resources.binning_queue.as_ref().ok_or(())?;
+    let shading_queue = prepass_resources.shading_queue.as_ref().ok_or(())?;
     let frustum_table = prepass_resources.frustum_table.as_ref().ok_or(())?;
     let strand_instances = prepass_resources.strand_instances.as_ref().ok_or(())?;
     let shadow_dom_surface_ids = prepass_resources
@@ -359,6 +371,10 @@ pub fn create_strand_shading_bind_group(
                 BindGroupEntry {
                     binding: layouts::shading::SHADOW_HISTORY_NEXT,
                     resource: BindingResource::TextureView(shadow_history_next),
+                },
+                BindGroupEntry {
+                    binding: layouts::shading::SHADING_QUEUE,
+                    resource: shading_queue.as_entire_binding(),
                 },
             ],
         ),
@@ -440,6 +456,8 @@ pub fn run_shading_pass(
     depth_table_bind_group: &BindGroup,
     offsets: &[u32],
 ) {
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let Some(shading_pipeline_id) = pipeline.shading_pipeline else {
         warn!("Shading pipeline id not ready");
         return;
@@ -457,24 +475,10 @@ pub fn run_shading_pass(
         return;
     };
 
-    let task_capacity = prepass_resources.binning_task_capacity;
-    if task_capacity == 0 {
+    let Some(shading_indirect_args) = prepass_resources.shading_indirect_args.as_ref() else {
+        warn!("Shading indirect arguments are not ready yet");
         return;
-    }
-
-    let total_workgroups = task_capacity.div_ceil(SHADING_WORKGROUP_SIZE);
-    if total_workgroups == 0 {
-        return;
-    }
-    let workgroups_x = total_workgroups.min(65_535);
-    let workgroups_y = total_workgroups.div_ceil(workgroups_x);
-    if workgroups_y > 65_535 {
-        warn!(
-            "Shading dispatch too large: workgroups=({}, {}, 1), task_capacity={}",
-            workgroups_x, workgroups_y, task_capacity
-        );
-        return;
-    }
+    };
 
     let encoder = render_context.command_encoder();
     if resources
@@ -528,14 +532,14 @@ pub fn run_shading_pass(
     );
 
     let pushconstants = PushConstants {
-        num_elements: task_capacity,
-        workgroup_offset: workgroups_x.saturating_mul(SHADING_WORKGROUP_SIZE),
-        scan_load_base: 0,
-        scan_save_base: 0,
+        workgroup_offset: MAX_COMPUTE_WORKGROUPS_PER_DIMENSION
+            .saturating_mul(SHADING_WORKGROUP_SIZE),
         ..Default::default()
     };
     pass.set_immediates(0, bytemuck::bytes_of(&pushconstants));
-    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    let span = diagnostics.time_span(&mut pass, "strand_shading/shade");
+    pass.dispatch_workgroups_indirect(shading_indirect_args, 0);
+    span.end(&mut pass);
     resources
         .shadow_history_index
         .fetch_xor(1, Ordering::Relaxed);

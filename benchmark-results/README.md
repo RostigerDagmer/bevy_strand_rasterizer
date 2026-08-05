@@ -186,6 +186,29 @@ final packed implementation cuts combined emission from 0.428 ms to 0.196 ms (-5
 squirrel. Its new storage scales with padded fine XY tiles, not fine depth cells: one word each for
 the queue and mark bitset plus two words per 256-tile scan block.
 
+## Camera-only shading queue
+
+Fine task production now appends the binning-task index of every accepted camera segment to a
+dedicated shading queue. Shadow-frustum tasks never enter this queue. A one-thread finalizer writes
+an exact 128-thread-workgroup indirect dispatch, so shading no longer launches over the allocated
+binning capacity. Queue entries are one `u32` index rather than a duplicate 16-byte `BinningTask`.
+
+The shading kernel retains only the final partial-workgroup tail predicate. Camera-frustum,
+instance, paging-table, pointer, strand, segment, index, material, zero-length, and atlas guards
+were removed; these are invariants of host-validated assets and accepted task production. The
+benchmark harness now records shading GPU timestamps for subsequent arithmetic work.
+
+| Stage | Median (ms) | Mean (ms) | p95 (ms) | p99 (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Queue append overhead in fine pass | +0.014 | +0.015 | +0.015 | +0.014 |
+| Indirect dispatch finalizer | 0.005 | 0.005 | 0.005 | 0.005 |
+| Camera shading | 1.291 | 1.337 | 1.495 | 1.680 |
+
+The preceding squirrel Nsight capture measured shading at approximately 2.30 ms, making the new
+1.29 ms median roughly 44% lower. That comparison crosses profiling tools and is therefore an
+estimate, not a paired harness result. `41-shading-queue-bounded-tail.json` establishes the
+canonical timestamp-query baseline for all following shading optimizations.
+
 ## Changes
 
 - `01-baseline.json`: original shared-memory reduction.
@@ -223,6 +246,10 @@ the queue and mark bitset plus two words per 256-tile scan block.
   original traversal order and a 12-byte explicit descriptor.
 - `39-packed-active-tile-index.json`: final active queue representation, packing the existing dense
   fine-stack index into one word.
+- `40-shading-queue-indirect-unchecked.json`: camera-only packed task-index queue, indirect shading
+  dispatch, removal of host-data guards, and the first harness-recorded shading timestamps.
+- `41-shading-queue-bounded-tail.json`: final queue version, bounding the last-workgroup tail by
+  queue capacity so a saturated producer remains safe.
 
 The final implementation includes the hot-loop cleanup, subgroup tree reduction, fill-pass read
 reduction, compact fine-segment references, and allocated-page prefix dispatch. Percentiles are

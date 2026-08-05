@@ -32,11 +32,11 @@
 
 #import "embedded://strand_software_rasterizer/shaders/task_contract.wgsl"::{
     BinningTask,
-    unpack_binning_frustum,
 }
 
 #import "embedded://strand_software_rasterizer/shaders/queues.wgsl"::{
     BinningQueue,
+    ShadingQueue,
 }
 
 #import "embedded://strand_software_rasterizer/shaders/common.wgsl"::{
@@ -44,7 +44,6 @@
     // PI,
     // PI_HALF,
     // SQRT_2_PI,
-    is_valid_ptr,
     find_clip_bounds,
     normalize_depth01,
     world_to_screen_raw,
@@ -97,6 +96,7 @@ struct FrustumDesc {
 @group(#{SHADING_GROUP}) @binding(#{VIEW_UNIFORM}) var<uniform> view: View;
 @group(#{SHADING_GROUP}) @binding(#{LIGHT_UNIFORM}) var<uniform> lights: types::Lights;
 @group(#{SHADING_GROUP}) @binding(#{BINNING_QUEUE}) var<storage, read> binning_queue: BinningQueue;
+@group(#{SHADING_GROUP}) @binding(#{SHADING_QUEUE}) var<storage, read> shading_queue: ShadingQueue;
 @group(#{SHADING_GROUP}) @binding(#{FRUSTUM_TABLE}) var<storage, read> frustum_table: array<FrustumDesc>;
 @group(#{SHADING_GROUP}) @binding(#{OUTPUT_TEXTURE}) var output_texture: texture_storage_2d_array<rgba8unorm, write>;
 @group(#{SHADING_GROUP}) @binding(#{STRAND_INSTANCES}) var<storage, read> strand_instances: array<StrandInstance>;
@@ -610,82 +610,44 @@ fn shade_strands(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
     let task_idx = global_id.y * pc.workgroup_offset + global_id.x;
-    if task_idx >= pc.num_elements {
+    // Indirect dispatch is exact to the workgroup; only the final partial
+    // workgroup needs a runtime tail check.
+    let shading_task_count = min(
+        atomicLoad(&shading_queue.tail),
+        arrayLength(&shading_queue.task_indices),
+    );
+    if task_idx >= shading_task_count {
         return;
     }
-    if task_idx >= atomicLoad(&binning_queue.tail) {
-        return;
-    }
-    let task: BinningTask = binning_queue.tasks[task_idx];
-    let frustum_id = unpack_binning_frustum(task.packed_field);
-    if frustum_id >= arrayLength(&frustum_table) {
-        return;
-    }
-    let frustum = frustum_table[frustum_id];
-    if frustum.kind != 0u {
-        return; // Camera frusta only
-    }
-
+    let binning_task_idx = shading_queue.task_indices[task_idx];
+    let task: BinningTask = binning_queue.tasks[binning_task_idx];
     let inst_id = task.id_info;
-    if inst_id >= arrayLength(&strand_instances) {
-        return;
-    }
     let instance = strand_instances[inst_id];
     let vertex_id = instance.vertex_id;
     let index_id = instance.index_id;
     let meta_id = instance.meta_id;
     let material_id = instance.material_id;
-    if vertex_id >= arrayLength(&t_vertices) || index_id >= arrayLength(&t_indices) || meta_id >= arrayLength(&t_strand_metadata) || material_id >= arrayLength(&t_materials) {
-        return;
-    }
 
     let vertex_ptr = t_vertices[vertex_id];
     let index_ptr = t_indices[index_id];
     let meta_ptr = t_strand_metadata[meta_id];
     let material_ptr = t_materials[material_id];
-    if !is_valid_ptr(vertex_ptr) || !is_valid_ptr(index_ptr) || !is_valid_ptr(meta_ptr) || !is_valid_ptr(material_ptr) {
-        return;
-    }
 
     let strand_local = task.chunk_id;
     let meta_base = meta_ptr.offset / SIZEOF_METADATA;
-    let meta_count = meta_ptr.size / SIZEOF_METADATA;
-    if strand_local >= meta_count {
-        return;
-    }
     let strand_meta = strand_metadata[meta_ptr.slab].ms[meta_base + strand_local];
-    if strand_meta.count < 2u {
-        return;
-    }
 
     let seg_idx = task.seg_idx;
-    let index_count = index_ptr.size / 4u;
-    if seg_idx + 1u >= index_count {
-        return;
-    }
-    if seg_idx < strand_meta.offset {
-        return;
-    }
     let seg_local = seg_idx - strand_meta.offset;
-    if seg_local >= (strand_meta.count - 1u) {
-        return;
-    }
 
     let index_base = index_ptr.offset / 4u;
     let vertex_base = vertex_ptr.offset / SIZEOF_VERTEX;
     let i0 = indices[index_ptr.slab].is[index_base + seg_idx];
     let i1 = indices[index_ptr.slab].is[index_base + seg_idx + 1u];
-    let vertex_count = vertex_ptr.size / SIZEOF_VERTEX;
-    if i0 >= vertex_count || i1 >= vertex_count {
-        return;
-    }
 
     let v0 = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + i0], 1.0);
     let v1 = instance.world_from_local * vec4<f32>(vertices[vertex_ptr.slab].vs[vertex_base + i1], 1.0);
     let U = normalize(v1.xyz - v0.xyz);
-    if all(U == vec3<f32>(0.0)) {
-        return;
-    }
 
     let tangent = U;
     let camera_dir = normalize(view.world_position - v0.xyz);
@@ -693,20 +655,12 @@ fn shade_strands(
     let V = normalize(cross(binormal, tangent));
 
     let material_base = material_ptr.offset / SIZEOF_MATERIAL;
-    let material_count = material_ptr.size / SIZEOF_MATERIAL;
-    if strand_meta.material_idx >= material_count {
-        return;
-    }
     let material = materials[material_ptr.slab].mats[material_base + strand_meta.material_idx];
 
     var accum_color = vec4<f32>(0.0, 0.0, 0.0, material.absorption_color.w);
     let layer = inst_id;
     let atlas_dims = textureDimensions(shadow_history_prev, 0);
-    let atlas_capacity = atlas_dims.x * atlas_dims.y;
     let atlas_idx = strand_meta.offset + seg_local;
-    if atlas_idx >= atlas_capacity {
-        return;
-    }
     let history_coord = shading_atlas_coord(atlas_idx, atlas_dims);
     let strand_midpoint = mix(v0.xyz, v1.xyz, 0.5);
     let current_scattering_visibility = sample_average_shadow_visibility(strand_midpoint);
@@ -737,7 +691,5 @@ fn shade_strands(
 
     textureStore(output_texture, history_coord, i32(layer), accum_color);
     let next_atlas_idx = atlas_idx + 1u;
-    if next_atlas_idx < atlas_capacity && seg_local + 1u < strand_meta.count {
-        textureStore(output_texture, shading_atlas_coord(next_atlas_idx, atlas_dims), i32(layer), accum_color);
-    }
+    textureStore(output_texture, shading_atlas_coord(next_atlas_idx, atlas_dims), i32(layer), accum_color);
 }

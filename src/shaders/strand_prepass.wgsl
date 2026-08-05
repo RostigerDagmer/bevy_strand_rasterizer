@@ -44,9 +44,11 @@
 #import "embedded://strand_software_rasterizer/shaders/queues.wgsl"::{
     FinePrepassQueue,
     BinningQueue,
+    ShadingQueue,
 }
 
 const WORKGROUP_SIZE: u32 = #WORKGROUP_SIZE;
+const SHADING_WORKGROUP_SIZE: u32 = #SHADING_WORKGROUP_SIZE;
 const FINE_WORKGROUP_SIZE: u32 = #FINE_WORKGROUP_SIZE;
 const SCAN_SUBGROUP_THREADS: u32 = #NUMBER_OF_THREADS_PER_SUBGROUP;
 const PAGE_SCAN_SUBGROUPS: u32 = COARSE_COUNT_PAGE_SIZE / SCAN_SUBGROUP_THREADS;
@@ -213,6 +215,7 @@ struct BroadInstanceMeta {
 @group(#{PREPASS_GROUP}) @binding(#{CLUSTER_OFFSETS_AND_COUNTS}) var<storage, read> cluster_offsets_and_counts: types::ClusterOffsetsAndCounts;
 @group(#{PREPASS_GROUP}) @binding(#{PREPASS_QUEUE}) var<storage, read_write> fine_phase_queue: FinePrepassQueue;
 @group(#{PREPASS_GROUP}) @binding(#{BINNING_QUEUE}) var<storage, read_write> binning_queue: BinningQueue;
+@group(#{PREPASS_GROUP}) @binding(#{SHADING_QUEUE}) var<storage, read_write> shading_queue: ShadingQueue;
 @group(#{PREPASS_GROUP}) @binding(#{VISIBLE_FLAGS}) var<storage, read_write> visible_flags: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{VISIBLE_GEO}) var<storage, read_write> visible_geos: array<u32>;
 @group(#{PREPASS_GROUP}) @binding(#{GEO_PREFIX}) var<storage, read_write> geo_prefix: array<u32>;
@@ -810,6 +813,25 @@ fn finalize_binning() {
     dispatch_args[2] = 1u;
 }
 
+@compute @workgroup_size(1, 1, 1)
+fn finalize_shading_dispatch() {
+    let shading_task_count = min(
+        atomicLoad(&shading_queue.tail),
+        arrayLength(&shading_queue.task_indices),
+    );
+    let group_count = ceil_div_u32(shading_task_count, SHADING_WORKGROUP_SIZE);
+    if group_count == 0u {
+        dispatch_args[0] = 0u;
+        dispatch_args[1] = 0u;
+        dispatch_args[2] = 0u;
+        return;
+    }
+    let x = min(group_count, MAX_DISPATCH_WORKGROUPS_PER_DIMENSION);
+    dispatch_args[0] = x;
+    dispatch_args[1] = ceil_div_u32(group_count, x);
+    dispatch_args[2] = 1u;
+}
+
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn coarse_interval_pass(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
@@ -1092,12 +1114,19 @@ fn fine_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let write_idx = atomicAdd(&binning_queue.tail, 1u);
             if write_idx < arrayLength(&binning_queue.tasks) && write_idx < arrayLength(&projected_segments) {
-                binning_queue.tasks[write_idx] = BinningTask(
+                let binning_task = BinningTask(
                     task.inst_id,
                     task.strand_local,
                     seg_index,
                     packed_field,
                 );
+                binning_queue.tasks[write_idx] = binning_task;
+                if frustum.kind == 0u {
+                    let shading_idx = atomicAdd(&shading_queue.tail, 1u);
+                    if shading_idx < arrayLength(&shading_queue.task_indices) {
+                        shading_queue.task_indices[shading_idx] = write_idx;
+                    }
+                }
                 let screen_size = max(vec2<f32>(1.0), vec2<f32>(f32(frustum.screen_width), f32(frustum.screen_height)));
                 projected_segments[write_idx] = ProjectedSegment(
                     pack2x16unorm(clamp(clipped.p0.xy / screen_size, vec2<f32>(0.0), vec2<f32>(1.0))),
