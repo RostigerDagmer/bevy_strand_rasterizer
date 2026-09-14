@@ -14,7 +14,7 @@ The runtime path is: prepass/work setup -> shadow -> shadow-stampback | shading 
 - `src/resources.rs`: render resources/settings (tile debug, culling, intermediate buffers/state).
 - `src/shader_types.rs`: host-side WGSL-compatible structs/push constants.
 - `src/dson/`: DSF/DSO strand asset loading/parsing used by the demo app.
-- `src/main.rs`: local demo harness that exercises the plugin in a Bevy app.
+- `examples`: local demo harness that exercises the plugin in a Bevy app.
 
 ## Local dependency crates
 
