@@ -41,6 +41,9 @@ pub fn strand_shadow_rasterizer_pass(
     let allocator = world.resource::<GpuPagingAllocator>();
     let vsms_runtime = world.resource::<VirtualSurfaceRuntime>();
     let raster_resources = world.resource::<StrandRasterizerResources>();
+    if raster_resources.strand_count.is_none() {
+        return;
+    }
     let prepass_resources = world.resource::<StrandPrepassResources>();
     let shadow_pipeline = world.resource::<StrandShadowPipeline>();
     let shadow_resources = world.resource::<StrandShadowResources>();

@@ -45,7 +45,17 @@ pub fn strand_rasterizer_pass(
     let prepass_resources = world.resource::<StrandPrepassResources>();
     let shading_resources = world.resource::<StrandShadingResources>();
     let raster_resources = world.resource::<StrandRasterizerResources>();
+    if raster_resources.strand_count.is_none() {
+        return;
+    }
     let invocation_dims = world.resource::<ComputeInvocationDims>();
+
+    // Core3d also invokes this node for shadow-map and other auxiliary views.
+    // Only views carrying an extracted FroxelConfig are strand camera targets.
+    let Some(frustrum) = raster_resources.frustrum_config.get(&view_entity) else {
+        return;
+    };
+
     let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms
     let light_meta = world.resource::<LightMeta>(); // Get light meta
     // let global_clusterable_object_meta = world.resource::<GlobalClusterableObjectMeta>();
@@ -85,10 +95,6 @@ pub fn strand_rasterizer_pass(
     };
 
     // Get the dimensions to calculate dispatch size
-    let Some(frustrum) = raster_resources.frustrum_config.get(&view_entity) else {
-        warn!("No frustum size defined.");
-        return;
-    };
     let Some(&frustum_id) = raster_resources.frustum_ids.get(&view_entity) else {
         warn!("No frustum id defined for view {:?}", view_entity);
         return;

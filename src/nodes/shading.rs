@@ -39,6 +39,17 @@ pub fn strand_shading_pass(
     let prepass_resources = world.resource::<StrandPrepassResources>();
     let shading_resources = world.resource::<StrandShadingResources>();
     let allocator = world.resource::<GpuPagingAllocator>();
+    let raster_resources = world.resource::<StrandRasterizerResources>();
+    if raster_resources.strand_count.is_none() {
+        return;
+    }
+
+    // Core3d also invokes this node for shadow-map and other auxiliary views.
+    // Only views carrying an extracted FroxelConfig are strand camera targets.
+    if !raster_resources.frustrum_config.contains_key(&view_entity) {
+        return;
+    }
+
     let vsms_runtime = world.resource::<VirtualSurfaceRuntime>();
     let shadow_pipeline = world.resource::<StrandShadowPipeline>();
     let view_uniforms = world.resource::<ViewUniforms>(); // Get current view uniforms

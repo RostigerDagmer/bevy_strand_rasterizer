@@ -1,5 +1,7 @@
 mod perf;
 use bevy::{
+    camera::{Exposure, Hdr},
+    core_pipeline::tonemapping::Tonemapping,
     light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
     prelude::*,
     render::{
@@ -43,12 +45,13 @@ pub fn spawn_camera(commands: &mut Commands, transform: Transform, focus: Vec3) 
     commands.spawn((
         FroxelConfig {
             screen_height: 2160,
-            screen_width: 2160,
+            screen_width: 1920,
             depth_slices: 16,
             froxel_size_x: 8,
             froxel_size_y: 8,
             ..Default::default()
         },
+        Hdr,
         transform,
         PanOrbitCamera {
             focus,
@@ -61,6 +64,8 @@ pub fn spawn_camera(commands: &mut Commands, transform: Transform, focus: Vec3) 
             ..default()
         }),
         TieFroxelsToView::Native,
+        Exposure { ev100: 9.0 },
+        Tonemapping::AcesFitted,
         bevy::core_pipeline::prepass::DepthPrepass,
     ));
 }
@@ -89,7 +94,7 @@ pub fn spawn_floor_and_light(
         DirectionalLight {
             illuminance: 10000.0,
             shadow_maps_enabled: true,
-            contact_shadows_enabled: true,
+            contact_shadows_enabled: false,
             ..default()
         },
         Transform {

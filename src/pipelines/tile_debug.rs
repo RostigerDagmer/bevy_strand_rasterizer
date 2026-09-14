@@ -135,7 +135,7 @@ impl FromWorld for TileDebugPipeline {
                 shader_defs: layouts::tile_debug::shader_defs(),
                 entry_point: Some("fragment".into()),
                 targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::Rgba8UnormSrgb,
+                    format: TextureFormat::Rgba16Float,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],

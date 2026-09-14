@@ -37,6 +37,9 @@ pub fn work_preparation_pass(
     let prepass_pipeline = world.resource::<StrandPrepassPipeline>();
     let prepass_resources = world.resource::<StrandPrepassResources>();
     let raster_resources = world.resource::<StrandRasterizerResources>();
+    if raster_resources.strand_count.is_none() {
+        return;
+    }
     let request_runtime = world.resource::<VirtualSurfaceRequestBitmapRuntime>();
     let invocation_dims = world.resource::<ComputeInvocationDims>();
     let cull_settings = world.resource::<StochasticCullSettings>();
