@@ -6,3 +6,5 @@ crates
 *.dsx
 .venv
 assets/squirrel
+strand-bench.json
+benchmark-results
